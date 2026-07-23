@@ -38,6 +38,15 @@ function pod(uid: string, name: string, container: string): K8sObject {
   }
 }
 
+// By label, not by index: a single-container pod renders no container select
+// at all, so the Tail one is not at a fixed position in the toolbar.
+function tailSelect(wrapper: ReturnType<typeof mount>) {
+  return wrapper
+    .findAll("label")
+    .find((l) => l.text().startsWith("Tail"))!
+    .get("select")
+}
+
 describe("PodLogsTab", () => {
   beforeEach(() => {
     startSpy.mockClear()
@@ -79,7 +88,7 @@ describe("PodLogsTab", () => {
     await nextTick()
     expect(startSpy.mock.calls.at(-1)?.[0]).toContain("tailLines=500")
 
-    await wrapper.findAll("select")[1]?.setValue("all")
+    await tailSelect(wrapper).setValue("all")
 
     const url = startSpy.mock.calls.at(-1)?.[0] as string
     expect(url).not.toContain("tailLines")

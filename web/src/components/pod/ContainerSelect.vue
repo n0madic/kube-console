@@ -10,9 +10,13 @@ import type { K8sObject } from "@/api/types"
 import type { ContainerKind } from "@/utils/podHelpers"
 import { podContainers } from "@/utils/podHelpers"
 
-const props = withDefaults(defineProps<{ object: K8sObject; disabled?: boolean }>(), {
-  disabled: false,
-})
+// `title` is a declared prop, not a fallthrough attribute: the component has
+// its own reason to explain (below), so it must decide which one wins rather
+// than have the caller's land on the label unconditionally.
+const props = withDefaults(
+  defineProps<{ object: K8sObject; disabled?: boolean; title?: string }>(),
+  { disabled: false, title: undefined },
+)
 
 const model = defineModel<string>({ required: true })
 
@@ -23,6 +27,21 @@ const GROUP_LABELS: Record<ContainerKind, string> = {
 }
 
 const containers = computed(() => podContainers(props.object))
+
+// A pod with exactly one container has nothing to pick — a popup that opens
+// onto its own current value is not a choice — so the picker is locked. The
+// control itself stays a <select>: the toolbar keeps one shape, and the name
+// still reads as what logs and exec are bound to.
+const sole = computed(() => containers.value.length === 1)
+
+const locked = computed(() => props.disabled || sole.value)
+
+// Dimmed *and* unclickable is ambiguous on its own; the two reasons differ in
+// what the user can do about them, so each says so. The caller's title wins:
+// a running exec session is the more specific state of the two.
+const hint = computed(() =>
+  props.title ?? (sole.value ? "The only container in this pod" : undefined),
+)
 
 // Grouping only pays off when more than one kind is present — a plain app pod
 // would otherwise get a lone "Containers" heading over its single option.
@@ -38,14 +57,18 @@ const groups = computed(() =>
 </script>
 
 <template>
-  <!-- Disabled has to *look* disabled: the Terminal tab locks the picker for
-       the lifetime of an exec session, and an unstyled locked select just
-       reads as a click that did nothing. -->
-  <label class="flex items-center gap-1.5" :class="disabled ? 'cursor-not-allowed opacity-60' : ''">
+  <!-- Locked has to *look* locked: the Terminal tab holds this picker for the
+       lifetime of an exec session, and an unstyled select that ignores clicks
+       just reads as a click that did nothing. -->
+  <label
+    class="flex items-center gap-1.5"
+    :class="locked ? 'cursor-not-allowed opacity-60' : ''"
+    :title="hint"
+  >
     <span class="text-slate-500 dark:text-slate-400">Container</span>
     <select
       v-model="model"
-      :disabled="disabled"
+      :disabled="locked"
       class="rounded-md border border-slate-300 bg-white px-2 py-1 disabled:cursor-not-allowed dark:border-slate-600 dark:bg-slate-800"
     >
       <template v-if="groups.length > 1">

@@ -524,11 +524,14 @@ with the tabs (Logs restarts its stream on every change and must not fire on
 mount), but both use `defaultContainerName` — the
 `kubectl.kubernetes.io/default-container` annotation when it names a container
 of *this* pod (a stale one would preselect a 404), else the first regular one.
-The Terminal tab drops the picker entirely when the pod has exactly **one**
-container (`podContainers().length === 1`) and shows that name as a pill: a
-control with a single option is not a choice, and the session lock would then
-dim it for no reason. Logs keeps its picker either way — its toolbar is built
-around a stream that restarts on every change.
+With exactly **one** container it is not a `<select>` at all but a static pill:
+a control whose popup opens onto its own current value is not a choice, and the
+Terminal tab's session lock would dim it for no reason. That lives in
+`ContainerSelect`, not in the tabs, so Logs and Terminal cannot drift apart —
+and it is why the component is `inheritAttrs: false` and binds `$attrs` to the
+`<label>` branch only: the callers' `title` explains the lock, which the pill
+does not have. Tests must not reach the tabs' toolbars by select index
+(`PodLogsTab`'s Tail select is found by label).
 
 Header buttons come from a second registry, the pure `utils/resourceActions.ts`
 (`actionsFor` keyed `<apiVersion>/<Kind>`, same convention as

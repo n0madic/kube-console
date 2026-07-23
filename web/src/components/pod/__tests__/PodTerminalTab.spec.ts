@@ -215,33 +215,16 @@ describe("PodTerminalTab", () => {
     expect(wrapper.text()).not.toContain("kubectl debug")
   })
 
-  // A picker with exactly one option is not a choice: the name is shown as a
-  // pill, and exec still targets it.
-  it("shows the sole container as a pill instead of a picker", async () => {
+  // ContainerSelect locks itself for a single-container pod (its own spec
+  // covers that); what matters here is that exec is still bound to that
+  // container, with no pick ever made.
+  it("execs into the sole container of a single-container pod", async () => {
     const wrapper = mountTab(pod("u1", "pod-a", ["app"]))
-
-    expect(wrapper.find("select").exists()).toBe(false)
-    expect(wrapper.text()).toContain("app")
+    expect(wrapper.get("select").attributes("disabled")).toBeDefined()
 
     await startButton(wrapper).trigger("click")
     await flushPromises()
     expect(startSpy.mock.calls[0]?.[0]).toMatchObject({ container: "app" })
-  })
-
-  it("keeps the picker when the pod has more than one container", () => {
-    const wrapper = mountTab(pod("u1", "pod-a", ["app", "sidecar"]))
-
-    expect(wrapper.find("select").exists()).toBe(true)
-  })
-
-  // An init or ephemeral container beside the app container is still a choice
-  // (and exec into a finished init container fails), so the picker stays.
-  it("keeps the picker when the second container is an init container", () => {
-    const wrapper = mountTab(
-      pod("u1", "pod-a", ["app"], { spec: { initContainers: [{ name: "setup" }] } }),
-    )
-
-    expect(wrapper.find("select").exists()).toBe(true)
   })
 
   it("preselects the container named by the kubectl default-container annotation", async () => {

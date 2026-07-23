@@ -9,6 +9,8 @@ function pod(spec: Record<string, unknown>): K8sObject {
 }
 
 const APP_ONLY = pod({ containers: [{ name: "app" }] })
+const TWO_REGULAR = pod({ containers: [{ name: "app" }, { name: "sidecar" }] })
+const APP_AND_INIT = pod({ containers: [{ name: "app" }], initContainers: [{ name: "init-db" }] })
 const ALL_KINDS = pod({
   containers: [{ name: "app" }],
   initContainers: [{ name: "init-db" }],
@@ -33,12 +35,39 @@ describe("ContainerSelect", () => {
     ])
   })
 
-  // A lone "Containers" heading over a single option is noise.
+  // A lone "Containers" heading over a plain app pod's containers is noise.
   it("skips the grouping when the pod has only regular containers", () => {
-    const wrapper = mountSelect(APP_ONLY)
+    const wrapper = mountSelect(TWO_REGULAR)
 
     expect(wrapper.findAll("optgroup")).toHaveLength(0)
-    expect(wrapper.findAll("option").map((o) => o.text())).toEqual(["app"])
+    expect(wrapper.findAll("option").map((o) => o.text())).toEqual(["app", "sidecar"])
+  })
+
+  // One container is not a choice: the control keeps its shape (the toolbar
+  // does not gain a second one) but cannot be opened, and says why.
+  it("locks itself, visibly, when the pod has a single container", () => {
+    const wrapper = mountSelect(APP_ONLY)
+
+    expect(wrapper.get("select").attributes("disabled")).toBeDefined()
+    expect(wrapper.get("label").classes()).toContain("opacity-60")
+    expect(wrapper.get("label").attributes("title")).toBe("The only container in this pod")
+  })
+
+  // An init or ephemeral container beside the app one is a real choice — exec
+  // into a finished init container fails, so it must stay pickable.
+  it("stays open when a second container is of another kind", () => {
+    expect(mountSelect(APP_AND_INIT).get("select").attributes("disabled")).toBeUndefined()
+    expect(mountSelect(ALL_KINDS).get("select").attributes("disabled")).toBeUndefined()
+  })
+
+  // Both lock reasons can hold at once, and they differ in what the user can
+  // do about them: a running session is the one to report.
+  it("prefers the caller's lock reason over its own", () => {
+    const wrapper = mount(ContainerSelect, {
+      props: { object: APP_ONLY, modelValue: "app", disabled: true, title: "Disconnect first" },
+    })
+
+    expect(wrapper.get("label").attributes("title")).toBe("Disconnect first")
   })
 
   it("is a plain v-model over the container name", async () => {
