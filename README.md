@@ -189,7 +189,7 @@ Flags take precedence over environment variables.
 | `--ca-file` | `KUBE_CA_FILE` | — | CA bundle for apiserver TLS verification; defaults in-cluster to the mounted `serviceaccount/ca.crt` when present |
 | `--kubeconfig` | `KUBE_CONSOLE_KUBECONFIG` | — | dev only: server URL/CA from kubeconfig, credentials stripped |
 | `--context` | `KUBE_CONSOLE_KUBECONTEXT` | — | default kubeconfig context (overrides current-context); every context stays switchable in the UI |
-| `--cluster-name` | `KUBE_CONSOLE_CLUSTER_NAME` | — | display name of the cluster in the browser page title; applies to every context (see below) |
+| `--cluster-name` | `KUBE_CONSOLE_CLUSTER_NAME` | — | display name of the cluster, shown in the browser page title and at the top of the sidebar; applies to every context (see below) |
 | `--listen` | `KUBE_CONSOLE_LISTEN_ADDR` | `:8080` | listen address |
 | `--metrics-disable` | `KUBE_CONSOLE_METRICS_DISABLE` | `false` | disable the Metrics Server adapter |
 | `--exec-disable` | `KUBE_CONSOLE_EXEC_DISABLE` | `false` | disable the exec WebSocket bridge |
@@ -210,6 +210,11 @@ for names that identify no cluster (`default`, `kubernetes-admin@kubernetes`,
 every context — the in-cluster case, where the single context is synthesized as
 `default`. The label is served with the context names, i.e. only to a caller
 whose token the apiserver accepted.
+
+A configured `--cluster-name` also shows on the page itself, under the product
+name in the sidebar: a tab title is not visible while looking at the page. Only
+the configured name appears there — the active context is named by the cluster
+switcher right below it, which is hidden when there is only one.
 
 Source resolution when `--api-server` is unset: an explicit `--kubeconfig`
 wins; otherwise, running in-cluster, the apiserver URL is derived from

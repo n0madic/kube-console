@@ -283,7 +283,7 @@ very first login, knows what to store the session under. `/readyz` probes only
 the **default** context (one reachable apiserver is enough to be ready) and,
 being unauthenticated, caches the outcome.
 
-### Page title
+### Page title and cluster label
 
 The contexts response also carries the optional `clusterName`
 (`--cluster-name`/`KUBE_CONSOLE_CLUSTER_NAME`, `config.Config.ClusterName`, ≤64
@@ -296,6 +296,16 @@ context, except that names identifying no cluster (`default`,
 `kubernetes-admin@kubernetes`, … — `GENERIC_CONTEXTS`) yield a bare title.
 `usePageTitle` takes `useContextsQuery` (the bare query split out of
 `useContexts`) so the reconcile watch still runs only in the switcher.
+
+The same name is on screen as well, in `layout/ClusterName.vue` between the
+sidebar's product name and the switcher — a tab title is precisely what is not
+readable while looking at the page. It renders **only** the configured name
+(trimmed, absent when empty), never a fallback to the active context: that is
+what the switcher below shows, and with one synthesized `default` context the
+switcher is hidden — the in-cluster case this label is for. Its own component
+rather than lines in `Sidebar.vue`, like `ClusterSelector`, because it reads the
+contexts query and `Sidebar.spec` must not stand up vue-query (both are stubbed
+there).
 
 ### Cluster switcher
 

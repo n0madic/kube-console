@@ -8,6 +8,7 @@ import { usePreferencesStore } from "@/stores/preferences"
 import { useUiStore } from "@/stores/ui"
 import { buildCatalog, matchesSearch } from "@/utils/resourceCatalog"
 
+import ClusterName from "./ClusterName.vue"
 import ClusterSelector from "./ClusterSelector.vue"
 import SidebarLink from "./SidebarLink.vue"
 
@@ -140,6 +141,9 @@ function rowClass(id: string): string {
       </RouterLink>
     </div>
 
+    <!-- What the operator called this deployment, then which context of it is
+         active: the second is hidden with a single context, the first is not. -->
+    <ClusterName />
     <ClusterSelector />
 
     <div class="p-3">
