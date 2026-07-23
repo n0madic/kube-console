@@ -142,7 +142,8 @@ Consequences worth planning for:
 Deploy the published image with the bundled Helm chart. Images are built by
 CI for `linux/amd64` and `linux/arm64` and pushed to
 `ghcr.io/n0madic/kube-console` — `vX.Y.Z` tags publish `X.Y.Z`, `X.Y` and
-`latest`, and every push to `main` publishes `main` plus a short-SHA tag.
+`latest`, and every push to `master` publishes `master` plus a short-SHA tag.
+Release tags are kept forever; the short-SHA ones are pruned to the newest 10.
 
 ```bash
 helm install kube-console deploy/helm/kube-console \

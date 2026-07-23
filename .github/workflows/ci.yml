@@ -108,3 +108,47 @@ jobs:
           # Keeps the manifest list to the two real platforms instead of
           # adding the attestation entries GHCR shows as "unknown/unknown".
           provenance: false
+
+  cleanup:
+    name: Registry cleanup
+    needs: [image]
+    # PRs never push an image, so they have nothing to clean up — and a fork PR
+    # has no packages credentials either.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    # A master run and a tag run must never prune the same package at once;
+    # queue instead of cancelling, so a skipped run cannot leave the registry
+    # unpruned indefinitely.
+    concurrency:
+      group: registry-cleanup
+    steps:
+      # Deletes by walking manifest lists, not by "untagged" as the GHCR UI
+      # shows it: the platform children of a live multi-arch image are dropped
+      # from the working set before any rule runs. A naive untagged purge
+      # (GHCR UI, actions/delete-package-versions) removes those children and
+      # breaks `docker pull` of the tags still pointing at them.
+      - uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          # Defaults to the repository name, which happens to match today —
+          # spelled out so a repo rename cannot silently retarget the cleanup.
+          packages: kube-console
+          # Every push to master rewrites the `master` tag and strands the
+          # previous manifest list once its sha- tag is gone.
+          delete-untagged: true
+          # keep-n-tagged on its own counts *all* tagged images and would drop
+          # release tags once they age past the window; scoping it with
+          # delete-tags confines both rules to the sha- images.
+          delete-tags: sha-*
+          keep-n-tagged: 10
+          # Belt and braces — exclude-tags wins over every other rule. Release
+          # tags are `1.2.3`/`1.2` (metadata-action strips the leading `v`) and
+          # are already out of delete-tags' scope.
+          exclude-tags: latest,master
+          # Multi-arch images left without (all of) their children by earlier
+          # manual purges: unpullable, and invisible to the rules above.
+          delete-ghost-images: true
+          delete-partial-images: true
+          # Fails the job if any surviving multi-arch image lost a child.
+          validate: true

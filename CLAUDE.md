@@ -24,11 +24,22 @@ make helm-lint         # helm lint + template
 docker build -t kube-console:dev .  # any --platform: both stages cross-compile from the host arch
 ```
 
-- CI (`.github/workflows/ci.yml`; `main`, `v*` tags, PRs): parallel Go
+- CI (`.github/workflows/ci.yml`; `master`, `v*` tags, PRs): parallel Go
   (`test -race`), Frontend and Helm jobs, then an image job gated on all three
   (`linux/amd64,linux/arm64` → `ghcr.io/n0madic/kube-console`; tags from
   `docker/metadata-action`, `latest` only on `v*`). PRs build but never push —
   a fork PR has no package credentials.
+- A `cleanup` job prunes ghcr.io after every push that published. `sha-*` is
+  the only tag family it deletes (newest 10 kept, `keep-n-tagged` scoped by
+  `delete-tags`); release tags are `1.2.3`/`1.2` — the leading `v` is stripped
+  by `docker/metadata-action` — and are out of that scope, `latest`/`master`
+  are excluded outright. It must stay `dataaxiom/ghcr-cleanup-action`, which
+  walks manifest lists: GHCR lists the platform children of a multi-arch image
+  as untagged versions, so purging "untagged" by hand (GHCR UI,
+  `actions/delete-package-versions`) deletes the children of live tags and
+  makes `docker pull` fail with `manifest unknown`. `delete-ghost-images`/
+  `delete-partial-images` clean up after exactly that; `validate: true` fails
+  the job if a surviving image lost a child.
 - `npm install` must run **inside `web/`** — a root install once duplicated
   `@codemirror/state` in the bundle and broke the YAML editor at runtime
   ("multiple instances of @codemirror/state").
