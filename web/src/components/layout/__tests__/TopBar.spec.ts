@@ -11,13 +11,9 @@ const push = vi.fn()
 vi.mock("vue-router", () => ({ useRouter: () => ({ push }) }))
 
 let queryClient: QueryClient
-vi.mock("@tanstack/vue-query", async () => {
-  const actual = await vi.importActual<typeof import("@tanstack/vue-query")>("@tanstack/vue-query")
-  return { ...actual, useQueryClient: () => queryClient }
-})
 
 import TopBar from "@/components/layout/TopBar.vue"
-import { useAuthStore } from "@/stores/auth"
+import { setQueryPruner, useAuthStore } from "@/stores/auth"
 
 const TOKEN_A = "SENTINEL-token-alpha"
 const TOKEN_B = "SENTINEL-token-beta"
@@ -41,6 +37,11 @@ describe("TopBar sign out", () => {
     setActivePinia(createPinia())
     push.mockReset()
     queryClient = new QueryClient()
+    // The eviction hook main.ts installs: Sign out goes through the store's
+    // clearActiveSession, which prunes the cache through this.
+    setQueryPruner((context) => {
+      queryClient.removeQueries({ predicate: (q) => q.queryKey.includes(context) })
+    })
   })
 
   it("ends only the active context's session and keeps its name", async () => {

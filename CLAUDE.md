@@ -198,17 +198,29 @@ context** in a single record
 (`{ activeContext, sessions: { <ctx>: {...} } }`). They must NEVER reach
 localStorage; `preferences.ts` persists via an explicit allowlist serializer
 only. Exactly **one** end-of-session path, `clearSession(context)`: it drops
-that one context's record (+ that context's metric buffers via
-`clearMetricsCacheContext`) and serves Sign out (`clearActiveSession()`), the
+that one context's record and serves Sign out (`clearActiveSession()`), the
 401 handler and the TTL guard alike, so ending one cluster's session never wipes
 another's token or chart history. It takes the context **explicitly** because
 the 401 handler is usually reached by a response that outlived the cluster it
-was sent to — see "following the active cluster". Sign out and the 401 handler
-share `auth/endSession.ts` (`endSession(queryClient, ctx)` /
-`endActiveSession(queryClient)`), which adds the context-scoped `removeQueries`
-prune. The active context **name** survives sign-out (it is not a switch), so
-the login page names the cluster and a still-valid default session is not
-orphaned.
+was sent to — see "following the active cluster". The active context **name**
+survives sign-out (it is not a switch), so the login page names the cluster and
+a still-valid default session is not orphaned.
+
+Everything fetched with a session dies with it, in **one** place:
+`evictContextCaches(context)` (`stores/auth.ts`) drops that context's metric
+buffers (`clearMetricsCacheContext`) *and* its cached responses, and both
+`clearSession` and `pruneExpiredSessions` call it — so Sign out, a 401 and TTL
+expiry cannot diverge. The query prune is injected (`setQueryPruner`, wired in
+`main.ts` to a context-scoped `removeQueries`, never `queryClient.clear()`)
+because the QueryClient is built there and a store must not import the app
+instance — the same reason `api/http.ts` takes its handlers by injection. It
+lives in the store rather than in the callers because that is exactly what
+drifted before: query pruning wired only into Sign out and the 401 handler left
+an expired session's responses cached until the next sign-out, and since the
+Pod Env tab caches ConfigMap/Secret payloads (see "Detail pages"), that was
+Secret data outliving the token that read it. A predecessor
+`auth/endSession.ts` wrapper is gone — with eviction in the store it was a pure
+duplicate of `clearSession`/`clearActiveSession`.
 
 **Expired means gone, not hidden.** `hasSession`/`signedInContexts` only *read*
 the TTL (a lazy check, never a reactive clock — and they are called from
@@ -518,6 +530,24 @@ values from objects it fetches (unreadable ones are marked, never fatal);
 kubectl precedence (envFrom first, env overrides). Secret-backed values reuse the
 Secret panel's masking.
 
+Those two fetches are vue-query queries, not component state: the tab is
+`v-else-if` in `ResourceDetailPage`, so every tab switch remounts it and a
+component-local load refetched each time. The key is `["podEnvSource", <ctx>,
+<namespace>, configmaps|secrets, <sorted names>]` — context-scoped like every
+other query, so `evictContextCaches` prunes it at every end of session, and
+canonical (sorted) so two Pods referencing the same objects share one entry.
+`staleTime` is a deliberate **60s**, not discovery's 5m: ConfigMap/Secret values
+change under a running Pod and the page's Refresh button only refetches the Pod
+object, so this is the only bound on how stale a rendered value can be. Two
+consequences of caching to keep in mind: Secret `data` lives in the shared
+QueryClient (memory only, never storage) past the tab's unmount, until `gcTime`
+or the end of the session that read it — this is the query family that made TTL
+expiry evict the query cache, not just the token (see "Frontend token storage");
+and the empty state keys on **both maps having resolved**, never on
+`rows.length` alone — with the queries gated off (`enabled: isAuthenticated`, a
+session past its TTL) data stays undefined, and "No environment variables."
+would then be a false statement about the Pod.
+
 ### Logs
 
 `PodLogsTab` → `LogViewer.vue` is **not** CodeMirror/xterm but a plain
@@ -713,10 +743,10 @@ cache is memory-only (a refresh clears it), bounded (TTL 1h — the widest chart
 range — plus a 64-scope cap evicting the scope with the oldest newest-sample, so
 an actively updating chart never goes before a stale one) and adds **no** new
 browser storage. Ending a session wipes its series so a re-login never shows the
-previous session's charts: Sign out, the 401 handler and TTL expiry all go
-through `clearSession(context)` and evict only the ended context's `<ctx>:`
-scopes (`clearMetricsCacheContext`); the vue-query cache is pruned the same way
-(scoped `removeQueries` in `auth/endSession.ts`, never `queryClient.clear()`).
+previous session's charts: Sign out, the 401 handler and TTL expiry all reach
+`evictContextCaches(context)` and evict only the ended context's `<ctx>:` scopes
+(`clearMetricsCacheContext`); the vue-query cache is pruned in the same call
+(scoped `removeQueries`, never `queryClient.clear()`).
 
 ### Overview page
 

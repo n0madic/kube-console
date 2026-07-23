@@ -1,8 +1,6 @@
 <script setup lang="ts">
-import { useQueryClient } from "@tanstack/vue-query"
 import { useRouter } from "vue-router"
 
-import { endActiveSession } from "@/auth/endSession"
 import BaseButton from "@/components/ui/BaseButton.vue"
 import { useAuthStore } from "@/stores/auth"
 
@@ -11,13 +9,13 @@ import ThemeToggle from "./ThemeToggle.vue"
 
 const auth = useAuthStore()
 const router = useRouter()
-const queryClient = useQueryClient()
 
 // Signs out of the current cluster only: other contexts keep their tokens and
 // caches, and the active context name is kept so the login page names the
 // cluster being signed back into (leaving it is not a context switch).
+// clearActiveSession evicts this context's chart buffers and query cache too.
 async function logout(): Promise<void> {
-  endActiveSession(queryClient)
+  auth.clearActiveSession()
   await router.push({ name: "login" })
 }
 </script>

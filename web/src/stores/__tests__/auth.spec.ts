@@ -5,6 +5,7 @@
 // keeps the active context name. pruneExpiredSessions() is its TTL form — an
 // expired token must not sit in storage waiting for a reload.
 
+import { QueryClient } from "@tanstack/vue-query"
 import { createPinia, setActivePinia } from "pinia"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { nextTick } from "vue"
@@ -12,6 +13,7 @@ import { nextTick } from "vue"
 import {
   SESSION_STORAGE_KEY,
   SESSION_TTL_MS,
+  setQueryPruner,
   useAuthStore,
 } from "@/stores/auth"
 import {
@@ -29,7 +31,19 @@ describe("auth store", () => {
     window.localStorage.clear()
     window.sessionStorage.clear()
     setActivePinia(createPinia())
+    // Module-level injection (main.ts wires the real one): unregister so a
+    // pruner from one test cannot fire in the next.
+    setQueryPruner(null)
   })
+
+  /** The pruner main.ts installs, over a throwaway client. */
+  function withQueryCache(): QueryClient {
+    const queryClient = new QueryClient()
+    setQueryPruner((context) => {
+      queryClient.removeQueries({ predicate: (q) => q.queryKey.includes(context) })
+    })
+    return queryClient
+  }
 
   it("never lets any context token reach localStorage", async () => {
     const auth = useAuthStore()
@@ -269,6 +283,56 @@ describe("auth store", () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  // Regression: the TTL path dropped the token but left everything fetched with
+  // it in the query cache — including the ConfigMap/Secret payloads the Pod Env
+  // tab caches. Expiry must evict exactly what a sign-out evicts.
+  it("pruneExpiredSessions() evicts the expired context's cached responses", () => {
+    const auth = useAuthStore()
+    const queryClient = withQueryCache()
+    auth.setSession("alpha", SENTINEL, null, false)
+
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(Date.now() + SESSION_TTL_MS + 1000)
+      auth.setSession("beta", SENTINEL_B, null, false)
+
+      // A Secret payload read by the Env tab, plus an ordinary list, per cluster.
+      const alphaEnv = ["podEnvSource", "alpha", "prod", "secrets", ["db"]]
+      const betaEnv = ["podEnvSource", "beta", "prod", "secrets", ["db"]]
+      queryClient.setQueryData(alphaEnv, { PASSWORD: "c3VwZXItc2VjcmV0" })
+      queryClient.setQueryData(betaEnv, { PASSWORD: "YmV0YS1zZWNyZXQ=" })
+      queryClient.setQueryData(["namespaces", "alpha"], ["default"])
+      queryClient.setQueryData(["namespaces", "beta"], ["kube-system"])
+
+      expect(auth.pruneExpiredSessions()).toEqual(["alpha"])
+
+      // The expired cluster's cached Secret is gone, not merely unreachable.
+      expect(queryClient.getQueryData(alphaEnv)).toBeUndefined()
+      expect(queryClient.getQueryData(["namespaces", "alpha"])).toBeUndefined()
+      // The still-valid cluster keeps its cache for an instant switch-back.
+      expect(queryClient.getQueryData(betaEnv)).toEqual({ PASSWORD: "YmV0YS1zZWNyZXQ=" })
+      expect(queryClient.getQueryData(["namespaces", "beta"])).toEqual(["kube-system"])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // The other end-of-session path reaches the same eviction, so Sign out and a
+  // 401 cannot drift from the TTL guard again.
+  it("clearSession() evicts only that context's cached responses", () => {
+    const auth = useAuthStore()
+    const queryClient = withQueryCache()
+    auth.setSession("alpha", SENTINEL, null, false)
+    auth.setSession("beta", SENTINEL_B, null, false)
+    queryClient.setQueryData(["namespaces", "alpha"], ["default"])
+    queryClient.setQueryData(["namespaces", "beta"], ["kube-system"])
+
+    auth.clearSession("alpha")
+
+    expect(queryClient.getQueryData(["namespaces", "alpha"])).toBeUndefined()
+    expect(queryClient.getQueryData(["namespaces", "beta"])).toEqual(["kube-system"])
   })
 
   // Regression: isAuthenticated used to check only for a token, so an expired

@@ -14,6 +14,24 @@ export const SESSION_STORAGE_KEY = "kube-console.session.v1"
 /** Absolute session lifetime after login; afterwards a new login is forced. */
 export const SESSION_TTL_MS = 8 * 60 * 60 * 1000
 
+/**
+ * Evicts one context's cached server responses. Injected from main.ts, where
+ * the QueryClient is built — a store must not import the app instance, the same
+ * reason api/http.ts takes its handlers by injection.
+ *
+ * It lives here, beside clearMetricsCacheContext, so that *every* way a session
+ * ends evicts the same three things (token, chart buffers, query cache). Wiring
+ * it into the callers instead is what let the TTL path drift: an expired
+ * session dropped its token while the responses fetched with it — including
+ * Secret payloads on the Pod Env tab — stayed in the cache until a sign-out.
+ */
+type ContextPruner = (context: string) => void
+let pruneContextQueries: ContextPruner | null = null
+
+export function setQueryPruner(prune: ContextPruner | null): void {
+  pruneContextQueries = prune
+}
+
 interface StoredSession {
   token: string
   identity: Identity | null
@@ -211,9 +229,14 @@ export const useAuthStore = defineStore("auth", () => {
       sessions.value = next
       persist()
     }
-    // Scoped to the ended session's cluster: other clusters' still-valid
-    // sessions keep their chart history.
+    evictContextCaches(context)
+  }
+
+  /** Everything fetched with a session dies with it. Scoped to the one cluster:
+   * other clusters' still-valid sessions keep their charts and cached lists. */
+  function evictContextCaches(context: string): void {
     clearMetricsCacheContext(context)
+    pruneContextQueries?.(context)
   }
 
   /** clearSession for whichever context is active right now. */
@@ -225,9 +248,11 @@ export const useAuthStore = defineStore("auth", () => {
    * Drop every session past its TTL and rewrite storage. Hiding an expired
    * entry behind hasSession is not enough: the token string itself stays in
    * sessionStorage, readable by any same-origin script, until something
-   * rewrites the record. Called wherever a session is about to be used or
-   * chosen (token fetch, context switch, route guard); a restore does the same
-   * job at startup. Returns the contexts it dropped.
+   * rewrites the record — and the responses it fetched stay in the query cache,
+   * which is where Secret and ConfigMap payloads live once the Pod Env tab has
+   * read them. Called wherever a session is about to be used or chosen (token
+   * fetch, context switch, route guard); a restore does the same job at
+   * startup. Returns the contexts it dropped.
    */
   function pruneExpiredSessions(): string[] {
     const expired = Object.keys(sessions.value).filter((name) => {
@@ -239,8 +264,8 @@ export const useAuthStore = defineStore("auth", () => {
     for (const name of expired) delete next[name]
     sessions.value = next
     persist()
-    // Same scoping as clearSession: only the expired clusters lose their charts.
-    for (const name of expired) clearMetricsCacheContext(name)
+    // Exactly what clearSession does, for each expired cluster.
+    for (const name of expired) evictContextCaches(name)
     return expired
   }
 

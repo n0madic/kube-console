@@ -4,10 +4,9 @@ import { createApp } from "vue"
 
 import { setCredentialProvider, setUnauthorizedHandler, setUnknownContextHandler } from "@/api/http"
 import type { ContextsResponse } from "@/api/types"
-import { endSession } from "@/auth/endSession"
 import { KubernetesTokenProvider } from "@/auth/KubernetesTokenProvider"
 import { createAppRouter } from "@/router"
-import { useAuthStore } from "@/stores/auth"
+import { setQueryPruner, useAuthStore } from "@/stores/auth"
 
 import App from "./App.vue"
 import "./style.css"
@@ -26,6 +25,14 @@ app.use(router)
 app.use(VueQueryPlugin, { queryClient })
 
 setCredentialProvider(new KubernetesTokenProvider())
+// Whatever ends a session — Sign out, a 401, or the TTL guard — drops that
+// context's cached responses with its token. Query keys are context-scoped, so
+// pruning by name leaves other clusters' caches intact for an instant
+// switch-back; never queryClient.clear(). Registered before mount, so no
+// session can end without it.
+setQueryPruner((context) => {
+  queryClient.removeQueries({ predicate: (q) => q.queryKey.includes(context) })
+})
 setUnauthorizedHandler((context) => {
   // 401: end only the session of the context the request was routed to (a
   // valid session for another cluster must survive). The redirect is global,
@@ -33,7 +40,7 @@ setUnauthorizedHandler((context) => {
   // a request that outlived a cluster switch must not throw the user out of the
   // cluster they just switched to.
   const auth = useAuthStore()
-  endSession(queryClient, context)
+  auth.clearSession(context)
   if (context === auth.activeContext) void router.push({ name: "login" })
 })
 setUnknownContextHandler((context) => {

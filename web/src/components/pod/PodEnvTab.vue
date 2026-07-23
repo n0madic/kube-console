@@ -4,7 +4,8 @@
 // globally name-sorted table. Secret-backed values stay masked behind the eye
 // button (decoded in-tab only); long values truncate with an expand toggle.
 
-import { computed, onMounted, ref, watch } from "vue"
+import { useQuery } from "@tanstack/vue-query"
+import { computed } from "vue"
 import type { RouteLocationRaw } from "vue-router"
 
 import { messageFromError } from "@/api/http"
@@ -14,6 +15,7 @@ import ExpandableValue from "@/components/ui/ExpandableValue.vue"
 import RevealButton from "@/components/ui/RevealButton.vue"
 import { useReveal } from "@/composables/useReveal"
 import { resourceDetailRoute } from "@/router"
+import { useAuthStore } from "@/stores/auth"
 import { decodeBase64Utf8 } from "@/utils/base64"
 import { buildEnvRows, collectEnvSourceNames, type EnvResolver, type EnvRow } from "@/utils/podEnv"
 
@@ -23,13 +25,11 @@ const CM_REF: ResourceRef = { group: "", version: "v1", resource: "configmaps" }
 const SECRET_REF: ResourceRef = { group: "", version: "v1", resource: "secrets" }
 const VALUE_THRESHOLD = 200
 
-const rows = ref<EnvRow[]>([])
-const loading = ref(false)
-const errorText = ref<string | null>(null)
-const { isRevealed, toggle, reset: resetRevealed } = useReveal<EnvRow>(rowKey)
-
-// Guards against a stale in-flight response overwriting a newer object's data.
-let loadId = 0
+const auth = useAuthStore()
+// A different Pod's revealed secrets must not stay shown under the next Pod's
+// rows: useReveal clears itself whenever the detail object's uid changes (same
+// wiring as SecretDataPanel).
+const { isRevealed, toggle } = useReveal<EnvRow>(rowKey, () => props.object.metadata?.uid)
 
 type DataMap = EnvResolver["configMaps"]
 
@@ -45,30 +45,68 @@ async function fetchMap(ref: ResourceRef, names: string[], namespace: string | u
   return map
 }
 
-async function load(): Promise<void> {
-  const id = ++loadId
-  loading.value = true
-  errorText.value = null
-  resetRevealed()
-  try {
-    const namespace = props.object.metadata?.namespace
-    const names = collectEnvSourceNames(props.object)
-    const [configMaps, secrets] = await Promise.all([
-      fetchMap(CM_REF, names.configMaps, namespace),
-      fetchMap(SECRET_REF, names.secrets, namespace),
-    ])
-    if (id !== loadId) return
-    rows.value = buildEnvRows(props.object, { configMaps, secrets })
-  } catch (e) {
-    if (id !== loadId) return
-    errorText.value = messageFromError(e)
-  } finally {
-    if (id === loadId) loading.value = false
-  }
+const namespace = computed(() => props.object.metadata?.namespace)
+// Sorted, so the name list is a canonical cache key: two Pods referencing the
+// same objects in a different declaration order must share one cache entry
+// instead of forking it (buildEnvRows looks the maps up by name, so the order
+// carries no meaning of its own).
+const sourceNames = computed(() => {
+  const names = collectEnvSourceNames(props.object)
+  return { configMaps: [...names.configMaps].sort(), secrets: [...names.secrets].sort() }
+})
+
+// Cached per context/namespace/name-set via vue-query: switching tabs away and
+// back re-mounts this component (ResourceDetailPage's tab body is v-else-if),
+// but the query cache lives in the app-wide QueryClient, so it's served from
+// cache instead of refetched — and two Pods sharing a ConfigMap/Secret in the
+// same namespace share one entry. The key is context-scoped, so every end of
+// session — Sign out, a 401, or the TTL guard — evicts these entries with the
+// token that fetched them (`evictContextCaches`, stores/auth.ts). That matters
+// here more than elsewhere: this is the one query family holding Secret data.
+//
+// The window is deliberately short (not the 5m of discovery, which is
+// effectively immutable): ConfigMap/Secret values change under a running Pod,
+// and the detail page's Refresh button only refetches the Pod object, so this
+// is the only bound on how stale a rendered value can be.
+const ENV_SOURCE_STALE_TIME = 60 * 1000
+
+function envSourceQuery(ref: ResourceRef, names: () => string[]) {
+  return useQuery({
+    queryKey: computed(() => [
+      "podEnvSource",
+      auth.activeContext,
+      namespace.value,
+      ref.resource,
+      names(),
+    ]),
+    queryFn: () => fetchMap(ref, names(), namespace.value),
+    // Gated on a real session like every other context-scoped query: a switch
+    // to a not-yet-authorized context must fire no tokenless request.
+    enabled: computed(() => auth.isAuthenticated),
+    staleTime: ENV_SOURCE_STALE_TIME,
+  })
 }
 
-onMounted(load)
-watch(() => props.object.metadata?.uid, load)
+const configMapsQuery = envSourceQuery(CM_REF, () => sourceNames.value.configMaps)
+const secretsQuery = envSourceQuery(SECRET_REF, () => sourceNames.value.secrets)
+
+const errorText = computed(() => {
+  const e = configMapsQuery.error.value ?? secretsQuery.error.value
+  return e === null ? null : messageFromError(e)
+})
+// Both source maps must have resolved before the table may claim to be
+// complete. Undefined data is not an empty Pod: with the queries gated off (a
+// session past its TTL) they never run, and "No environment variables." would
+// then be a false statement about the Pod rather than a pending fetch.
+const resolved = computed(
+  () => configMapsQuery.data.value !== undefined && secretsQuery.data.value !== undefined,
+)
+const rows = computed<EnvRow[]>(() => {
+  const configMaps = configMapsQuery.data.value
+  const secrets = secretsQuery.data.value
+  if (configMaps === undefined || secrets === undefined) return []
+  return buildEnvRows(props.object, { configMaps, secrets })
+})
 
 function rowKey(row: EnvRow): string {
   return `${row.containerType}:${row.container}:${row.name}`
@@ -109,7 +147,7 @@ const hasRows = computed(() => rows.value.length > 0)
     <p v-if="errorText !== null" class="rounded-md bg-red-50 px-3 py-2 text-sm text-red-800 dark:bg-red-950 dark:text-red-200">
       {{ errorText }}
     </p>
-    <p v-else-if="loading && !hasRows" class="py-6 text-center text-sm text-slate-400">Loading...</p>
+    <p v-else-if="!resolved" class="py-6 text-center text-sm text-slate-400">Loading...</p>
     <p v-else-if="!hasRows" class="py-6 text-center text-sm text-slate-400">
       No environment variables.
     </p>
