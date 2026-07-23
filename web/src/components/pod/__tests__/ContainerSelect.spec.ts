@@ -53,9 +53,12 @@ describe("ContainerSelect", () => {
     expect(wrapper.get("label").attributes("title")).toBe("The only container in this pod")
   })
 
-  // An init or ephemeral container beside the app one is a real choice — exec
-  // into a finished init container fails, so it must stay pickable.
-  it("stays open when a second container is of another kind", () => {
+  // Two regular containers is the common multi-container pod (app + sidecar)
+  // and the case a miscounted `sole` would lock first; an init or ephemeral
+  // one beside the app container is a real choice too — exec into a finished
+  // init container fails, so it must stay pickable.
+  it("stays open whenever there is more than one container", () => {
+    expect(mountSelect(TWO_REGULAR).get("select").attributes("disabled")).toBeUndefined()
     expect(mountSelect(APP_AND_INIT).get("select").attributes("disabled")).toBeUndefined()
     expect(mountSelect(ALL_KINDS).get("select").attributes("disabled")).toBeUndefined()
   })

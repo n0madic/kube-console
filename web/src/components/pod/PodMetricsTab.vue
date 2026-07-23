@@ -5,6 +5,7 @@ import { fetchPodMetrics } from "@/api/ui"
 import type { K8sObject, MetricsResponse } from "@/api/types"
 import MetricsChart from "@/components/metrics/MetricsChart.vue"
 import MetricsUnavailable from "@/components/metrics/MetricsUnavailable.vue"
+import BaseSelect from "@/components/ui/BaseSelect.vue"
 import { useMetricsPolling } from "@/composables/useMetricsPolling"
 import { useAuthStore } from "@/stores/auth"
 import { usePreferencesStore } from "@/stores/preferences"
@@ -78,23 +79,19 @@ const memLabels = computed(() => memBuffer.value.labels())
       <div class="flex items-center gap-3 text-sm">
         <label class="flex items-center gap-1.5">
           <span class="text-slate-500 dark:text-slate-400">Range</span>
-          <select
-            v-model="range"
-            class="rounded-md border border-slate-300 bg-white px-2 py-1 dark:border-slate-600 dark:bg-slate-800"
-          >
+          <BaseSelect v-model="range">
             <option v-for="opt in METRICS_RANGE_OPTIONS" :key="opt" :value="opt">{{ opt }}</option>
-          </select>
+          </BaseSelect>
         </label>
         <label class="flex items-center gap-1.5">
           <span class="text-slate-500 dark:text-slate-400">Poll every</span>
-          <select
-            v-model.number="prefs.prefs.metrics.pollIntervalSeconds"
-            class="rounded-md border border-slate-300 bg-white px-2 py-1 dark:border-slate-600 dark:bg-slate-800"
-          >
+          <!-- No `.number`: the options bind real numbers, so the model never
+               sees the string form a `.number` modifier would coerce back. -->
+          <BaseSelect v-model="prefs.prefs.metrics.pollIntervalSeconds">
             <option :value="15">15s</option>
             <option :value="30">30s</option>
             <option :value="60">60s</option>
-          </select>
+          </BaseSelect>
         </label>
         <span v-if="polling.error.value !== null" class="text-xs text-red-500">
           {{ polling.error.value }}

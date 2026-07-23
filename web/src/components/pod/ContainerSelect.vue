@@ -7,6 +7,7 @@
 import { computed } from "vue"
 
 import type { K8sObject } from "@/api/types"
+import BaseSelect from "@/components/ui/BaseSelect.vue"
 import type { ContainerKind } from "@/utils/podHelpers"
 import { podContainers } from "@/utils/podHelpers"
 
@@ -66,11 +67,7 @@ const groups = computed(() =>
     :title="hint"
   >
     <span class="text-slate-500 dark:text-slate-400">Container</span>
-    <select
-      v-model="model"
-      :disabled="locked"
-      class="rounded-md border border-slate-300 bg-white px-2 py-1 disabled:cursor-not-allowed dark:border-slate-600 dark:bg-slate-800"
-    >
+    <BaseSelect v-model="model" :disabled="locked">
       <template v-if="groups.length > 1">
         <optgroup v-for="group in groups" :key="group.kind" :label="group.label">
           <option v-for="name in group.names" :key="name" :value="name">{{ name }}</option>
@@ -79,6 +76,6 @@ const groups = computed(() =>
       <template v-else>
         <option v-for="c in containers" :key="c.name" :value="c.name">{{ c.name }}</option>
       </template>
-    </select>
+    </BaseSelect>
   </label>
 </template>

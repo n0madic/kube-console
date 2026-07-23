@@ -5,6 +5,7 @@ import { useRoute } from "vue-router"
 
 import { apiJson } from "@/api/http"
 import type { K8sObjectList } from "@/api/types"
+import BaseSelect from "@/components/ui/BaseSelect.vue"
 import { useDiscovery } from "@/composables/useDiscovery"
 import { useAuthStore } from "@/stores/auth"
 import { useUiStore } from "@/stores/ui"
@@ -70,15 +71,11 @@ watch(
 <template>
   <div v-if="!clusterScoped" class="flex items-center gap-2">
     <label class="text-xs uppercase tracking-wide text-slate-400" for="ns-select">Namespace</label>
-    <select
-      v-if="!query.isError.value"
-      id="ns-select"
-      v-model="ui.namespace"
-      class="rounded-md border border-slate-300 bg-white px-2 py-1 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
-    >
+    <!-- id lands on the inner <select>, which is what the label points at. -->
+    <BaseSelect v-if="!query.isError.value" id="ns-select" v-model="ui.namespace" class="text-sm">
       <option value="">All namespaces</option>
       <option v-for="name in names" :key="name" :value="name">{{ name }}</option>
-    </select>
+    </BaseSelect>
     <input
       v-else
       id="ns-select"

@@ -6,6 +6,7 @@ import { logsUrl } from "@/api/k8s"
 import type { K8sObject } from "@/api/types"
 import AppIcon from "@/components/ui/AppIcon.vue"
 import BaseButton from "@/components/ui/BaseButton.vue"
+import BaseSelect from "@/components/ui/BaseSelect.vue"
 import { MAX_LINES, useLogsStream } from "@/composables/useLogsStream"
 import { saveBlob } from "@/utils/download"
 import { defaultContainerName } from "@/utils/podHelpers"
@@ -107,16 +108,13 @@ watch([container, tailLines, timestamps, previous, follow], () => {
       <ContainerSelect v-model="container" :object="object" />
       <label class="flex items-center gap-1.5">
         <span class="text-slate-500 dark:text-slate-400">Tail</span>
-        <select
-          v-model="tailLines"
-          class="rounded-md border border-slate-300 bg-white px-2 py-1 dark:border-slate-600 dark:bg-slate-800"
-        >
+        <BaseSelect v-model="tailLines">
           <option :value="100">100</option>
           <option :value="500">500</option>
           <option :value="2000">2000</option>
           <option :value="10000">10000</option>
           <option value="all">All</option>
-        </select>
+        </BaseSelect>
       </label>
       <label class="flex items-center gap-1.5">
         <input v-model="timestamps" type="checkbox" /> Timestamps

@@ -524,14 +524,17 @@ with the tabs (Logs restarts its stream on every change and must not fire on
 mount), but both use `defaultContainerName` — the
 `kubectl.kubernetes.io/default-container` annotation when it names a container
 of *this* pod (a stale one would preselect a 404), else the first regular one.
-With exactly **one** container it is not a `<select>` at all but a static pill:
-a control whose popup opens onto its own current value is not a choice, and the
-Terminal tab's session lock would dim it for no reason. That lives in
-`ContainerSelect`, not in the tabs, so Logs and Terminal cannot drift apart —
-and it is why the component is `inheritAttrs: false` and binds `$attrs` to the
-`<label>` branch only: the callers' `title` explains the lock, which the pill
-does not have. Tests must not reach the tabs' toolbars by select index
-(`PodLogsTab`'s Tail select is found by label).
+With exactly **one** container the picker locks itself (`locked = disabled ||
+sole`): a popup that opens onto its own current value is not a choice. It stays
+a `<select>` rather than becoming a pill — the toolbars keep one control shape —
+and the lock lives in `ContainerSelect`, not in the tabs, so Logs and Terminal
+cannot drift apart. Hence `title` is a declared **prop**, not a fallthrough
+attribute: both reasons to be locked can hold at once and they differ in what
+the user can do about them, so the component picks (the caller's running-session
+title wins over its own "The only container in this pod"). Tests must not reach
+the tabs' toolbars by select index — `PodLogsTab`'s Tail select is found by
+label, since a single-container pod's picker is not the only thing that can move
+around it.
 
 Header buttons come from a second registry, the pure `utils/resourceActions.ts`
 (`actionsFor` keyed `<apiVersion>/<Kind>`, same convention as
@@ -708,6 +711,20 @@ order — would win) and is always `aria-hidden`, so every icon-only control
 carries its own `title`/`aria-label` (Reload/Download in `PodLogsTab`,
 `RevealButton`, `ThemeToggle`). `GaugeCard`'s SVG is a chart, not an icon, and
 stays inline.
+
+Every `<select>` in the app is `components/ui/BaseSelect.vue` (generic over the
+model type — callers bind strings, numbers and `"all" | number`): a native
+select with `appearance-none` and the same `caret-down` the hand-built pickers
+draw, since the browser's own arrow is a different glyph in every engine and
+`ContainerSelect` sits next to `EditableCombobox`, `NamespaceSelector` next to
+`ClusterSelector`. They stay native — only the arrow is ours — because a
+`<select>` costs nothing in popup, keyboard and a11y behaviour; `ContextListbox`
+is custom only because it needs a panel taller than a native popup allows.
+`inheritAttrs: false` puts the caller's attributes on the inner `<select>`, not
+the positioning wrapper: `NamespaceSelector`'s `<label for="ns-select">` points
+at it. Do not reintroduce a bare `<select>`, and do not put `.number` on its
+`v-model` — options bind real numbers already, and the modifier would only
+coerce a string form that never occurs.
 
 Shared value UX in `components/ui/`: `RevealButton.vue` (eye toggle) and
 `ExpandableValue.vue` (truncate/expand), used by SecretDataPanel,
