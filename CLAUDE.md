@@ -513,6 +513,11 @@ with the tabs (Logs restarts its stream on every change and must not fire on
 mount), but both use `defaultContainerName` — the
 `kubectl.kubernetes.io/default-container` annotation when it names a container
 of *this* pod (a stale one would preselect a 404), else the first regular one.
+The Terminal tab drops the picker entirely when the pod has exactly **one**
+container (`podContainers().length === 1`) and shows that name as a pill: a
+control with a single option is not a choice, and the session lock would then
+dim it for no reason. Logs keeps its picker either way — its toolbar is built
+around a stream that restarts on every change.
 
 Header buttons come from a second registry, the pure `utils/resourceActions.ts`
 (`actionsFor` keyed `<apiVersion>/<Kind>`, same convention as

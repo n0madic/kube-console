@@ -10,6 +10,7 @@ import {
   defaultContainerName,
   isMissingExecutableError,
   parseCommandLine,
+  podContainers,
 } from "@/utils/podHelpers"
 import { COMMAND_SUGGESTIONS, DEFAULT_COMMAND_LINE, isAutoCommand } from "@/utils/shellPresets"
 
@@ -22,6 +23,15 @@ import TerminalView from "./TerminalView.vue"
 const props = withDefaults(defineProps<{ object: K8sObject; active?: boolean }>(), { active: true })
 
 const container = ref("")
+
+// A single-container pod has nothing to pick: a picker offering exactly one
+// option reads as a choice that isn't one (and, once the session starts, as a
+// disabled control for no reason). The name is still shown — it is what exec
+// lands in — but as a plain pill.
+const soleContainer = computed(() => {
+  const all = podContainers(props.object)
+  return all.length === 1 ? all[0]!.name : null
+})
 
 // One editable field: the suggestions fill it in, and it stays typeable, so a
 // preset is a starting point rather than a mode. Parsed as a quoted command
@@ -127,7 +137,14 @@ watch(
 <template>
   <div class="flex h-full min-h-0 flex-col gap-2">
     <div class="flex flex-wrap items-center gap-3 text-sm">
+      <div v-if="soleContainer !== null" class="flex items-center gap-1.5">
+        <span class="shrink-0 text-slate-500 dark:text-slate-400">Container</span>
+        <span
+          class="rounded-full bg-slate-100 px-2.5 py-0.5 font-mono text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-300"
+        >{{ soleContainer }}</span>
+      </div>
       <ContainerSelect
+        v-else
         v-model="container"
         :object="object"
         :disabled="started"
@@ -173,7 +190,7 @@ watch(
       />
     </div>
     <p v-else class="p-6 text-sm text-slate-400">
-      Select a container and press “Start terminal”. The default Auto command
+      Press “Start terminal”. The default Auto command
       runs whichever shell the image has (bash when present, otherwise sh) and
       sets TERM=xterm-256color; the field is editable and takes any argv, quoted
       but never expanded — it is not a shell. RBAC (pods/exec) is enforced by

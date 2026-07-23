@@ -148,7 +148,8 @@ describe("PodTerminalTab", () => {
   // for its lifetime — and that has to be visible, or the click that does
   // nothing looks like a bug rather than a lock.
   it("visibly locks both pickers while the session runs", async () => {
-    const wrapper = mountTab(pod("u1", "pod-a", ["app"]))
+    // Two containers, so the container picker is a <select> at all.
+    const wrapper = mountTab(pod("u1", "pod-a", ["app", "sidecar"]))
     await startButton(wrapper).trigger("click")
     await flushPromises()
 
@@ -212,6 +213,35 @@ describe("PodTerminalTab", () => {
 
     expect(wrapper.text()).toContain("try the Auto command")
     expect(wrapper.text()).not.toContain("kubectl debug")
+  })
+
+  // A picker with exactly one option is not a choice: the name is shown as a
+  // pill, and exec still targets it.
+  it("shows the sole container as a pill instead of a picker", async () => {
+    const wrapper = mountTab(pod("u1", "pod-a", ["app"]))
+
+    expect(wrapper.find("select").exists()).toBe(false)
+    expect(wrapper.text()).toContain("app")
+
+    await startButton(wrapper).trigger("click")
+    await flushPromises()
+    expect(startSpy.mock.calls[0]?.[0]).toMatchObject({ container: "app" })
+  })
+
+  it("keeps the picker when the pod has more than one container", () => {
+    const wrapper = mountTab(pod("u1", "pod-a", ["app", "sidecar"]))
+
+    expect(wrapper.find("select").exists()).toBe(true)
+  })
+
+  // An init or ephemeral container beside the app container is still a choice
+  // (and exec into a finished init container fails), so the picker stays.
+  it("keeps the picker when the second container is an init container", () => {
+    const wrapper = mountTab(
+      pod("u1", "pod-a", ["app"], { spec: { initContainers: [{ name: "setup" }] } }),
+    )
+
+    expect(wrapper.find("select").exists()).toBe(true)
   })
 
   it("preselects the container named by the kubectl default-container annotation", async () => {
