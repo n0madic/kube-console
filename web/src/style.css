@@ -1,0 +1,10 @@
+@import "tailwindcss";
+@import "@xterm/xterm/css/xterm.css";
+@import "uplot/dist/uPlot.min.css";
+
+/* Class-based dark mode driven by the theme preference (see App.vue). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  color-scheme: light dark;
+}

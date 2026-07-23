@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <title>kube-console</title>
+  <!-- Kubernetes-style helm: blue heptagon with a 7-spoke ship's wheel -->
+  <path d="M16.00 1.40 L27.41 6.90 L30.23 19.25 L22.33 29.15 L9.67 29.15 L1.77 19.25 L4.59 6.90 Z"
+        fill="#326ce5" stroke="#326ce5" stroke-width="1.6" stroke-linejoin="round"/>
+  <g stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M16.00 12.10 L19.05 13.57 L19.80 16.87 L17.69 19.51 L14.31 19.51 L12.20 16.87 L12.95 13.57 Z"/>
+    <path d="M16.00 12.10 L16.00 6.00 M19.05 13.57 L23.82 9.77 M19.80 16.87 L25.75 18.23 M17.69 19.51 L20.34 25.01 M14.31 19.51 L11.66 25.01 M12.20 16.87 L6.25 18.23 M12.95 13.57 L8.18 9.77"/>
+  </g>
+  <g fill="#fff">
+    <circle cx="16.00" cy="5.40" r="1.5"/>
+    <circle cx="24.29" cy="9.39" r="1.5"/>
+    <circle cx="26.33" cy="18.36" r="1.5"/>
+    <circle cx="20.60" cy="25.55" r="1.5"/>
+    <circle cx="11.40" cy="25.55" r="1.5"/>
+    <circle cx="5.67" cy="18.36" r="1.5"/>
+    <circle cx="7.71" cy="9.39" r="1.5"/>
+  </g>
+</svg>

@@ -1,0 +1,144 @@
+image:
+  repository: ghcr.io/n0madic/kube-console
+  # Defaults to the chart appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+# Base URL of the kube-apiserver the gateway forwards to. Leave empty to let
+# the backend derive it in-cluster from KUBERNETES_SERVICE_HOST/PORT.
+apiServer: ""
+
+# CA certificate for verifying the apiserver TLS endpoint. By default the
+# cluster CA is taken from the `kube-root-ca.crt` ConfigMap that Kubernetes
+# auto-publishes in every namespace (no credentials, no extra setup). Override
+# with a custom ConfigMap OR Secret (set exactly one). The backend never mounts
+# a ServiceAccount token.
+ca:
+  useClusterRootCA: true
+  existingCaConfigMap: ""
+  existingCaSecret: ""
+  key: ca.crt
+
+# Display name of the cluster, shown in the browser page title ("<name> ·
+# kube-console"). Meant for in-cluster installs: there the single context is
+# synthesized as "default", which names no cluster, so the title stays bare
+# until this is set. When set it applies to every context. Cosmetic only, and
+# served only to callers with a token the apiserver accepted.
+clusterName: ""
+
+features:
+  metrics: true
+  exec: true
+  maxExecSessions: 10
+  # Extra origins accepted for the exec WebSocket handshake (same-origin is
+  # always allowed), e.g. a dev origin. Usually empty in production.
+  allowedOrigins: []
+
+# Abuse limits. kube-console forwards any request carrying a bearer token to
+# the apiserver and lets the apiserver judge it, so whoever can reach this
+# service can reach the apiserver — these bound how hard.
+limits:
+  # Concurrent non-streaming upstream requests, all clients together. Watches,
+  # log follows and exec sessions get their own pool, 8x this size, so a long
+  # stream never starves a short request (0 disables both).
+  #
+  # This is the guard that holds everywhere: it is not keyed by client address,
+  # so it means the same behind a VPN, behind an ingress and on the internet.
+  # Leave it on.
+  maxInFlight: 128
+
+  # --- Below: keyed by client IP, off by default. ---
+  # These can only tell clients apart when clients actually arrive with
+  # different addresses. Behind an ingress, a VPN or an authenticating proxy —
+  # i.e. every deployment this chart is meant for — the whole team shares one
+  # address, so a per-IP budget denies an attacker nothing (they hold the same
+  # key as everyone else) while one busy tab can 429 the rest of the team.
+  # Turn them on only when clients are distinguishable: kube-console published
+  # without a perimeter, or behind a proxy that forwards a per-client
+  # X-Forwarded-For with its CIDRs named in trustedProxies below.
+
+  # Per-client requests per minute across /k8s/* and /api/ui/*. Suggested
+  # value when enabling: 240.
+  rateLimit: 0
+  # Unauthenticated exec WebSocket handshakes per client IP. Established
+  # terminals are never counted. Suggested value when enabling: 3.
+  maxExecHandshakesPerIP: 0
+  # CIDRs of the reverse proxies in front of kube-console. Required for the two
+  # limits above to see anything but the ingress controller's address.
+  # X-Forwarded-For is ignored while this is empty, and ignored anyway for
+  # connections that do not arrive from one of these CIDRs, because the header
+  # is client-supplied and would otherwise be a free bucket per request.
+  trustedProxies: []
+
+logLevel: info
+logFormat: json
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # The exec terminal uses WebSockets: raise read/send timeouts, e.g. for
+    # ingress-nginx:
+    #   nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    #   nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  hosts:
+    - host: kube-console.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Egress restriction to the apiserver + DNS. Recommended.
+networkPolicy:
+  enabled: false
+  # Ports the kube-apiserver listens on.
+  apiServerPorts:
+    - 443
+    - 6443
+  # Destination CIDRs allowed for apiserver egress. Empty = any destination on
+  # apiServerPorts (port-only restriction). To fully lock egress down, set this
+  # to the control-plane endpoint(s) — in-cluster the apiserver is reached by
+  # ClusterIP, so this is typically the `kubernetes` Service ClusterIP as a /32
+  # (e.g. `10.96.0.1/32`) or the control-plane CIDR.
+  apiServerCIDRs: []
+  # Cluster DNS destination for the DNS egress rule. Defaults to the standard
+  # CoreDNS/kube-dns location; without a `to` the rule would allow port 53 to
+  # any destination. Set to null to disable the DNS destination restriction on
+  # clusters with a non-standard DNS setup.
+  dns:
+    namespace: kube-system
+    podLabels:
+      k8s-app: kube-dns
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

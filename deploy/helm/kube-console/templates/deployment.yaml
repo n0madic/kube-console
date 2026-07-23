@@ -1,0 +1,127 @@
+{{- include "kube-console.validateCa" . -}}
+{{- $caConfigMap := include "kube-console.caConfigMap" . -}}
+{{- $caSecret := .Values.ca.existingCaSecret -}}
+{{- $caEnabled := or $caConfigMap $caSecret -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kube-console.fullname" . }}
+  labels:
+    {{- include "kube-console.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "kube-console.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kube-console.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      # The backend is credential-free by design: no ServiceAccount token is
+      # ever mounted, no RBAC bindings exist for it.
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: kube-console
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            {{- if .Values.apiServer }}
+            - name: KUBE_API_SERVER
+              value: {{ .Values.apiServer | quote }}
+            {{- end }}
+            {{- if $caEnabled }}
+            - name: KUBE_CA_FILE
+              value: /etc/kube-console/ca/{{ .Values.ca.key }}
+            {{- end }}
+            {{- if .Values.clusterName }}
+            - name: KUBE_CONSOLE_CLUSTER_NAME
+              value: {{ .Values.clusterName | quote }}
+            {{- end }}
+            - name: KUBE_CONSOLE_METRICS_DISABLE
+              value: {{ not .Values.features.metrics | quote }}
+            - name: KUBE_CONSOLE_EXEC_DISABLE
+              value: {{ not .Values.features.exec | quote }}
+            - name: KUBE_CONSOLE_MAX_EXEC_SESSIONS
+              value: {{ .Values.features.maxExecSessions | quote }}
+            {{- if .Values.features.allowedOrigins }}
+            - name: KUBE_CONSOLE_ALLOWED_ORIGINS
+              value: {{ join "," .Values.features.allowedOrigins | quote }}
+            {{- end }}
+            - name: KUBE_CONSOLE_RATE_LIMIT
+              value: {{ .Values.limits.rateLimit | quote }}
+            - name: KUBE_CONSOLE_MAX_IN_FLIGHT
+              value: {{ .Values.limits.maxInFlight | quote }}
+            - name: KUBE_CONSOLE_MAX_EXEC_HANDSHAKES_PER_IP
+              value: {{ .Values.limits.maxExecHandshakesPerIP | quote }}
+            {{- if .Values.limits.trustedProxies }}
+            - name: KUBE_CONSOLE_TRUSTED_PROXIES
+              value: {{ join "," .Values.limits.trustedProxies | quote }}
+            {{- end }}
+            - name: KUBE_CONSOLE_LOG_LEVEL
+              value: {{ .Values.logLevel | quote }}
+            - name: KUBE_CONSOLE_LOG_FORMAT
+              value: {{ .Values.logFormat | quote }}
+          {{- if $caEnabled }}
+          volumeMounts:
+            - name: apiserver-ca
+              mountPath: /etc/kube-console/ca
+              readOnly: true
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- if $caEnabled }}
+      volumes:
+        # Only the CA key is projected, so the mounted file is exactly the one
+        # KUBE_CA_FILE names even when a custom source holds other keys.
+        - name: apiserver-ca
+          {{- if $caConfigMap }}
+          configMap:
+            name: {{ $caConfigMap }}
+            items:
+              - key: {{ .Values.ca.key }}
+                path: {{ .Values.ca.key }}
+          {{- else }}
+          secret:
+            secretName: {{ $caSecret }}
+            items:
+              - key: {{ .Values.ca.key }}
+                path: {{ .Values.ca.key }}
+          {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

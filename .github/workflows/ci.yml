@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+    branches: [master]
+
+# A new push to the same branch/PR supersedes the run in flight; a tag run is
+# never cancelled, since it is the one that publishes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      # -race, not the plain `make go-test`: the exec bridge, the readiness
+      # cache and the in-flight limiter are all concurrent by design.
+      - run: go test ./... -count=1 -race
+      # web/dist/.gitkeep keeps the go:embed of the SPA buildable without the
+      # frontend build, so this checks the backend compiles on its own.
+      - run: go build ./...
+
+  web:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      # npm ci inside web/ only: an install at the repo root duplicates
+      # @codemirror/state in the bundle and breaks the YAML editor at runtime.
+      - run: npm ci
+      - run: npm run lint
+      - run: npx vue-tsc --noEmit
+      - run: npm test
+      - run: npm run build
+
+  helm:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+      - run: make helm-lint
+
+  image:
+    name: Image
+    needs: [go, web, helm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      # Pull requests build the image but never push it: a fork PR has no
+      # package credentials, and an untrusted branch must not publish a tag.
+      - name: Log in to ghcr.io
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/n0madic/kube-console
+          # `latest` follows semver tags only (the action's default
+          # latest=auto), so a push to master never moves it.
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Keeps the manifest list to the two real platforms instead of
+          # adding the attestation entries GHCR shows as "unknown/unknown".
+          provenance: false
