@@ -16,6 +16,9 @@ export interface UserPreferences {
   tablePageSize: number
   /** Recent-events card: show only Warning-type events. */
   eventsOnlyWarnings: boolean
+  /** Sidebar hidden by choice. Only consulted on a wide viewport — the narrow
+   * one auto-hides through the transient drawer state in stores/ui.ts. */
+  sidebarCollapsed: boolean
   metrics: {
     enabled: boolean
     pollIntervalSeconds: MetricsPollInterval
@@ -40,6 +43,7 @@ function defaults(): UserPreferences {
     hiddenColumns: emptyHiddenColumns(),
     tablePageSize: 50,
     eventsOnlyWarnings: false,
+    sidebarCollapsed: false,
     metrics: { enabled: true, pollIntervalSeconds: 15, defaultRange: "15m" },
   }
 }
@@ -68,6 +72,7 @@ export function sanitizePreferences(input: unknown): UserPreferences {
     out.tablePageSize = p.tablePageSize
   }
   if (typeof p.eventsOnlyWarnings === "boolean") out.eventsOnlyWarnings = p.eventsOnlyWarnings
+  if (typeof p.sidebarCollapsed === "boolean") out.sidebarCollapsed = p.sidebarCollapsed
   if (typeof p.metrics === "object" && p.metrics !== null) {
     const m = p.metrics as Record<string, unknown>
     if (typeof m.enabled === "boolean") out.metrics.enabled = m.enabled
@@ -91,6 +96,7 @@ export function serializePreferences(prefs: UserPreferences): string {
     hiddenColumns: { ...prefs.hiddenColumns },
     tablePageSize: prefs.tablePageSize,
     eventsOnlyWarnings: prefs.eventsOnlyWarnings,
+    sidebarCollapsed: prefs.sidebarCollapsed,
     metrics: { ...prefs.metrics },
   }
   return JSON.stringify(allowlisted)

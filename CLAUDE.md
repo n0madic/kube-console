@@ -813,6 +813,57 @@ Shared value UX in `components/ui/`: `RevealButton.vue` (eye toggle) and
 `ExpandableValue.vue` (truncate/expand), used by SecretDataPanel,
 ConfigMapDataPanel and PodEnvTab; base64 decode is `utils/base64.ts`.
 
+### Sidebar collapse
+
+The sidebar hides **entirely** — an icon rail is meaningless here, since the
+entries are text Kinds with no glyphs of their own. Visibility is deliberately
+**two** pieces of state, and
+`sidebarOpen = narrow ? drawerOpen : !prefs.sidebarCollapsed` (`stores/ui.ts`):
+`prefs.sidebarCollapsed` (localStorage, through the allowlist serializer) is the
+choice made on a **wide** viewport, `drawerOpen` is memory-only and belongs to
+the **narrow** one. Auto-collapsing therefore falls out for free — `drawerOpen`
+starts `false`, so narrowing hides the sidebar and widening restores the saved
+choice — *without* writing to prefs, which is the whole point of the split: a
+resize is not a decision, and one narrow episode must not persist as "hidden"
+on the big screen. The one explicit `watch(narrowViewport)` only resets
+`drawerOpen`, so a drawer left open does not spring back on the next narrowing;
+`closeSidebar()` touches only `drawerOpen`, which is what makes Esc and the
+navigation watch in `AppShell` no-ops on a wide viewport.
+
+The breakpoint is Tailwind's `lg` as `SIDEBAR_NARROW_QUERY`
+(`(max-width: 1023.98px)`, via `matchMedia`) — the fraction matters: between
+`max-width: 1023px` and `min-width: 1024px` a 1023.5px viewport matches neither.
+On a narrow viewport the open sidebar **overlays** the content as a drawer
+(`fixed … z-40` + a `z-30` backdrop in `AppShell`) rather than squeezing it,
+since the reason to hide it there is that tables have no width to spare;
+`BaseDialog` portals to the body with `z-40`/`z-50` and lands later in the DOM,
+so dialogs still cover both. Only in that mode does the sidebar header show its
+own close button — the TopBar toggle is underneath the drawer at that point.
+
+`Sidebar.vue` hides with **`v-show`, not `v-if`**: the component stays mounted,
+so collapsing does not reset `ui.sidebarSearch` or `collapsedSections` (whose
+defaults are derived once per page load, `defaultsApplied`), and `display: none`
+takes the contents out of the tab order — hiding by width alone would need
+`inert`.
+
+The toggle itself is one component, `layout/SidebarToggle.vue`, mounted in
+**two** places and `v-if`'d at both call sites: the sidebar's own header
+(right of the product name) while it is open, the TopBar while it is hidden —
+the control sits at the edge of what it controls, and an open sidebar covers
+the TopBar's left edge in drawer mode anyway. Exactly one instance therefore
+exists at a time, which is what lets its handler focus `[data-sidebar-toggle]`
+after `nextTick`: the button being activated is the one that goes away, so
+without the handoff a keyboard user would land back on `<body>`. Consequently
+neither header may be tested by button position — both specs find it by
+`aria-controls="app-sidebar"`.
+
+Its glyph follows the position: inside the panel it collapses it is
+`sidebar-collapse` (the conventional framed-layout-with-a-chevron, drawn for
+this set — Heroicons has no panel icon), and in the TopBar it is the `bars-3`
+hamburger, which is what a menu button in a header means. A hamburger sitting
+*inside* the open sidebar reads as "open something" next to the thing already
+open.
+
 ### Auth abstraction
 
 The resource layer only sees `CredentialProvider` (`web/src/auth/`, including

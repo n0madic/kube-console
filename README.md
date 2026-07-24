@@ -25,7 +25,9 @@ authorization model of its own.
 - **Resource explorer** for every built-in and custom resource the cluster
   exposes, discovered automatically (sidebar search, pinning, collapsible
   groups) — CRDs with `additionalPrinterColumns` render with their own
-  columns, no configuration needed.
+  columns, no configuration needed. The sidebar itself collapses to give wide
+  tables the full window, and hides itself automatically on a narrow one,
+  where it opens over the content instead.
 - **Live-updating lists** backed by the Kubernetes Table API and a watch
   stream, with client-side sort/filter over the whole collection. On the
   events list the Object column links straight to the involved object.

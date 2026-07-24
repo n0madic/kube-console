@@ -11,6 +11,7 @@ import { buildCatalog, matchesSearch } from "@/utils/resourceCatalog"
 import ClusterName from "./ClusterName.vue"
 import ClusterSelector from "./ClusterSelector.vue"
 import SidebarLink from "./SidebarLink.vue"
+import SidebarToggle from "./SidebarToggle.vue"
 
 const discovery = useDiscovery()
 const prefs = usePreferencesStore()
@@ -128,17 +129,33 @@ function rowClass(id: string): string {
 </script>
 
 <template>
+  <!-- Hidden with v-show, not v-if, for two reasons: the component stays
+       mounted, so collapsing does not reset the search box or the collapsed
+       sections (whose defaults are derived once per page load, see
+       defaultsApplied above); and display:none takes the contents out of the
+       tab order, which hiding by width alone would need `inert` for.
+       On a narrow viewport it overlays the content as a drawer instead of
+       squeezing the tables it sits next to. -->
   <aside
+    id="app-sidebar"
+    v-show="ui.sidebarOpen"
     class="flex w-64 shrink-0 flex-col border-r border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900"
+    :class="ui.narrowViewport ? 'fixed inset-y-0 left-0 z-40 shadow-xl' : ''"
   >
-    <div class="flex h-14 min-w-0 items-center border-b border-slate-200 px-4 dark:border-slate-700">
+    <div
+      class="flex h-14 min-w-0 items-center gap-2 border-b border-slate-200 px-4 dark:border-slate-700"
+    >
       <RouterLink
         to="/overview"
-        class="flex min-w-0 items-center gap-2 text-lg font-semibold text-slate-800 dark:text-slate-100"
+        class="flex min-w-0 flex-1 items-center gap-2 text-lg font-semibold text-slate-800 dark:text-slate-100"
       >
         <img src="/favicon.svg" alt="" aria-hidden="true" class="h-6 w-6 shrink-0" />
         <span class="truncate">kube-console</span>
       </RouterLink>
+      <!-- The toggle lives here while the sidebar is open (it is the edge of
+           what it controls, and in drawer mode the TopBar is covered anyway),
+           and moves back into the TopBar once it is hidden. -->
+      <SidebarToggle v-if="ui.sidebarOpen" class="shrink-0" />
     </div>
 
     <!-- What the operator called this deployment, then which context of it is

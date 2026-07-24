@@ -3,11 +3,14 @@ import { useRouter } from "vue-router"
 
 import BaseButton from "@/components/ui/BaseButton.vue"
 import { useAuthStore } from "@/stores/auth"
+import { useUiStore } from "@/stores/ui"
 
 import NamespaceSelector from "./NamespaceSelector.vue"
+import SidebarToggle from "./SidebarToggle.vue"
 import ThemeToggle from "./ThemeToggle.vue"
 
 const auth = useAuthStore()
+const ui = useUiStore()
 const router = useRouter()
 
 // Signs out of the current cluster only: other contexts keep their tokens and
@@ -24,6 +27,9 @@ async function logout(): Promise<void> {
   <header
     class="flex h-14 items-center justify-between gap-4 border-b border-slate-200 bg-white px-4 dark:border-slate-700 dark:bg-slate-900"
   >
+    <!-- Only while the sidebar is hidden; once it is open the toggle belongs to
+         its own header, next to the product name. -->
+    <SidebarToggle v-if="!ui.sidebarOpen" class="-ml-1" />
     <NamespaceSelector />
     <div class="ml-auto flex items-center gap-3">
       <ThemeToggle />

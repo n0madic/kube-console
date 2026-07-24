@@ -6,8 +6,9 @@
 // where the same glyph had already been drawn twice.
 //
 // The 24x24 outline glyphs are Heroicons v2 outline (Tailwind Labs, MIT) —
-// the attribution this set never had while it was inlined. The 20x20 glyphs
-// are drawn for this UI.
+// the attribution this set never had while it was inlined — except
+// `sidebar-collapse`, which Heroicons has no equivalent of and which is drawn
+// here in the same geometry. The 20x20 glyphs are drawn for this UI.
 
 export interface IconDef {
   view: string
@@ -65,6 +66,24 @@ export const ICONS = {
     stroke: 2,
     paths: [
       "M21.752 15.002A9.718 9.718 0 0118 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 003 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 009.002-5.998z",
+    ],
+  },
+  "bars-3": {
+    view: "0 0 24 24",
+    stroke: 2,
+    paths: ["M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5"],
+  },
+  // The conventional "collapse the side panel" glyph (a framed layout with the
+  // rail split off and a chevron pointing at it). Heroicons has no panel icon,
+  // so this one is drawn — in Heroicons' geometry (24x24, 2px round strokes)
+  // since it shares a button with `bars-3`.
+  "sidebar-collapse": {
+    view: "0 0 24 24",
+    stroke: 2,
+    paths: [
+      "M3.75 6A2.25 2.25 0 016 3.75h12A2.25 2.25 0 0120.25 6v12A2.25 2.25 0 0118 20.25H6A2.25 2.25 0 013.75 18V6z",
+      "M9.75 3.75v16.5",
+      "M16.5 9l-3 3 3 3",
     ],
   },
   layers: {

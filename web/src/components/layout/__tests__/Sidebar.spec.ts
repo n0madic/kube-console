@@ -50,6 +50,69 @@ describe("Sidebar", () => {
     expect(overview).toBeDefined()
   })
 
+  // Collapsing hides the sidebar outright (its entries are text Kinds with no
+  // icons of their own, so an icon rail would say nothing); on a narrow
+  // viewport it overlays the content instead of squeezing it.
+  describe("collapse", () => {
+    function toggleOf(wrapper: ReturnType<typeof mount>) {
+      return wrapper.findAll("button").find((b) => b.attributes("aria-controls") === "app-sidebar")
+    }
+
+    it("hides itself, and its toggle, when the sidebar is collapsed", async () => {
+      mockDiscovery({ isLoading: ref(true) })
+      const prefs = usePreferencesStore()
+      const wrapper = mount(Sidebar, { global: { stubs: routerLinkStub } })
+      const aside = wrapper.get("#app-sidebar")
+      expect(aside.attributes("style") ?? "").not.toContain("display: none")
+      // While open, the toggle lives in this header — the TopBar has none.
+      expect(toggleOf(wrapper)?.attributes("aria-label")).toBe("Hide sidebar")
+
+      prefs.prefs.sidebarCollapsed = true
+      await nextTick()
+
+      expect(aside.attributes("style")).toContain("display: none")
+      expect(toggleOf(wrapper)).toBeUndefined()
+    })
+
+    it("hides the sidebar from its own header toggle", async () => {
+      mockDiscovery({ isLoading: ref(true) })
+      const prefs = usePreferencesStore()
+      const wrapper = mount(Sidebar, { global: { stubs: routerLinkStub } })
+
+      await toggleOf(wrapper)!.trigger("click")
+      await nextTick()
+
+      expect(prefs.prefs.sidebarCollapsed).toBe(true)
+      expect(wrapper.get("#app-sidebar").attributes("style")).toContain("display: none")
+    })
+
+    it("floats over the content in drawer mode", async () => {
+      mockDiscovery({ isLoading: ref(true) })
+      const ui = useUiStore()
+      const wrapper = mount(Sidebar, { global: { stubs: routerLinkStub } })
+      expect(wrapper.get("#app-sidebar").classes()).not.toContain("fixed")
+
+      // Narrow viewport, then the drawer opened by the user. The mode change
+      // resets the drawer on flush, so it has to settle before the toggle.
+      ui.narrowViewport = true
+      await nextTick()
+      ui.toggleSidebar()
+      await nextTick()
+
+      const aside = wrapper.get("#app-sidebar")
+      expect(aside.attributes("style") ?? "").not.toContain("display: none")
+      expect(aside.classes()).toContain("fixed")
+
+      // The header toggle closes the drawer without touching the saved choice.
+      await toggleOf(wrapper)!.trigger("click")
+      await nextTick()
+
+      expect(ui.sidebarOpen).toBe(false)
+      expect(usePreferencesStore().prefs.sidebarCollapsed).toBe(false)
+      expect(aside.attributes("style")).toContain("display: none")
+    })
+  })
+
   describe("pinned reordering", () => {
     function res(name: string): DiscoveryResource {
       return {
