@@ -864,6 +864,16 @@ hamburger, which is what a menu button in a header means. A hamburger sitting
 *inside* the open sidebar reads as "open something" next to the thing already
 open.
 
+`ui.narrowViewport` is the app's **one** responsive signal, so `ThemeToggle`
+rides on it too: its three-segment radiogroup is the widest control in the
+header, and on a narrow viewport it collapses to a single button cycling Auto →
+Light → Dark → Auto. That button is deliberately **not** a one-option
+radiogroup — only the current mode is on screen, so `aria-label`/`title` state
+both what is set and what a click will do ("Theme: Light theme. Switch to Dark
+theme"). Rendered with `v-if`/`v-else`, not by hiding one variant with CSS: two
+sets of the same controls in the DOM would be two of everything to a screen
+reader.
+
 ### Auth abstraction
 
 The resource layer only sees `CredentialProvider` (`web/src/auth/`, including
