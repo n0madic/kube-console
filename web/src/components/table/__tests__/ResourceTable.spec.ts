@@ -330,6 +330,36 @@ describe("ResourceTable", () => {
     expect(wrapper.emitted("rowClick")).toBeUndefined()
   })
 
+  // The cell/route pairs are memoized per row — a virtualized table rebuilt
+  // them on every scroll frame. Row identity covers the data (TanStack rebuilds
+  // rows exactly when it changes); the column set does not, since the same rows
+  // keep their identity while which cells are visible changes under them, so it
+  // invalidates the memo by hand.
+  it("re-resolves routes when the column set changes under the same rows", async () => {
+    const wrapper = mount(ResourceTable, {
+      props: {
+        columns: [
+          { name: "Reason", type: "string" },
+          { name: "Object", type: "string" },
+        ],
+        rows: [
+          {
+            cells: ["Killing", "pod/nginx-abc"],
+            object: { metadata: { name: "e1", namespace: "prod", uid: "u1" } },
+          },
+        ],
+        globalFilter: "",
+        cellLink: (_row, column) => (column === "Object" ? { path: "/r/core/v1/pods" } : null),
+      },
+      global: { stubs },
+    })
+    expect(wrapper.findAll("a")).toHaveLength(1)
+
+    await wrapper.setProps({ columns: [{ name: "Reason", type: "string" }] })
+    expect(wrapper.findAll("a")).toHaveLength(0)
+    expect(wrapper.text()).not.toContain("pod/nginx-abc")
+  })
+
   it("renders plain cells when no cellLink is given", () => {
     const wrapper = mountTable(
       [

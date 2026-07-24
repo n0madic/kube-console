@@ -8,6 +8,7 @@ import { messageFromError } from "@/api/http"
 import { fetchMetricsCapabilities } from "@/api/ui"
 import type { MetricsCapabilities, MetricsResponse } from "@/api/types"
 import { usePreferencesStore } from "@/stores/preferences"
+import { metricsIntervalMs } from "@/utils/metricsRanges"
 
 import { usePollingLoop } from "./usePollingLoop"
 
@@ -25,8 +26,6 @@ export interface MetricsPollingOptions {
   onSample: (response: MetricsResponse) => void
 }
 
-const MIN_INTERVAL_SECONDS = 15
-
 export function useMetricsPolling(options: MetricsPollingOptions) {
   const prefs = usePreferencesStore()
   const capabilities = ref<MetricsCapabilities | null>(null)
@@ -40,7 +39,7 @@ export function useMetricsPolling(options: MetricsPollingOptions) {
   })
 
   function intervalMs(): number {
-    return Math.max(MIN_INTERVAL_SECONDS, prefs.prefs.metrics.pollIntervalSeconds) * 1000
+    return metricsIntervalMs(prefs.prefs.metrics.pollIntervalSeconds)
   }
 
   async function tick(gen: number): Promise<void> {

@@ -16,8 +16,9 @@ import { computed, ref, watch } from "vue"
 import type { RouteLocationRaw } from "vue-router"
 
 import type { K8sTableColumn, K8sTableRow } from "@/api/types"
-import { cellText, estimateColumnWidths, SAMPLE_ROWS } from "@/utils/columnWidths"
+import { estimateColumnWidths, SAMPLE_ROWS } from "@/utils/columnWidths"
 import { isStatusColumn, statusTextClass } from "@/utils/statusColors"
+import { cellText } from "@/utils/tableCells"
 import { compareTableValues } from "@/utils/tableSort"
 
 const props = defineProps<{
@@ -190,16 +191,37 @@ function cellRoute(cell: Cell<K8sTableRow, unknown>): RouteLocationRaw | null {
   )
 }
 
+interface CellView {
+  cell: Cell<K8sTableRow, unknown>
+  route: RouteLocationRaw | null
+}
+
 /**
- * Visible cells paired with their route, resolved once per cell per render.
- * The template used to ask twice for every cell (once in `v-if`, once for
- * `:to`) on the hot path of a virtualized table — same reason MetadataCard
+ * Visible cells paired with their route, resolved once per cell per render —
+ * the template used to ask twice for every cell (once in `v-if`, once for
+ * `:to`) on the hot path of a virtualized table, same reason MetadataCard
  * precomputes `owners` and RecentEventsCard `rowsWithRoute`.
+ *
+ * Memoized per row, because pairing them allocates: without this, every scroll
+ * frame builds ~30 arrays and ~240 wrapper objects for a route that is null on
+ * every list but events. Keyed on the Row object, which TanStack rebuilds
+ * exactly when `data` changes (sorting and filtering reuse the instances) — so
+ * a row in the cache is a row whose cells and values are unchanged. What is not
+ * covered by row identity is invalidated by hand below: the column set decides
+ * which cells are visible, and `cellLink` is rebuilt by its owner whenever it
+ * would resolve differently (discovery loading, a namespace or cluster switch).
  */
-function cellViews(
-  row: Row<K8sTableRow>,
-): Array<{ cell: Cell<K8sTableRow, unknown>; route: RouteLocationRaw | null }> {
-  return row.getVisibleCells().map((cell) => ({ cell, route: cellRoute(cell) }))
+let cellViewCache = new WeakMap<Row<K8sTableRow>, CellView[]>()
+watch([() => props.cellLink, columnDefs], () => {
+  cellViewCache = new WeakMap()
+})
+
+function cellViews(row: Row<K8sTableRow>): CellView[] {
+  const cached = cellViewCache.get(row)
+  if (cached !== undefined) return cached
+  const views = row.getVisibleCells().map((cell) => ({ cell, route: cellRoute(cell) }))
+  cellViewCache.set(row, views)
+  return views
 }
 
 const totalWidth = computed(() => {

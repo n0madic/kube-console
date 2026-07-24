@@ -8,7 +8,6 @@ import { useQuery } from "@tanstack/vue-query"
 import { computed } from "vue"
 import type { RouteLocationRaw } from "vue-router"
 
-import { messageFromError } from "@/api/http"
 import { getObject } from "@/api/k8s"
 import type { K8sObject, ResourceRef } from "@/api/types"
 import ExpandableValue from "@/components/ui/ExpandableValue.vue"
@@ -90,10 +89,12 @@ function envSourceQuery(ref: ResourceRef, names: () => string[]) {
 const configMapsQuery = envSourceQuery(CM_REF, () => sourceNames.value.configMaps)
 const secretsQuery = envSourceQuery(SECRET_REF, () => sourceNames.value.secrets)
 
-const errorText = computed(() => {
-  const e = configMapsQuery.error.value ?? secretsQuery.error.value
-  return e === null ? null : messageFromError(e)
-})
+// There is deliberately no error branch: fetchMap resolves every reference
+// through Promise.allSettled and maps a failure to null, which buildEnvRows
+// renders in place as "(cannot read configmap/secret)". A forbidden Secret is
+// the normal case on a namespace-scoped token and must not blank the whole
+// table, so these queries never reject and their `error` is always null.
+//
 // Both source maps must have resolved before the table may claim to be
 // complete. Undefined data is not an empty Pod: with the queries gated off (a
 // session past its TTL) they never run, and "No environment variables." would
@@ -151,10 +152,7 @@ const hasRows = computed(() => rows.value.length > 0)
       them in this browser tab only.
     </p>
 
-    <p v-if="errorText !== null" class="rounded-md bg-red-50 px-3 py-2 text-sm text-red-800 dark:bg-red-950 dark:text-red-200">
-      {{ errorText }}
-    </p>
-    <p v-else-if="!resolved" class="py-6 text-center text-sm text-slate-400">Loading...</p>
+    <p v-if="!resolved" class="py-6 text-center text-sm text-slate-400">Loading...</p>
     <p v-else-if="!hasRows" class="py-6 text-center text-sm text-slate-400">
       No environment variables.
     </p>

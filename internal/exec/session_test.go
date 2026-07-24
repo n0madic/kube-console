@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -953,5 +955,61 @@ func TestStreamFailureMessageIsForwardedVerbatim(t *testing.T) {
 	frame := readControlFrame(t, ctx, conn)
 	if frame.Type != "error" || !strings.Contains(frame.Message, "exec denied") {
 		t.Fatalf("upstream failure was not forwarded: %+v", frame)
+	}
+}
+
+// Regression: the idle timeout's error frame used to be written inline, so the
+// callback took writeMu before it could call end(). A stdout write holds that
+// lock for its whole duration and coder/websocket's Write blocks until the
+// client accepts the bytes or the session context is cancelled — so a client
+// that stopped reading pinned the lock, the callback parked on it, and the idle
+// timeout could never fire for exactly the session it exists to reclaim (its
+// slot included). Ending the session is what unblocks that writer, so it must
+// not be queued behind it.
+func TestIdleTimeoutEndsTheSessionEvenWhileTheWriteLockIsHeld(t *testing.T) {
+	h := &Handler{idleTimeout: time.Minute, idleFrameTimeout: 20 * time.Millisecond}
+
+	var writeMu sync.Mutex
+	// Deliberately never unlocked: it stands in for a stdout write stalled on a
+	// client that stopped reading, which only the cancellation below releases.
+	// The frame goroutine stays parked on it for the rest of the test, which is
+	// the point — end() must happen without it.
+	writeMu.Lock()
+
+	ended := make(chan struct{})
+	go h.reportIdleTimeout(context.Background(), nil, &writeMu, func() { close(ended) })
+
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the idle timeout never ended the session: it parked on the write lock")
+	}
+}
+
+// Regression: the callback's guard was `sessionCtx.Err() != nil`, which cannot
+// see a session ending normally — cancel() is deferred before idle.Stop() and
+// therefore runs after it, so from awaitStream returning through the exit frame
+// the context is still live. A deadline landing in that window wrote a spurious
+// "idle timeout" frame behind the exit frame. The guard is now the teardown
+// claim the ordinary path takes first.
+func TestIdleTimeoutIsSilentOnceTheTeardownIsClaimed(t *testing.T) {
+	h := &Handler{idleTimeout: time.Minute, idleFrameTimeout: 20 * time.Millisecond}
+
+	var writeMu sync.Mutex
+	// Held, as above, so a regressed guard parks its frame goroutine on the lock
+	// instead of writing to the nil conn — it then still reaches end() after
+	// idleFrameTimeout, which is what this asserts against.
+	writeMu.Lock()
+
+	var ending atomic.Bool
+	ending.Store(true) // the normal teardown got there first
+
+	ended := make(chan struct{})
+	h.idleFired(context.Background(), nil, &writeMu, &ending, func() { close(ended) })
+
+	select {
+	case <-ended:
+		t.Fatal("the idle deadline ended a session whose teardown was already claimed")
+	default:
 	}
 }

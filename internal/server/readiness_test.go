@@ -87,3 +87,24 @@ func TestReadinessReportsUnreachableUpstream(t *testing.T) {
 		t.Fatalf("status = %d, want 503 for an unreachable apiserver", rec.Code)
 	}
 }
+
+// Regression: /readyz dereferences Registry.Default() without a Resolve in
+// front of it, and Default() returns r.byName[r.def] unchecked — nil for a
+// registry whose default name has no upstream (NewRegistryFromUpstreams only
+// documents the precondition). The probe used to panic on BaseURL, which the
+// recoverer turned into a 500 on the probe endpoint. Unresolvable means not
+// ready, exactly like an unreachable apiserver.
+func TestReadinessFailsClosedWithoutAnUpstream(t *testing.T) {
+	for name, c := range map[string]*readinessCache{
+		"no upstream": newReadinessCache(nil, time.Minute),
+		"no base URL": newReadinessCache(&kube.Upstream{Transport: http.DefaultTransport}, time.Minute),
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c.handler(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503", rec.Code)
+			}
+		})
+	}
+}

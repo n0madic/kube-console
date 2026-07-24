@@ -68,6 +68,17 @@ func (c *readinessCache) isReady() bool {
 // cached for readinessTTL so probe traffic cannot be replayed one-for-one, and
 // that mode is loopback-only with a Host allowlist in front of it.
 func (c *readinessCache) probe() bool {
+	// Fail closed instead of panicking. Registry.Default() hands back whatever
+	// r.byName[r.def] holds — nil included, since NewRegistryFromUpstreams only
+	// documents that the default must be present while NewRegistry enforces it —
+	// and this is the one place that upstream is dereferenced without a Resolve
+	// in front of it. A nil here would be a 500 from the panic recoverer on the
+	// probe endpoint; "not ready" is the honest answer and the same one an
+	// unreachable apiserver gets. Same reasoning as Resolve("") going through
+	// the ordinary lookup rather than returning the default unchecked.
+	if c.up == nil || c.up.BaseURL == nil {
+		return false
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), readinessProbeTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.up.BaseURL.String()+"/version", nil)

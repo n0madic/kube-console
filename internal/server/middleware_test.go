@@ -494,8 +494,15 @@ func TestLoopbackHostGuardOnlyInCredentialMode(t *testing.T) {
 					MaxExecSessions:          1,
 					UseKubeconfigCredentials: useCreds,
 				},
+				// Marked exactly as NewRegistry would from that flag: the mode is
+				// read off the registry, and server.Run refuses to serve the two
+				// apart.
 				Registry: kube.NewRegistryFromUpstreams("default", map[string]*kube.Upstream{
-					"default": {BaseURL: mustParseURL(t, "https://apiserver.example"), Transport: http.DefaultTransport},
+					"default": {
+						BaseURL:              mustParseURL(t, "https://apiserver.example"),
+						Transport:            http.DefaultTransport,
+						UseConfigCredentials: useCreds,
+					},
 				}),
 				Logger:  slog.New(slog.DiscardHandler),
 				Version: "test",

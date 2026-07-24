@@ -12,6 +12,7 @@ import { fetchAllNodeMetrics } from "@/api/ui"
 import type { K8sObject } from "@/api/types"
 import { useAuthStore } from "@/stores/auth"
 import { usePreferencesStore } from "@/stores/preferences"
+import { metricsIntervalMs } from "@/utils/metricsRanges"
 import { parseQuantity } from "@/utils/units"
 
 import { usePollingLoop } from "./usePollingLoop"
@@ -31,8 +32,6 @@ interface NodeStatus {
   allocatable?: Record<string, string>
   conditions?: Array<{ type?: string; status?: string }>
 }
-
-const MIN_INTERVAL_SECONDS = 15
 
 function nodeStatus(node: K8sObject): NodeStatus {
   return (node.status as NodeStatus | undefined) ?? {}
@@ -116,7 +115,7 @@ export function useClusterSummary() {
   }
 
   function intervalMs(): number {
-    return Math.max(MIN_INTERVAL_SECONDS, prefs.prefs.metrics.pollIntervalSeconds) * 1000
+    return metricsIntervalMs(prefs.prefs.metrics.pollIntervalSeconds)
   }
 
   const loop = usePollingLoop(

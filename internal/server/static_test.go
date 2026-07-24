@@ -68,6 +68,53 @@ func TestSPANeverFallsBackForAPIPaths(t *testing.T) {
 	}
 }
 
+// Regression: the path was cleaned for the API-prefix check but the original
+// request went on to ServeFileFS, which rejects any URL holding a dot-segment
+// with its own plain-text 400 — so a client-side route spelled with one got
+// that instead of index.html, and half the normalization was wasted. Browsers
+// normalize before sending; hand-built and proxied requests do not.
+func TestSPAServesIndexForDotSegmentRoutes(t *testing.T) {
+	h := NewSPAHandler(testDist)
+	for _, p := range []string{
+		"/r/core/v1/../pods", // a client-side route, unnormalized
+		"/assets/../login",   // out of assets/ and back into the SPA routes
+		"/../overview",       // above the root: Clean pins it back to "/overview"
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s = %d, want 200: %s", p, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "kube-console") {
+			t.Errorf("GET %s did not serve index.html: %q", p, rec.Body.String())
+		}
+	}
+
+	// The asset branch runs on the cleaned path too, and used to 400 the same way.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x/../assets/app.abc123.js", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "console.log") {
+		t.Errorf("asset through a dot-segment = %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+// The same cleaning must not open a way past the API guard: "..%2F" style
+// escapes aside (the gateway rejects those), a dot-segment path that resolves
+// onto an API root is still an API path.
+func TestSPARejectsDotSegmentAPIPaths(t *testing.T) {
+	h := NewSPAHandler(testDist)
+	for _, p := range []string{"/r/../api/ui/discovery", "/../k8s/api/v1/pods", "/x/../../api"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404", p, rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), "<title>") {
+			t.Errorf("GET %s served HTML instead of a JSON error", p)
+		}
+	}
+}
+
 func newTestHandler(t *testing.T) http.Handler {
 	t.Helper()
 	base, _ := url.Parse("http://127.0.0.1:1")

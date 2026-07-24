@@ -4,6 +4,10 @@
 // supplies the poll (`tick`) and the interval. `tick` receives the live
 // generation and must guard its post-await writes with `isCurrent(gen)` so a
 // response that resolves after a stop/restart is discarded.
+//
+// `intervalMs` is the loop's one cadence guarantee: no path here starts a poll
+// less than that after the last one — including the catch-up when the tab comes
+// back, which is throttled against it rather than firing per visibility flip.
 
 import { onBeforeUnmount } from "vue"
 
@@ -32,9 +36,36 @@ export function usePollingLoop(
   let timer: number | null = null
   let gen = 0
   let live = false
+  /** When the last poll *started* — the throttle for the visibility catch-up. */
+  let lastTickMs = 0
 
   function isCurrent(g: number): boolean {
     return g === gen && live
+  }
+
+  function clearTimer(): void {
+    if (timer !== null) {
+      window.clearTimeout(timer)
+      timer = null
+    }
+  }
+
+  /**
+   * Run one poll, swallowing its rejection.
+   *
+   * Every path that runs a tick goes through here, because none of them has
+   * anywhere to report a failure: the timer and the visibility listener have no
+   * caller at all, and `start()`'s promise is discarded by every consumer
+   * (`void loop.start()`). `.finally()` is NOT this — it re-throws the reason it
+   * observed, so the self-rescheduling path was still raising an unhandled
+   * rejection on every failing poll even though it did stay armed. A tick that
+   * wants its failure seen surfaces it itself (they all set an `error` ref).
+   */
+  function runTick(g: number): Promise<void> {
+    // Stamped on entry, not on completion: the throttle below must bound how
+    // often a poll is *started*, or a slow tick would still let a burst queue up.
+    lastTickMs = Date.now()
+    return Promise.resolve(tick(g)).catch(() => undefined)
   }
 
   function schedule(g: number): void {
@@ -45,13 +76,26 @@ export function usePollingLoop(
         schedule(g) // stay armed; skip the poll while the tab is hidden
         return
       }
-      void Promise.resolve(tick(g)).finally(() => schedule(g))
+      void runTick(g).finally(() => schedule(g))
     }, intervalMs())
   }
 
   function onVisibilityChange(): void {
-    // Catch up immediately when the tab becomes visible again.
-    if (!document.hidden && live) void Promise.resolve(tick(gen))
+    if (document.hidden || !live) return
+    // Catch up when the tab comes back — but never faster than the interval the
+    // caller asked for. The timer stays armed while hidden (it only skips the
+    // poll), so a tab away for less than one interval already has a poll coming,
+    // and an unthrottled catch-up turned every alt-tab into an extra full poll:
+    // ProblemPodsCard walks every pod in the cluster and its 60s cadence is
+    // deliberate, and the metrics charts of the page behind it fire alongside it.
+    if (Date.now() - lastTickMs < intervalMs()) return
+    // Re-arm from now, replacing the pending timer: the catch-up *is* this
+    // cycle's poll, and leaving the old timer would fire another one right
+    // behind it. The generation is captured, like every other tick path, so a
+    // stop/restart during the poll cannot arm a second chain.
+    const g = gen
+    clearTimer()
+    void runTick(g).finally(() => schedule(g))
   }
 
   async function start(gate?: (gen: number) => Promise<boolean> | boolean): Promise<void> {
@@ -64,11 +108,9 @@ export function usePollingLoop(
     }
     live = true
     document.addEventListener("visibilitychange", onVisibilityChange)
-    // A rejecting first poll must not kill the loop: without the catch it would
-    // skip schedule() and leave nothing armed, silently — every caller does
-    // `void loop.start()`, so the rejection has nowhere to surface. The
-    // self-rescheduling path already survives this through its .finally.
-    await Promise.resolve(tick(g)).catch(() => undefined)
+    // A rejecting first poll must not kill the loop: without runTick's catch it
+    // would skip schedule() and leave nothing armed, silently.
+    await runTick(g)
     if (g !== gen) return
     schedule(g)
   }
@@ -76,10 +118,7 @@ export function usePollingLoop(
   function stop(): void {
     gen += 1
     live = false
-    if (timer !== null) {
-      window.clearTimeout(timer)
-      timer = null
-    }
+    clearTimer()
     document.removeEventListener("visibilitychange", onVisibilityChange)
     onStop()
   }

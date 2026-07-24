@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -18,6 +19,22 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, version s
 	registry, err := kube.NewRegistry(cfg)
 	if err != nil {
 		return err
+	}
+	// One credential mode, one source of truth. Everything downstream reads the
+	// registry — what RESTConfigs actually did — and config.validate has already
+	// rejected every combination in which the flag could fail to reach it
+	// (--api-server, in-cluster). So a disagreement here means the request was
+	// silently not honoured, and the two states it leaves are exactly the ones
+	// not to serve: a login page in front of upstreams that need no token, or
+	// credentialed upstreams behind whichever fences the flag alone would mount.
+	if registry.UsesConfigCredentials() != cfg.UseKubeconfigCredentials {
+		built := "credential-free"
+		if registry.UsesConfigCredentials() {
+			built = "with its own credentials"
+		}
+		return fmt.Errorf("--use-kubeconfig-credentials=%v but the default context %q was built %s: "+
+			"the carve-out applies to kubeconfig contexts only",
+			cfg.UseKubeconfigCredentials, registry.DefaultName(), built)
 	}
 
 	handler := NewHandler(Deps{

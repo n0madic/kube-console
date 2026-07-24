@@ -39,11 +39,15 @@ type Handler struct {
 	// sessions are deliberately *not* keyed by IP: behind a reverse proxy
 	// without trusted-proxy configuration every user shares one address, and
 	// capping their open terminals would break the console for a whole team.
-	handshakes      *ipGate
-	idleTimeout     time.Duration
-	authTimeout     time.Duration
-	drainTimeout    time.Duration
-	executorFactory ExecutorFactory
+	handshakes  *ipGate
+	idleTimeout time.Duration
+	authTimeout time.Duration
+	// idleFrameTimeout bounds how long the idle timeout waits for its own
+	// explanation to reach the browser before ending the session regardless —
+	// see reportIdleTimeout.
+	idleFrameTimeout time.Duration
+	drainTimeout     time.Duration
+	executorFactory  ExecutorFactory
 }
 
 // NewHandler builds the exec bridge handler.
@@ -61,6 +65,11 @@ func NewHandler(reg *kube.Registry, cfg *config.Config, logger *slog.Logger) *Ha
 		// upgrade. Every second of slack here is a second an unauthenticated
 		// connection can sit in the pending pool.
 		authTimeout: 2 * time.Second,
+		// The idle timeout's error frame is best-effort: a healthy connection
+		// takes it instantly, and one whose writes are stalled is not going to
+		// read it at all. Short, because every millisecond of it is delay before
+		// a session that has to end anyway actually releases its slot.
+		idleFrameTimeout: time.Second,
 		// How long a gone browser's command may take to exit on stdin EOF
 		// before the session is cancelled outright (see awaitStream). Short:
 		// a command that ends on EOF does so in milliseconds, and an

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -90,4 +91,26 @@ func TestShutdownAbortsActiveWatchInsteadOfWaitingOutTheGracePeriod(t *testing.T
 	}
 
 	_, _ = io.Copy(io.Discard, resp.Body)
+}
+
+// The credential mode has exactly one source of truth downstream — the registry
+// — so Run refuses to serve a registry that disagrees with the flag instead of
+// leaving the two to be read separately (the loopback fence used to be mounted
+// off either). --api-server is the combination that produces one: RESTConfigs
+// anonymizes that branch whatever the flag says, and config.validate rejects it
+// before Run in every real startup.
+func TestRunRejectsACredentialModeTheRegistryDidNotHonour(t *testing.T) {
+	cfg := &config.Config{
+		ListenAddr:               "127.0.0.1:0",
+		KubeAPIServer:            "https://apiserver.example:6443",
+		UseKubeconfigCredentials: true,
+		MaxBodyBytes:             1 << 20,
+	}
+	err := Run(context.Background(), cfg, slog.New(slog.DiscardHandler), "test", fstest.MapFS{})
+	if err == nil {
+		t.Fatal("Run served an anonymized registry as if it carried kubeconfig credentials")
+	}
+	if !strings.Contains(err.Error(), "use-kubeconfig-credentials") {
+		t.Errorf("error does not name the flag it is about: %v", err)
+	}
 }

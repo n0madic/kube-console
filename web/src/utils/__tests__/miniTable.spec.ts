@@ -80,7 +80,22 @@ describe("tableToMini", () => {
     expect(mini.rows[0]?.cells).toEqual(["1/1", "Running", "10.0.0.1"])
   })
 
-  it("drops named columns and coerces null/object cells to empty", () => {
+  // Object cells are shared behaviour now (utils/tableCells): the list page has
+  // always rendered them as JSON, and a mini table showing the same cell as
+  // blank read as "the server sent nothing".
+  it("renders an object cell as JSON, like the full table", () => {
+    const table: K8sTable = {
+      kind: "Table",
+      columnDefinitions: [
+        { name: "Name", type: "string" },
+        { name: "Note", type: "string" },
+      ],
+      rows: [{ cells: ["x", { a: 1 }], object: { metadata: { name: "x", namespace: "ns" } } }],
+    }
+    expect(tableToMini(table).rows[0]?.cells).toEqual(['{"a":1}'])
+  })
+
+  it("drops named columns and coerces null cells to empty", () => {
     const table: K8sTable = {
       kind: "Table",
       columnDefinitions: [

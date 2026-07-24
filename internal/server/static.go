@@ -34,12 +34,20 @@ func (s *spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Cleaned first: chi does not normalize, so "//api/ui/discovery" and
 	// "/k8s/../k8s/api" reach here as-is and would otherwise miss the prefix
 	// check and be answered with index.html — a 200 HTML body where the SPA
-	// (and any client) expects a JSON error.
-	cleaned := path.Clean(r.URL.Path)
+	// (and any client) expects a JSON error. Rooted before cleaning, since
+	// path.Clean only resolves ".." against a leading "/" ("../api" stays
+	// "../api", and would miss the check just as well).
+	cleaned := path.Clean("/" + strings.TrimPrefix(r.URL.Path, "/"))
 	if isAPIPath(cleaned) {
 		httpx.WriteError(w, http.StatusNotFound, "NotFound", "not found")
 		return
 	}
+	// ServeFileFS rejects a request whose URL still holds a dot-segment with its
+	// own plain-text 400, whatever `name` it is handed — so it gets the cleaned
+	// path too, and the normalization above is applied whole. Otherwise
+	// "/r/core/v1/../pods" is normalized for the API check, found not to be an
+	// API path, and then answered with that 400 instead of index.html.
+	r = withPath(r, cleaned)
 
 	name := strings.TrimPrefix(cleaned, "/")
 	if name != "" && name != "index.html" && fileExists(s.dist, name) {
@@ -59,6 +67,23 @@ func (s *spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	http.ServeFileFS(w, r, s.dist, "index.html")
+}
+
+// withPath returns r with its URL path replaced, sharing everything else. The
+// request is only read from here on (net/http serves the file itself), so a
+// shallow copy is enough — as in httputil's own rewrite path. RawPath goes with
+// it: it is the encoded form of the old path, and url.EscapedPath falls back to
+// escaping Path once the two no longer agree.
+func withPath(r *http.Request, p string) *http.Request {
+	if p == r.URL.Path {
+		return r
+	}
+	clone := *r
+	u := *r.URL
+	u.Path = p
+	u.RawPath = ""
+	clone.URL = &u
+	return &clone
 }
 
 func isAPIPath(p string) bool {

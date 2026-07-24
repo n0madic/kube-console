@@ -5,6 +5,7 @@
 // dragging; these are only the defaults.
 
 import type { K8sTableColumn, K8sTableRow } from "@/api/types"
+import { cellText } from "@/utils/tableCells"
 
 export const COLUMN_MIN_PX = 60
 export const COLUMN_MAX_PX = 380
@@ -19,12 +20,6 @@ export const SAMPLE_ROWS = 200
 
 const CELL_FONT = '14px ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'
 const HEADER_FONT = `600 ${CELL_FONT}`
-
-export function cellText(value: unknown): string {
-  if (value === null || value === undefined) return ""
-  if (typeof value === "object") return JSON.stringify(value)
-  return String(value)
-}
 
 let canvasCtx: CanvasRenderingContext2D | null | undefined
 

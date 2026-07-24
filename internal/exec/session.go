@@ -128,8 +128,16 @@ func (h *Handler) session(ctx context.Context, conn *websocket.Conn, releaseHand
 	// back as streamErr and reaches the browser as an error frame.
 	var quiet atomic.Bool
 	sessionCtx = klog.NewContext(sessionCtx, debugLogr(h.logger, &quiet))
-	// end ends the session: silence the teardown narration, then cancel.
+	// ending is claimed by whichever teardown path gets there first, and exists
+	// for the idle callback below: Stop() cannot recall a callback that has
+	// already started, and sessionCtx is no substitute for this — cancel() is
+	// deferred *before* idle.Stop() and therefore runs *after* it, so the entire
+	// normal teardown window (awaitStream returning, the exit frame, conn.Close)
+	// would pass an `Err() != nil` check with the error still nil.
+	var ending atomic.Bool
+	// end ends the session: claim the teardown, silence the narration, cancel.
 	end := func() {
+		ending.Store(true)
 		quiet.Store(true)
 		cancel()
 	}
@@ -143,17 +151,7 @@ func (h *Handler) session(ctx context.Context, conn *websocket.Conn, releaseHand
 	// canceled" — ever reaches the browser. The terminal would simply go dead
 	// with no explanation of why or whether reconnecting helps.
 	idle := time.AfterFunc(h.idleTimeout, func() {
-		// Stop() cannot cancel a callback that has already started, so re-check:
-		// a session ending normally at this exact moment must not be handed a
-		// spurious timeout frame on its way out.
-		if sessionCtx.Err() != nil {
-			return
-		}
-		_ = writeControl(ctx, conn, &writeMu, ControlFrame{
-			Type:    "error",
-			Message: "exec session closed: idle timeout after " + h.idleTimeout.String(),
-		})
-		end()
+		h.idleFired(ctx, conn, &writeMu, &ending, end)
 	})
 	defer idle.Stop()
 	activity := func() { idle.Reset(h.idleTimeout) }
@@ -192,6 +190,11 @@ func (h *Handler) session(ctx context.Context, conn *websocket.Conn, releaseHand
 		})
 	}()
 	streamErr := h.awaitStream(streamDone, clientGone, &quiet, cancel)
+	// The stream is over, so claim the teardown before reporting its outcome: an
+	// idle deadline landing in the next few microseconds would otherwise chase
+	// the exit frame with an "idle timeout" error frame. The deferred idle.Stop()
+	// cannot do this on its own — see `ending`.
+	ending.Store(true)
 
 	switch {
 	case streamErr == nil:
@@ -206,6 +209,57 @@ func (h *Handler) session(ctx context.Context, conn *websocket.Conn, releaseHand
 		}
 	}
 	conn.Close(websocket.StatusNormalClosure, "session ended")
+}
+
+// idleFired runs the idle deadline: claim the session's teardown, and only if
+// the claim succeeds tell the browser why its terminal is closing.
+//
+// The claim is the guard, because time.Timer.Stop() cannot recall a callback
+// that has already started and the session context cannot stand in for one:
+// cancel() is deferred before idle.Stop() and so runs after it, leaving the
+// whole normal teardown unguarded — the client would get a spurious "idle
+// timeout" frame right behind its exit frame.
+func (h *Handler) idleFired(ctx context.Context, conn *websocket.Conn, mu *sync.Mutex, ending *atomic.Bool, end func()) {
+	if !ending.CompareAndSwap(false, true) {
+		return
+	}
+	h.reportIdleTimeout(ctx, conn, mu, end)
+}
+
+// reportIdleTimeout tells the browser why its terminal is about to close, then
+// ends the session — in that order, and with the second step not conditional on
+// the first.
+//
+// The ordering is the point of the frame at all: cancelling makes
+// coder/websocket close the socket from under readLoop, so nothing written
+// afterwards reaches the browser and the terminal would just go dead. But the
+// write must not gate `end`. writeMu is held for the whole of a stdout write,
+// and coder/websocket's Write blocks until the socket accepts the bytes or the
+// session context is done — so a client that stopped reading pins the lock, and
+// waiting for it here would mean the idle timeout can never fire for exactly
+// the session it exists to reclaim (cancelling is what unblocks that writer,
+// and the session slot is held until it does).
+//
+// Hence the frame goes out beside this call, bounded by idleFrameTimeout, and
+// the session ends either way. The goroutine is not leaked: end() cancels the
+// session, the stalled writer it is queued behind returns, and the write then
+// fails on the closed connection.
+func (h *Handler) reportIdleTimeout(ctx context.Context, conn *websocket.Conn, mu *sync.Mutex, end func()) {
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		_ = writeControl(ctx, conn, mu, ControlFrame{
+			Type:    "error",
+			Message: "exec session closed: idle timeout after " + h.idleTimeout.String(),
+		})
+	}()
+	timer := time.NewTimer(h.idleFrameTimeout)
+	defer timer.Stop()
+	select {
+	case <-sent:
+	case <-timer.C:
+	}
+	end()
 }
 
 // awaitStream waits for the exec stream to end. When the browser leaves first

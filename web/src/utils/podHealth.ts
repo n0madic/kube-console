@@ -28,6 +28,7 @@
 // and stay listed for as long as they last.
 
 import type { K8sTableColumn, K8sTableRow } from "@/api/types"
+import { scalarCellText } from "@/utils/tableCells"
 
 export type PodProblem = "error" | "not-ready" | "stuck"
 
@@ -102,10 +103,9 @@ export function podColumnIndexes(defs: K8sTableColumn[]): PodColumnIndexes {
   return { status: find("status"), ready: find("ready") }
 }
 
+/** scalarCellText, not cellText: an unclassifiable cell must read as absent. */
 function cellAt(row: K8sTableRow, index: number): string {
-  if (index < 0) return ""
-  const cell = row.cells[index]
-  return cell === null || cell === undefined || typeof cell === "object" ? "" : String(cell)
+  return index < 0 ? "" : scalarCellText(row.cells[index])
 }
 
 /** "1/2" → not every container is ready. Anything unparseable → false. */

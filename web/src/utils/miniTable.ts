@@ -4,6 +4,7 @@
 // here because it is rendered as a navigation link by the component.
 
 import type { K8sObjectMeta, K8sTable } from "@/api/types"
+import { cellText } from "@/utils/tableCells"
 
 export interface MiniRow {
   name: string
@@ -14,10 +15,6 @@ export interface MiniRow {
 export interface MiniTable {
   columns: string[]
   rows: MiniRow[]
-}
-
-function cellText(cell: unknown): string {
-  return cell === null || cell === undefined || typeof cell === "object" ? "" : String(cell)
 }
 
 interface ToMiniOptions {

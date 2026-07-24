@@ -122,14 +122,61 @@ describe("usePollingLoop", () => {
     h.loop.stop()
   })
 
-  it("polls immediately when the tab becomes visible again", async () => {
+  it("polls immediately when the tab becomes visible after a full interval away", async () => {
     const h = mountLoop()
     await h.loop.start()
     const afterStart = h.ticks.length
 
+    setHidden(true)
+    await vi.advanceTimersByTimeAsync(2000) // away for two intervals, no polls
+    expect(h.ticks.length).toBe(afterStart)
+
     fireVisibilityChange(false) // visible → catch-up poll
     await flush()
     expect(h.ticks.length).toBe(afterStart + 1)
+    h.loop.stop()
+  })
+
+  // Regression: the catch-up ran on every hidden→visible transition, bypassing
+  // intervalMs entirely — ten alt-tabs in ten seconds issued ten full polls,
+  // which for ProblemPodsCard is ten cluster-wide pod walks against a cadence
+  // deliberately set to 60s.
+  it("does not re-poll on a visibility flip inside the interval", async () => {
+    const h = mountLoop()
+    await h.loop.start()
+    const afterStart = h.ticks.length
+
+    for (let i = 0; i < 5; i++) {
+      fireVisibilityChange(true)
+      fireVisibilityChange(false)
+      await flush()
+    }
+    expect(h.ticks.length).toBe(afterStart)
+
+    // And the loop is still armed on its own cadence, not stalled by the skip.
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.ticks.length).toBe(afterStart + 1)
+    h.loop.stop()
+  })
+
+  // The catch-up replaces the pending timer instead of running beside it: the
+  // next scheduled poll must be one interval after the catch-up, not after the
+  // poll it superseded.
+  it("re-arms the interval from the catch-up poll", async () => {
+    const h = mountLoop()
+    await h.loop.start()
+    const afterStart = h.ticks.length
+
+    setHidden(true)
+    await vi.advanceTimersByTimeAsync(1500) // mid-cycle: 500ms left on the timer
+    fireVisibilityChange(false)
+    await flush()
+    expect(h.ticks.length).toBe(afterStart + 1) // the catch-up
+
+    await vi.advanceTimersByTimeAsync(600) // past the old timer's 500ms
+    expect(h.ticks.length).toBe(afterStart + 1)
+    await vi.advanceTimersByTimeAsync(400) // a full interval after the catch-up
+    expect(h.ticks.length).toBe(afterStart + 2)
     h.loop.stop()
   })
 
@@ -163,5 +210,46 @@ describe("usePollingLoop", () => {
     await vi.advanceTimersByTimeAsync(1000)
     expect(h.ticks.length).toBe(2) // the loop rescheduled despite the rejection
     h.loop.stop()
+  })
+
+  // Regression: only `start()`'s tick was caught. The scheduled path used
+  // `.finally()`, which re-throws the reason it observed, and the visibility
+  // catch-up had no handler at all — so every failing poll after the first
+  // raised an unhandled rejection (a console error in the browser, and a failed
+  // run under vitest) even though the loop itself stayed armed.
+  it("never leaks an unhandled rejection from a failing poll", async () => {
+    const leaked: unknown[] = []
+    const onLeak = (reason: unknown): void => {
+      leaked.push(reason)
+    }
+    // Reached off globalThis with a local type: the app's tsconfig has no Node
+    // types (it builds for the browser), and jsdom does not forward a Node
+    // promise rejection to window's `unhandledrejection` event.
+    const node = globalThis as unknown as {
+      process: {
+        on: (event: "unhandledRejection", listener: (reason: unknown) => void) => void
+        off: (event: "unhandledRejection", listener: (reason: unknown) => void) => void
+      }
+    }
+    node.process.on("unhandledRejection", onLeak)
+    try {
+      const h = mountLoop(() => Promise.reject(new Error("boom")))
+      await h.loop.start() // start path
+      await vi.advanceTimersByTimeAsync(1000) // scheduled path
+      setHidden(true)
+      await vi.advanceTimersByTimeAsync(1500) // away long enough to earn a catch-up
+      fireVisibilityChange(false) // visibility catch-up path
+      await flush()
+      expect(h.ticks.length).toBe(3) // all three paths really ran
+      h.loop.stop()
+      // Node reports an unhandled rejection only once the microtask queue has
+      // drained, so give it a real macrotask to do so.
+      vi.useRealTimers()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      node.process.off("unhandledRejection", onLeak)
+    }
+
+    expect(leaked).toEqual([])
   })
 })

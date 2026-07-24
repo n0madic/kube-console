@@ -116,7 +116,15 @@ UseCredentials` — what `RESTConfigs` actually *did* — never re-read from
 `cfg`: only the kubeconfig branch keeps credentials, and an anonymized upstream
 marked credentialed would authenticate with nothing at all. `Registry.
 useConfigCreds` is likewise derived from the default upstream, in both
-constructors. Two consequences worth keeping in mind: the gateway **deletes the
+constructors. That registry value is the **single** source of truth every
+decision site reads, `RequireLoopbackHost` included (it was once mounted off
+`cfg.UseKubeconfigCredentials || registry.UsesConfigCredentials()`, which left
+one fact readable from two places); the flag is only what was asked for, and
+`server.Run` **refuses to start** when the two disagree rather than letting half
+a mode be served — `config.validate` has already rejected every combination in
+which the request could fail to reach the registry, so a disagreement means the
+precedence in `RESTConfigs` moved under it. Two consequences worth keeping in
+mind: the gateway **deletes the
 inbound `Authorization` header** in `rewriteFor` (client-go will not overwrite
 one, so a client-supplied token would otherwise pick the identity the apiserver
 sees) — keyed off the **upstream** the proxy dispatches to, not a process-wide
@@ -170,6 +178,14 @@ Kubernetes `Status` bodies.
   just drops the connection and lets the kubelet reap the process. Keep the
   timeout short: it is delay before an unavoidable drop, with the session slot
   held meanwhile.
+- The idle deadline is one of several paths that can end a session, so they
+  claim the teardown through a shared `ending` flag (`idleFired`'s
+  compare-and-swap): `time.Timer.Stop()` cannot recall a callback that has
+  already started, and the session context is no substitute for the flag —
+  `cancel()` is deferred *before* `idle.Stop()` and therefore runs *after* it,
+  so a deadline landing anywhere in the normal teardown would see a live context
+  and chase the exit frame with an "idle timeout" error frame. The ordinary path
+  claims it the moment `awaitStream` returns.
 - Cancelling closes the upstream under client-go's own copy goroutines, which
   narrate it through klog at error level ("Copying stdout failed" / "Waiting for
   server to close stdin failed" / "Websocket Ping failed", all "use of closed
@@ -332,9 +348,13 @@ embedded SPA (`web/embed.go`, package `web` at the repo root because go:embed
 cannot reference `../` — deliberate deviation from all-code-in-internal). The
 SPA fallback never serves HTML for `/k8s/*` or `/api/*` (JSON errors only), so
 blocked paths cannot look like 200s. The check runs on a `path.Clean`ed path
-(`static.go`): chi does not normalize, so `//api/ui/discovery` and
-`/api/../api/ui/discovery` reached the fallback as non-API paths and answered
-`index.html` with a 200.
+(`static.go`, rooted first — `Clean` only resolves `..` against a leading `/`):
+chi does not normalize, so `//api/ui/discovery` and `/api/../api/ui/discovery`
+reached the fallback as non-API paths and answered `index.html` with a 200. The
+**request** is rewritten onto that cleaned path too (`withPath`), because
+`http.ServeFileFS` rejects any URL still holding a dot-segment with its own
+plain-text 400 whatever filename it is handed — so `/r/core/v1/../pods`, a
+client-side route, got that instead of the SPA.
 
 ### Multi-cluster
 
@@ -542,7 +562,20 @@ a bare "event" is the core one — then highest version, like the sidebar dedupe
 the namespace comes from the event's row metadata, cluster-scoped kinds (Node
 events live in `default`) take the `_` sentinel. `ResourceListPage` memoizes the
 resolver per namespace+cell, since the table asks per visible cell on every
-render.
+render — and `ResourceTable` memoizes the cell/route pairs it builds from it in
+a `WeakMap` keyed by the **TanStack Row**, which is rebuilt exactly when `data`
+changes (sorting and filtering reuse the instances, so a cached row is one whose
+cells and values are unchanged). What row identity does not cover is invalidated
+by hand: the column set, which decides which cells are visible, and `cellLink`
+itself. Without the memo every scroll frame allocated an array per rendered row
+and a wrapper per cell for a route that is `null` on every list but events.
+
+Cell text is one shared pair in `utils/tableCells.ts`, not a copy per util:
+`cellText` (objects → JSON, since a blank cell reads as "the server sent
+nothing") for everything that renders, and `scalarCellText` (objects → `""`) for
+`podHealth`, which must **abstain** on a cell it cannot classify rather than
+fall through to "error". The two used to be three near-identical private
+helpers that disagreed by accident.
 
 Writes go through server-side apply (`fieldManager=kube-console`, force=false,
 dry-run supported) — never PUT. The exception is the narrow set of kind-specific
@@ -992,7 +1025,15 @@ it is the one upstream-supplied string that ends up **in a path**
 check falls through to the first *usable* entry in `group.Versions` rather than
 failing the probe, so one unusable entry cannot hide a valid version behind it.
 The frontend polls ≥15s only while the tab is visible, into in-memory ring
-buffers (240 samples, deduped by source timestamp). The buffers live in a shared
+buffers (240 samples, deduped by source timestamp). The floor is one constant
+for every metrics caller (`METRICS_MIN_INTERVAL_SECONDS`/`metricsIntervalMs` in
+`utils/metricsRanges.ts`) — `useMetricsPolling` and `useClusterSummary` run side
+by side on the Overview against the same endpoints, so they must not each carry
+their own copy of it. `usePollingLoop` owns the cadence itself: **no** path
+starts a poll sooner than `intervalMs` after the last one, the catch-up when a
+hidden tab returns included (it used to fire per visibility flip, so ten
+alt-tabs meant ten cluster-wide pod walks; it now replaces the pending timer
+rather than running beside it). The buffers live in a shared
 cache (`utils/metricsCache.ts`) keyed per axis by context-prefixed scope
 (`<ctx>:pod:<uid>:cpu`, `<ctx>:node:<name>:cpu`, `<ctx>:ns:<namespace>:cpu`,
 `:mem`), so history survives screen/tab switches and a late response from the

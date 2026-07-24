@@ -140,7 +140,10 @@ describe("ProblemPodsCard", () => {
 
   // The polling loop's visibilitychange catch-up starts a scan without knowing
   // one is already walking, and both carry the same live generation — so the
-  // generation alone does not decide which result wins.
+  // generation alone does not decide which result wins. The catch-up is
+  // throttled to the card's own 60s cadence, so reaching this needs a scan that
+  // is still walking a minute later (a big cluster, a tab left in the
+  // background) — hence the clock jump before the flip.
   it("keeps the newer result when two scans overlap", async () => {
     let finishFirst: (result: TableWalkResult) => void = () => {}
     mockedList
@@ -155,9 +158,13 @@ describe("ProblemPodsCard", () => {
       })
 
     const wrapper = mountCard()
-    // Tab regains focus while the first scan is still walking.
+    // Tab regains focus a full refresh interval later, with the first scan still
+    // walking.
+    const realNow = Date.now
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + 2 * 60_000)
     document.dispatchEvent(new Event("visibilitychange"))
     await flushPromises()
+    clock.mockRestore()
     expect(wrapper.text()).toContain("newer-scan")
 
     // The older scan lands last and must not write its stale rows.

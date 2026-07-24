@@ -45,16 +45,18 @@ func NewHandler(d Deps) http.Handler {
 	// cannot provide: without it, DNS rebinding turns any page the developer
 	// visits into a full-privilege client of this port. See RequireLoopbackHost.
 	//
-	// Asked of BOTH the flag and the registry, and mounted if either says yes.
-	// Every other credential-mode decision — the auth-mode endpoint,
-	// Registry.RequireToken, the exec auth frame, the gateway's Authorization
-	// strip — reads the registry (what RESTConfigs actually did); reading only
-	// cfg here would be a second source of truth for one fact, and the failure
-	// mode of a disagreement is the exact state this fence exists to prevent:
-	// upstream requests authenticated by the kubeconfig with no Host allowlist
-	// in front of them. Erring towards mounting it costs nothing — in token
-	// mode it is merely redundant.
-	if d.Cfg.UseKubeconfigCredentials || d.Registry.UsesConfigCredentials() {
+	// Asked of the registry alone, like every other credential-mode decision (the
+	// auth-mode endpoint, Registry.RequireToken, the exec auth frame, the
+	// gateway's Authorization strip): the registry reports what RESTConfigs
+	// actually *did* with each config, while the flag is only what was asked for
+	// — and RESTConfigs honours it on the kubeconfig branch alone. So the
+	// registry is authoritative in both directions. Credentialed upstreams always
+	// mount the fence whatever the Config beside them says, and an anonymized
+	// upstream does not need it: its requests carry the user's own bearer, and
+	// mounting it there would fence off a deployment that is allowed to be
+	// remote. server.Run rejects a disagreement between the two at startup, so
+	// this cannot quietly become half a mode.
+	if d.Registry.UsesConfigCredentials() {
 		r.Use(RequireLoopbackHost)
 	}
 	r.Use(SecurityHeaders)
