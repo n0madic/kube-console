@@ -8,6 +8,7 @@ import ClusterSummaryCards from "@/components/metrics/ClusterSummaryCards.vue"
 import MetricsChart from "@/components/metrics/MetricsChart.vue"
 import MetricsUnavailable from "@/components/metrics/MetricsUnavailable.vue"
 import TopPodsTable from "@/components/metrics/TopPodsTable.vue"
+import ProblemPodsCard from "@/components/pod/ProblemPodsCard.vue"
 import BaseSelect from "@/components/ui/BaseSelect.vue"
 import { useMetricsPolling } from "@/composables/useMetricsPolling"
 import { useAuthStore } from "@/stores/auth"
@@ -79,6 +80,10 @@ const memData = computed(() => memBuffer.value.toUplotData(METRICS_RANGE_SECONDS
     <h1 class="text-xl font-semibold">Overview</h1>
 
     <ClusterSummaryCards />
+
+    <!-- Cluster-wide too (all namespaces, own slow scan); renders only when
+         some pod is actually in trouble. -->
+    <ProblemPodsCard />
 
     <!-- Everything below follows the namespace selector; the heading and the
          rule above it separate it from the cluster-wide gauges, which do not. -->

@@ -810,6 +810,54 @@ shows "—") and a one-page `fetchPodCount` (`includeObject=None` Table +
 `remainingItemCount`). A forbidden node list (namespace-scoped tokens) hides the
 whole row; the Pods and Nodes gauges link to their lists.
 
+Below the gauges — still cluster-wide, so it ignores the namespace selector —
+`components/pod/ProblemPodsCard.vue` lists pods in trouble across all
+namespaces, and renders **nothing at all** when there are none (the common
+case: a card that is only ever on screen when it has something to say). Rows
+come from the same pods Table the list page uses, through `listAllAsTable`
+(bounded 6×500) and `ResourceMiniTable` with the list page's columns
+(Ready/Status/Restarts/Age) plus Namespace and the printer's wide **Node**
+column (failures sharing one node are the diagnosis), capped at 50 rendered rows
+("50 of 137"; a `+` marks a scan that hit the page cap). The scan is
+deliberately **not** narrowed by a field selector: the case that matters most,
+CrashLoopBackOff, has `status.phase=Running`, so no server-side filter can
+express "unhealthy" — hence a full walk, on its own 60s loop
+(`usePollingLoop`, visibility-gated) rather than the metrics cadence, plus a
+Refresh button that restarts the loop. A **403** hides the card outright
+(listing pods cluster-wide needs cluster RBAC and a namespace-scoped token must
+not turn the Overview into a permission error); any other failure renders in
+place.
+
+The verdict is pure and shape-based, in `utils/podHealth.ts`: `error` (the
+Status cell is a failure — the fallthrough branch, so every unknown/new failure
+reason counts), `not-ready` (Running with `Ready n/m`, n<m) and `stuck` (a
+transitional status — Pending/ContainerCreating/PodInitializing/`Init:x/y`/
+Terminating — outlasting `STUCK_GRACE_MS`, 15m). The grace is what keeps the
+card quiet during a rollout, and it also applies to `not-ready` (readiness
+probes have warm-ups) measured from the pod's **own age**, so a long-running
+pod going unready is reported at once. Terminating is measured from
+`deletionTimestamp`, not creation — otherwise every deleting pod would read as
+stuck. A missing/unparseable timestamp counts as old (surface, don't hide), and
+a Table with no Status column (the List→Table fallback) yields no verdict at
+all.
+
+**Terminal** failures age out (`TERMINAL_MAX_AGE_MS`, 6h): a pod that has
+already finished — `TERMINAL_STATUSES` (Evicted/Error/OOMKilled/
+DeadlineExceeded/NodeAffinity/`OutOf*`/…) — is news for a while and noise
+afterwards, and a few Evicted leftovers or the pods a CronJob's
+`failedJobsHistoryLimit` retains would otherwise keep the card on screen
+forever. A *recurring* failure never ages out: CrashLoopBackOff,
+ImagePullBackOff, CreateContainerConfigError are the kubelet still trying.
+The clock is `statusAgeMs`, from `metadata.managedFields` — the kubelet owns
+`status`, so the latest entry with `subresource: "status"` timestamps the last
+state change. It is the only "when did it fail" signal in a Table row:
+`creationTimestamp` dates the pod, and an eviction hits pods that have run for
+weeks, so a creation-age bound would hide exactly the fresh evictions worth
+seeing (there is a test for that shape). Table rows really do carry
+managedFields (verified against a live apiserver), but when the age is
+unknowable `statusAgeMs` returns **null** and the pod stays listed — the caller
+only ever ages pods *out*, so no answer must not mean "hide".
+
 ## Testing conventions
 
 - Go: fake upstreams via `httptest` + hand-built `kube.Upstream`; exec tests

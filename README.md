@@ -49,7 +49,11 @@ authorization model of its own.
   Cordon/Uncordon (Node). A denied action just surfaces the native Kubernetes
   403 — there's no separate permission model to keep in sync.
 - **Cluster summary dashboard** with CPU/memory/pod/node usage gauges
-  (Metrics Server, when installed).
+  (Metrics Server, when installed) and a cluster-wide **problem pods** table —
+  failing, not-ready or stuck pods across all namespaces, with the node each
+  one landed on. It stays hidden entirely while nothing is wrong, and pods that
+  already failed for good (Evicted, finished Jobs) drop off after a few hours
+  so the table cannot turn into permanent noise.
 - **Multi-cluster switcher** with a per-cluster session and dark/light theme.
 
 ## Security model

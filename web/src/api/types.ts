@@ -7,6 +7,8 @@ export interface K8sObjectMeta {
   uid?: string
   resourceVersion?: string
   creationTimestamp?: string
+  /** Set while the object is being deleted (a pod then prints as Terminating). */
+  deletionTimestamp?: string
   labels?: Record<string, string>
   annotations?: Record<string, string>
   ownerReferences?: Array<{
