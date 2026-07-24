@@ -1,9 +1,31 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
+
+// Load reads the process environment, so whatever is exported in the shell that
+// runs `go test` is part of every case below. A developer who has just run the
+// local kubeconfig mode carries KUBE_CONSOLE_USE_KUBECONFIG_CREDENTIALS, and
+// then every test here fails on validate ("requires a kubeconfig", "requires a
+// loopback listen address") for a reason that has nothing to do with the test.
+//
+// Cleared by prefix rather than from a list of names: a new KUBE_CONSOLE_*
+// setting must not silently reintroduce this, and the two spec-fixed names have
+// no prefix to catch them by.
+func TestMain(m *testing.M) {
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "KUBE_CONSOLE_") || key == envAPIServer || key == envCAFile {
+			if err := os.Unsetenv(key); err != nil {
+				panic(err)
+			}
+		}
+	}
+	os.Exit(m.Run())
+}
 
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv("KUBE_API_SERVER", "https://kubernetes.default.svc")

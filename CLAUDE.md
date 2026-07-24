@@ -1097,6 +1097,12 @@ only ever ages pods *out*, so no answer must not mean "hide".
 - Go: fake upstreams via `httptest` + hand-built `kube.Upstream`; exec tests
   dial a real WebSocket against `httptest` with an injected `ExecutorFactory`
   fake. Leak tests assert sentinel tokens never appear in logs/errors.
+  `config`'s `TestMain` unsets every `KUBE_CONSOLE_*` plus `KUBE_API_SERVER`/
+  `KUBE_CA_FILE` before running: `Load` reads the process environment, so a
+  variable left in the developer's shell (after a local
+  `--use-kubeconfig-credentials` run, say) otherwise fails the whole package on
+  `validate`, with messages about a test's own setup that it never made. By
+  prefix, not by a list, so a new setting cannot bring it back.
 - Frontend: vitest + jsdom. `web/src/test/setup.ts` polyfills localStorage/
   sessionStorage (Node ≥22 shadows jsdom's), ResizeObserver (needed by
   @tanstack/vue-virtual) and matchMedia (uPlot calls it at import time, so any
