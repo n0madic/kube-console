@@ -805,7 +805,13 @@ draw, since the browser's own arrow is a different glyph in every engine and
 is custom only because it needs a panel taller than a native popup allows.
 `inheritAttrs: false` puts the caller's attributes on the inner `<select>`, not
 the positioning wrapper: `NamespaceSelector`'s `<label for="ns-select">` points
-at it. Do not reintroduce a bare `<select>`, and do not put `.number` on its
+at it. That is also why **both** boxes carry `min-w-0` in the component itself:
+the wrapper is the flex item, and with the default `min-width: auto` it keeps
+the select's intrinsic width, spills out of whatever squeezed it and — the caret
+being positioned against the wrapper — draws the caret over the next control
+(this is what put the theme toggle "under" the namespace combobox in a narrow
+header). A caller cannot fix that from outside, since its class reaches the
+select. Do not reintroduce a bare `<select>`, and do not put `.number` on its
 `v-model` — options bind real numbers already, and the modifier would only
 coerce a string form that never occurs.
 
@@ -828,17 +834,37 @@ resize is not a decision, and one narrow episode must not persist as "hidden"
 on the big screen. The one explicit `watch(narrowViewport)` only resets
 `drawerOpen`, so a drawer left open does not spring back on the next narrowing;
 `closeSidebar()` touches only `drawerOpen`, which is what makes Esc and the
-navigation watch in `AppShell` no-ops on a wide viewport.
+navigation watch in `AppShell` no-ops on a wide viewport. `narrowViewport` is
+exported `readonly`: it is derived from `matchMedia`, and a consumer assigning
+it would desync the app from the viewport until the breakpoint is next crossed
+— including the specs, which drive `stubViewport` (`test/viewport.ts`) instead,
+so the listener wiring is actually exercised.
 
-The breakpoint is Tailwind's `lg` as `SIDEBAR_NARROW_QUERY`
-(`(max-width: 1023.98px)`, via `matchMedia`) — the fraction matters: between
-`max-width: 1023px` and `min-width: 1024px` a 1023.5px viewport matches neither.
+The breakpoint is Tailwind's `lg` as `SIDEBAR_NARROW_QUERY`, written as its
+**exact complement**: `not all and (min-width: 64rem)`. Tailwind v4 breakpoints
+are rem-based (`lg` emits `@media (width >= 64rem)`), so a px query drifts from
+every `lg:` utility once the root font size is not 16px, and negating with a
+`max-width` always leaves a gap — no number of nines makes the two bounds meet.
 On a narrow viewport the open sidebar **overlays** the content as a drawer
 (`fixed … z-40` + a `z-30` backdrop in `AppShell`) rather than squeezing it,
 since the reason to hide it there is that tables have no width to spare;
 `BaseDialog` portals to the body with `z-40`/`z-50` and lands later in the DOM,
-so dialogs still cover both. Only in that mode does the sidebar header show its
-own close button — the TopBar toggle is underneath the drawer at that point.
+so dialogs still cover both. It is a **modal** drawer: the content column goes
+`inert` while it is open — unfocusable, unclickable and out of the accessibility
+tree in one attribute, which is also the focus trap (with nothing else focusable
+the Tab cycle stays inside; no JS loop). Bound as `modal || undefined`, since
+`inert` is not one of Vue's special boolean attributes and `:inert="false"`
+would render `inert="false"`, which is still inert. There is deliberately **no**
+body scroll lock: html/body/#app are `h-full` and the scroller is `<main>`,
+inside the inert subtree, so the lock would be a no-op — what a drag on the
+backdrop needs is its own `touch-none overscroll-none`. Focus enters the drawer
+by the same handoff that moves the toggle. Dismissal is the backdrop, Esc and
+any link in the sidebar. Esc is checked against `defaultPrevented` and the drawer being open: a
+nested handler (`ContextListbox`, a dialog) cancels its own Escape but does not
+stop it reaching `window`, so closing a popup used to close the drawer under it.
+The links close it **themselves** rather than relying on `AppShell`'s route
+watch — tapping the entry for the page already open changes no `fullPath`, and
+the drawer would stay over the content it just "navigated" to.
 
 `Sidebar.vue` hides with **`v-show`, not `v-if`**: the component stays mounted,
 so collapsing does not reset `ui.sidebarSearch` or `collapsedSections` (whose
@@ -850,12 +876,33 @@ The toggle itself is one component, `layout/SidebarToggle.vue`, mounted in
 **two** places and `v-if`'d at both call sites: the sidebar's own header
 (right of the product name) while it is open, the TopBar while it is hidden —
 the control sits at the edge of what it controls, and an open sidebar covers
-the TopBar's left edge in drawer mode anyway. Exactly one instance therefore
-exists at a time, which is what lets its handler focus `[data-sidebar-toggle]`
-after `nextTick`: the button being activated is the one that goes away, so
-without the handoff a keyboard user would land back on `<body>`. Consequently
-neither header may be tested by button position — both specs find it by
+the TopBar's left edge in drawer mode anyway. Because it moves, whatever hides
+the sidebar takes the focused element with it, so the store leaves a **one-shot
+focus handoff** (`requestToggleFocus` from `toggleSidebar` and from a
+`closeSidebar` that actually closed something — never from the no-op one, which
+runs on every navigation) and the instance mounting in its place claims it in
+`onMounted` via `consumeToggleFocus`. `closeSidebar(false)` is the other half of
+that rule: a **dismissal** (Esc, the backdrop) leaves the user where they were,
+so the focus must be caught, while a **navigation** (every sidebar link, the
+route watch) hands them new content whose start is where the focus belongs —
+claiming it back onto the hamburger would be a jump backwards on every link. Not a `document.querySelector` for the
+other button: that depends on an "exactly one is mounted" invariant living in
+two other files and can focus a `display: none` one. Consequently neither header
+may be tested by button position — both specs find it by
 `aria-controls="app-sidebar"`.
+
+`ClusterName` follows the toggle into the TopBar (`inline`, the same component
+with the sidebar row's border/padding dropped — one label, so the two cannot
+drift): it lives in the sidebar, the sidebar hides itself on a narrow viewport,
+and which cluster a delete or an exec is about must not depend on reading the
+tab title. The **switcher** stays in the sidebar — it is a list, not a label,
+and the narrow TopBar has no room for it.
+
+Collapsing also changes the width of the **content**, with no window resize
+event to go with it. `TerminalView` therefore fits on a `ResizeObserver` over
+its host rather than on `window.resize`: an exec pty kept its pre-collapse
+geometry and wrapped output at a column that was no longer there. (Charts
+already observed their container.)
 
 Its glyph follows the position: inside the panel it collapses it is
 `sidebar-collapse` (the conventional framed-layout-with-a-chevron, drawn for
@@ -864,10 +911,34 @@ hamburger, which is what a menu button in a header means. A hamburger sitting
 *inside* the open sidebar reads as "open something" next to the thing already
 open.
 
-`ui.narrowViewport` is the app's **one** responsive signal, so `ThemeToggle`
-rides on it too: its three-segment radiogroup is the widest control in the
-header, and on a narrow viewport it collapses to a single button cycling Auto →
-Light → Dark → Auto. That button is deliberately **not** a one-option
+`ui.narrowViewport` is the app's one **behavioural** responsive signal — what
+changes which controls exist — while pure layout stays in CSS breakpoints, which
+cost no state and can differ per element. So `ThemeToggle` rides on the store
+(its three-segment radiogroup is the widest control in the header, and on a
+narrow viewport it collapses to a single button cycling Auto → Light → Dark →
+Auto), while the TopBar's own crowding is `sm:`/`md:` utilities: a header row is
+laid out against its **min-content** width, so the captions ("Cluster",
+"Namespace") drop below `sm` — the namespace one to `sr-only`, never `hidden`,
+since it is the select's accessible name. Without that,
+`system:serviceaccount:<ns>:<name>` alone overflowed the row and the labels
+printed on top of each other.
+
+What is left is a **shrink order**, not a set of breakpoints — the mistake worth
+not repeating was sizing the identity with `md:`/`sm:` cutoffs, which blanked it
+while a third of the row stood empty (that is what the kubeconfig mode looks
+like: no Sign out). Controls (toggle, theme, Sign out) are `shrink-0`; the
+identity is `min-w-0 truncate` capped at `16rem` and takes whatever room is
+left, with the whole value in a `title`; the namespace select shrinks after it.
+`ClusterName` inline is `shrink-0` under a `max-w-[8rem] sm:max-w-[12rem]` cap
+instead — a bounded label, not a shrinking one, because shrinkage is
+distributed by content width and a long identity was crushing a four-letter
+cluster to "t..". The identity's one absolute rule is the phone floor
+(`max-[30rem]:hidden`, which Tailwind v4 compiles to
+`@media not all and (width>=30rem)`): below that the pressure would fall on the
+cluster name, and which cluster this is outranks who is signed into it.
+Verified by rendering the row at 500–760px against the built CSS
+(`header.scrollWidth === clientWidth` throughout, identity truncating from 206px
+down to 88px), not by reading the classes. That button is deliberately **not** a one-option
 radiogroup — only the current mode is on screen, so `aria-label`/`title` state
 both what is set and what a click will do ("Theme: Light theme. Switch to Dark
 theme"). Rendered with `v-if`/`v-else`, not by hiding one variant with CSS: two

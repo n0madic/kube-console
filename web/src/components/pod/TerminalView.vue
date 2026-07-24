@@ -8,6 +8,8 @@ const emit = defineEmits<{ data: [text: string]; resize: [cols: number, rows: nu
 const host = ref<HTMLElement | null>(null)
 let term: Terminal | null = null
 let fit: FitAddon | null = null
+let resizeObserver: ResizeObserver | null = null
+let lastFit = { width: 0, height: 0 }
 
 // The terminal stays mounted but hidden while another tab of the pod page is
 // open (so the exec session survives a tab switch), and a hidden element cannot
@@ -33,11 +35,29 @@ onMounted(() => {
   fitNow()
   term.onData((data) => emit("data", data))
   term.onResize(({ cols, rows }) => emit("resize", cols, rows))
-  window.addEventListener("resize", fitNow)
+  // The host, not the window: it also changes width when the sidebar is
+  // collapsed or opened, which fires no resize event — the pty would then keep
+  // the old geometry and wrap output at a column that is no longer there.
+  // `fitNow` is inert while the element is hidden, so the display:none this
+  // observer reports when another pod tab is opened cannot push a 2x5 grid.
+  //
+  // Only on a real size change: unlike the window listener this replaced, the
+  // callback resizes what it observes, and re-entering on the layout its own
+  // fit produced is how "ResizeObserver loop completed with undelivered
+  // notifications" happens.
+  resizeObserver = new ResizeObserver(([entry]) => {
+    if (entry === undefined) return
+    const { width, height } = entry.contentRect
+    if (width === lastFit.width && height === lastFit.height) return
+    lastFit = { width, height }
+    fitNow()
+  })
+  resizeObserver.observe(host.value)
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener("resize", fitNow)
+  resizeObserver?.disconnect()
+  resizeObserver = null
   term?.dispose()
   term = null
   fit = null

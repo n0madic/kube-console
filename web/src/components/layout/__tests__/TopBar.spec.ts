@@ -26,6 +26,9 @@ function mountBar() {
       stubs: {
         NamespaceSelector: true,
         ThemeToggle: true,
+        // Reads the contexts query; exercised in its own spec, and this one
+        // must not stand up vue-query.
+        ClusterName: true,
         BaseButton: { template: "<button><slot /></button>" },
       },
     },
@@ -129,5 +132,32 @@ describe("TopBar sidebar toggle", () => {
 
     expect(ui.sidebarOpen).toBe(true)
     expect(toggleOf(wrapper)).toBeUndefined()
+  })
+
+  // A service account reads `system:serviceaccount:<ns>:<name>` and truncates
+  // in the header, so the full value has to stay reachable — and it is the
+  // longest thing in the row, which is what made the labels collide.
+  it("keeps the whole identity in a tooltip", () => {
+    const auth = useAuthStore()
+    auth.setSession("alpha", TOKEN_A, { username: "system:serviceaccount:kube-system:admin" }, false)
+
+    const label = mountBar().get("[title^='system:serviceaccount']")
+
+    expect(label.attributes("title")).toBe("system:serviceaccount:kube-system:admin")
+    expect(label.classes()).toContain("truncate")
+  })
+
+  // The cluster label lives in the sidebar, which hides itself on a narrow
+  // viewport: without this, nothing on screen would name the cluster being
+  // acted on.
+  it("carries the cluster label while the sidebar is hidden", async () => {
+    const ui = useUiStore()
+    const wrapper = mountBar()
+    expect(wrapper.find("cluster-name-stub").exists()).toBe(false)
+
+    ui.toggleSidebar()
+    await nextTick()
+
+    expect(wrapper.find("cluster-name-stub").exists()).toBe(true)
   })
 })

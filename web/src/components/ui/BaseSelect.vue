@@ -22,15 +22,25 @@ const model = defineModel<T>({ required: true })
 // (`text-sm`, a width) — with two utilities for one property, stylesheet order
 // decides the winner, not class order.
 defineOptions({ inheritAttrs: false })
+
+// Both boxes carry `min-w-0`, and it is not left to the caller: the wrapper
+// span is the flex item, so with the default `min-width: auto` it keeps the
+// select's intrinsic width, overflows whatever squeezed it and paints over its
+// neighbours — the caret, positioned against that span, landed on the theme
+// button beside the namespace selector in a narrow header. Since a caller's
+// class reaches the <select> (inheritAttrs above), it cannot be fixed outside.
+//
+// Keep the template's root a single element: a comment beside it makes the
+// component a fragment, and `wrapper.element` then stops being this span.
 </script>
 
 <template>
-  <span class="relative inline-flex items-center">
+  <span class="relative inline-flex min-w-0 items-center">
     <select
       v-model="model"
       v-bind="$attrs"
       :disabled="disabled"
-      class="appearance-none [-webkit-appearance:none] rounded-md border border-slate-300 bg-white py-1 pl-2 pr-7 disabled:cursor-not-allowed dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+      class="min-w-0 appearance-none [-webkit-appearance:none] rounded-md border border-slate-300 bg-white py-1 pl-2 pr-7 disabled:cursor-not-allowed dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
     >
       <slot />
     </select>

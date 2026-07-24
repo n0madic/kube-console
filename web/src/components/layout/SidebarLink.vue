@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import type { DiscoveryResource } from "@/api/types"
 import { resourceListRoute } from "@/router"
+import { useUiStore } from "@/stores/ui"
+
+const ui = useUiStore()
 
 defineProps<{
   res: DiscoveryResource
@@ -22,6 +25,7 @@ defineEmits<{ togglePin: [] }>()
       class="flex-1 truncate rounded-md px-2 py-1 text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
       active-class="bg-slate-100 font-medium text-slate-900 dark:bg-slate-800 dark:text-white"
       :title="res.group === '' ? res.resource : `${res.resource}.${res.group}`"
+      @click="ui.closeSidebar(false)"
     >
       {{ res.kind }}
     </RouterLink>

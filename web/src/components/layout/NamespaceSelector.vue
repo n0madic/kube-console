@@ -69,9 +69,19 @@ watch(
 </script>
 
 <template>
-  <div v-if="!clusterScoped" class="flex items-center gap-2">
-    <label class="text-xs uppercase tracking-wide text-slate-400" for="ns-select">Namespace</label>
+  <div v-if="!clusterScoped" class="flex min-w-0 items-center gap-2">
+    <!-- The caption is only a caption: below `sm` the header has no width for
+         it, but it stays the select's accessible name (`sr-only`, never
+         `hidden`, which would take it out of the a11y tree with the rest). -->
+    <label
+      class="sr-only text-xs uppercase tracking-wide text-slate-400 sm:not-sr-only"
+      for="ns-select"
+    >
+      Namespace
+    </label>
     <!-- id lands on the inner <select>, which is what the label points at. -->
+    <!-- Shrinking is BaseSelect's own business (it owns the box the caret is
+         positioned against), so nothing about it is passed from here. -->
     <BaseSelect v-if="!query.isError.value" id="ns-select" v-model="ui.namespace" class="text-sm">
       <option value="">All namespaces</option>
       <option v-for="name in names" :key="name" :value="name">{{ name }}</option>
@@ -81,7 +91,7 @@ watch(
       id="ns-select"
       v-model="ui.namespace"
       placeholder="namespace (empty = all)"
-      class="w-48 rounded-md border border-slate-300 bg-white px-2 py-1 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+      class="w-32 min-w-0 rounded-md border border-slate-300 bg-white px-2 py-1 text-sm sm:w-48 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
     />
   </div>
 </template>

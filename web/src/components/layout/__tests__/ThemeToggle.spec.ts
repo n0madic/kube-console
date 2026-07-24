@@ -1,16 +1,22 @@
 import { mount } from "@vue/test-utils"
 import { createPinia, setActivePinia } from "pinia"
-import { beforeEach, describe, expect, it } from "vitest"
-import { nextTick } from "vue"
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import ThemeToggle from "@/components/layout/ThemeToggle.vue"
 import { usePreferencesStore } from "@/stores/preferences"
-import { useUiStore } from "@/stores/ui"
+import { stubViewport, type ViewportStub } from "@/test/viewport"
+
+let viewport: ViewportStub
 
 describe("ThemeToggle", () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     window.localStorage.clear()
+    viewport = stubViewport(false)
+  })
+
+  afterEach(() => {
+    viewport.restore()
   })
 
   it("renders three theme options and marks the active one", () => {
@@ -38,22 +44,21 @@ describe("ThemeToggle", () => {
   // A narrow header has no room for three segments, so the same three modes
   // become one button that steps through them.
   describe("on a narrow viewport", () => {
-    async function mountNarrow() {
-      const ui = useUiStore()
-      ui.narrowViewport = true
-      await nextTick()
+    function mountNarrow() {
+      // Before the mount: the store reads matchMedia when it is created.
+      viewport.set(true)
       return mount(ThemeToggle)
     }
 
-    it("collapses to a single button", async () => {
-      const wrapper = await mountNarrow()
+    it("collapses to a single button", () => {
+      const wrapper = mountNarrow()
       expect(wrapper.findAll("button")).toHaveLength(1)
       expect(wrapper.find("[role='radiogroup']").exists()).toBe(false)
     })
 
     it("cycles through the modes and names both the current one and the next", async () => {
       const prefs = usePreferencesStore()
-      const wrapper = await mountNarrow()
+      const wrapper = mountNarrow()
       const button = wrapper.get("button")
 
       expect(prefs.prefs.theme).toBe("system")

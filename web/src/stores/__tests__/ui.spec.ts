@@ -7,7 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { nextTick } from "vue"
 
 import { PREFS_STORAGE_KEY, usePreferencesStore } from "@/stores/preferences"
-import { NAMESPACE_STORAGE_KEY, SIDEBAR_NARROW_QUERY, useUiStore } from "@/stores/ui"
+import { NAMESPACE_STORAGE_KEY, useUiStore } from "@/stores/ui"
+import { stubViewport, type ViewportStub } from "@/test/viewport"
 
 describe("ui store namespace persistence", () => {
   beforeEach(() => {
@@ -55,39 +56,7 @@ describe("ui store namespace persistence", () => {
 // viewport (persisted) and the narrow-viewport drawer (memory only). The point
 // of the split is that auto-collapsing never rewrites the saved choice.
 describe("ui store sidebar", () => {
-  const realMatchMedia = window.matchMedia
-
-  /** matchMedia stub whose `matches` can be flipped, emitting a real change
-   * event to the listeners the store registers. */
-  function stubViewport(narrow: boolean) {
-    const listeners = new Set<(e: MediaQueryListEvent) => void>()
-    let matches = narrow
-    Object.defineProperty(window, "matchMedia", {
-      value: (query: string) => ({
-        get matches() {
-          return query === SIDEBAR_NARROW_QUERY ? matches : false
-        },
-        media: query,
-        onchange: null,
-        addListener: () => {},
-        removeListener: () => {},
-        addEventListener: (_type: string, cb: (e: MediaQueryListEvent) => void) => {
-          listeners.add(cb)
-        },
-        removeEventListener: (_type: string, cb: (e: MediaQueryListEvent) => void) => {
-          listeners.delete(cb)
-        },
-        dispatchEvent: () => false,
-      }),
-      configurable: true,
-    })
-    return {
-      set(value: boolean) {
-        matches = value
-        for (const cb of listeners) cb({ matches: value } as MediaQueryListEvent)
-      },
-    }
-  }
+  let viewport: ViewportStub
 
   beforeEach(() => {
     window.localStorage.clear()
@@ -96,11 +65,11 @@ describe("ui store sidebar", () => {
   })
 
   afterEach(() => {
-    Object.defineProperty(window, "matchMedia", { value: realMatchMedia, configurable: true })
+    viewport.restore()
   })
 
   it("shows the sidebar by default on a wide viewport and persists a collapse", async () => {
-    stubViewport(false)
+    viewport = stubViewport(false)
     const ui = useUiStore()
     expect(ui.narrowViewport).toBe(false)
     expect(ui.sidebarOpen).toBe(true)
@@ -118,7 +87,7 @@ describe("ui store sidebar", () => {
   })
 
   it("hides the sidebar by default on a narrow viewport, and the drawer is transient", async () => {
-    stubViewport(true)
+    viewport = stubViewport(true)
     const ui = useUiStore()
     const prefs = usePreferencesStore()
     expect(ui.narrowViewport).toBe(true)
@@ -138,7 +107,7 @@ describe("ui store sidebar", () => {
   })
 
   it("auto-collapses when the viewport narrows and restores the saved choice when it widens", async () => {
-    const viewport = stubViewport(false)
+    viewport = stubViewport(false)
     const ui = useUiStore()
     const prefs = usePreferencesStore()
     // Sentinel: an explicit "sidebar stays open" choice on a wide viewport.
@@ -167,7 +136,7 @@ describe("ui store sidebar", () => {
   })
 
   it("does not collapse the sidebar on a wide viewport via closeSidebar", async () => {
-    stubViewport(false)
+    viewport = stubViewport(false)
     const ui = useUiStore()
 
     ui.closeSidebar()
@@ -175,5 +144,39 @@ describe("ui store sidebar", () => {
 
     expect(ui.sidebarOpen).toBe(true)
     expect(usePreferencesStore().prefs.sidebarCollapsed).toBe(false)
+  })
+
+  // The toggle moves between the TopBar and the sidebar header, so whatever
+  // hides the sidebar takes the focused element with it.
+  it("requests a focus handoff only when something was actually dismissed", async () => {
+    viewport = stubViewport(true)
+    const ui = useUiStore()
+    expect(ui.consumeToggleFocus()).toBe(false)
+
+    ui.toggleSidebar()
+    await nextTick()
+    expect(ui.consumeToggleFocus()).toBe(true)
+    // One-shot: the instance that mounts next claims it, and only it.
+    expect(ui.consumeToggleFocus()).toBe(false)
+
+    ui.closeSidebar()
+    expect(ui.consumeToggleFocus()).toBe(true)
+
+    // A close that closes nothing must not move the focus — on a wide viewport
+    // this runs on every navigation.
+    ui.closeSidebar()
+    expect(ui.consumeToggleFocus()).toBe(false)
+
+    // …and a navigation that does close the drawer hands the user new content,
+    // whose start is where the focus belongs: no handoff, or every sidebar link
+    // would bounce it back onto the toggle.
+    ui.toggleSidebar()
+    await nextTick()
+    ui.consumeToggleFocus()
+    expect(ui.sidebarOpen).toBe(true)
+
+    ui.closeSidebar(false)
+    expect(ui.sidebarOpen).toBe(false)
+    expect(ui.consumeToggleFocus()).toBe(false)
   })
 })

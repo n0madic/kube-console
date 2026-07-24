@@ -1,6 +1,6 @@
 import { mount } from "@vue/test-utils"
 import { createPinia, setActivePinia } from "pinia"
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { nextTick, ref } from "vue"
 
 vi.mock("@/composables/useDiscovery", () => ({ useDiscovery: vi.fn() }))
@@ -10,6 +10,7 @@ import { useDiscovery } from "@/composables/useDiscovery"
 import Sidebar from "@/components/layout/Sidebar.vue"
 import { usePreferencesStore } from "@/stores/preferences"
 import { useUiStore } from "@/stores/ui"
+import { stubViewport, type ViewportStub } from "@/test/viewport"
 
 const mockedDiscovery = vi.mocked(useDiscovery)
 
@@ -30,11 +31,18 @@ function mockDiscovery(over: Partial<Record<string, unknown>> = {}) {
   } as unknown as ReturnType<typeof useDiscovery>)
 }
 
+let viewport: ViewportStub
+
 describe("Sidebar", () => {
   beforeEach(() => {
     window.localStorage.clear()
     setActivePinia(createPinia())
     mockedDiscovery.mockReset()
+    viewport = stubViewport(false)
+  })
+
+  afterEach(() => {
+    viewport.restore()
   })
 
   it("always shows an Overview link, even while resources are still loading", () => {
@@ -94,7 +102,7 @@ describe("Sidebar", () => {
 
       // Narrow viewport, then the drawer opened by the user. The mode change
       // resets the drawer on flush, so it has to settle before the toggle.
-      ui.narrowViewport = true
+      viewport.set(true)
       await nextTick()
       ui.toggleSidebar()
       await nextTick()
@@ -110,6 +118,30 @@ describe("Sidebar", () => {
       expect(ui.sidebarOpen).toBe(false)
       expect(usePreferencesStore().prefs.sidebarCollapsed).toBe(false)
       expect(aside.attributes("style")).toContain("display: none")
+    })
+
+    // A link both navigates and dismisses the drawer covering the page it leads
+    // to — including a tap on the page already open, which changes no route.
+    // It must not claim the focus back: that belongs to the new view.
+    it("closes the drawer from a nav link without taking the focus", async () => {
+      mockDiscovery({ isLoading: ref(true) })
+      const ui = useUiStore()
+      const wrapper = mount(Sidebar, { global: { stubs: routerLinkStub } })
+
+      viewport.set(true)
+      await nextTick()
+      ui.toggleSidebar()
+      await nextTick()
+      ui.consumeToggleFocus() // the toggle's own handoff
+      expect(ui.sidebarOpen).toBe(true)
+
+      const overview = wrapper
+        .findAll("a")
+        .find((a) => a.attributes("data-to") === "/overview")
+      await overview!.trigger("click")
+
+      expect(ui.sidebarOpen).toBe(false)
+      expect(ui.consumeToggleFocus()).toBe(false)
     })
   })
 

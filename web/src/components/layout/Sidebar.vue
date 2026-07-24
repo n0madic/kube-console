@@ -145,9 +145,15 @@ function rowClass(id: string): string {
     <div
       class="flex h-14 min-w-0 items-center gap-2 border-b border-slate-200 px-4 dark:border-slate-700"
     >
+      <!-- Every link in here dismisses the drawer (a no-op on a wide viewport):
+           it covers the content it navigates to, and a tap on the page already
+           open changes no route for AppShell's watch to see. `false`: this is a
+           navigation, so the focus belongs at the start of the new view, not
+           pulled back onto the toggle. -->
       <RouterLink
         to="/overview"
         class="flex min-w-0 flex-1 items-center gap-2 text-lg font-semibold text-slate-800 dark:text-slate-100"
+        @click="ui.closeSidebar(false)"
       >
         <img src="/favicon.svg" alt="" aria-hidden="true" class="h-6 w-6 shrink-0" />
         <span class="truncate">kube-console</span>
@@ -177,6 +183,7 @@ function rowClass(id: string): string {
         to="/overview"
         class="mb-2 flex items-center gap-2 rounded-md px-2 py-1.5 font-medium text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
         active-class="bg-slate-100 text-slate-900 dark:bg-slate-800 dark:text-white"
+        @click="ui.closeSidebar(false)"
       >
         <AppIcon name="grid" class="h-4 w-4 shrink-0" />
         Overview

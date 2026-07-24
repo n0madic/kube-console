@@ -11,11 +11,11 @@ import { useContextsQuery } from "@/composables/useContexts"
 
 const mockedQuery = vi.mocked(useContextsQuery)
 
-function mountName(data: Partial<ContextsResponse> | undefined) {
+function mountName(data: Partial<ContextsResponse> | undefined, inline = false) {
   mockedQuery.mockReturnValue({
     data: ref(data === undefined ? undefined : { contexts: [], default: "", ...data }),
   } as unknown as ReturnType<typeof useContextsQuery>)
-  return mount(ClusterName)
+  return mount(ClusterName, { props: { inline } })
 }
 
 describe("ClusterName", () => {
@@ -25,6 +25,17 @@ describe("ClusterName", () => {
     expect(wrapper.text()).toContain("prod-eu")
     // Long names truncate in a 16rem sidebar, so the full value stays reachable.
     expect(wrapper.get("[title]").attributes("title")).toBe("prod-eu")
+  })
+
+  // Same label, two homes: a bordered band in the sidebar, an item of the
+  // TopBar row while the sidebar is hidden.
+  it("drops the sidebar row's band when inline", () => {
+    const sidebar = mountName({ clusterName: "prod-eu" })
+    expect(sidebar.get("div").classes()).toContain("border-b")
+
+    const inline = mountName({ clusterName: "prod-eu" }, true)
+    expect(inline.get("div").classes()).not.toContain("border-b")
+    expect(inline.text()).toContain("prod-eu")
   })
 
   // Nothing configured is the default deployment: the row would then be a

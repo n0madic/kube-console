@@ -41,6 +41,19 @@ describe("BaseSelect", () => {
     expect(wrapper.element.className).not.toContain("text-sm")
   })
 
+  // Regression, measured in a browser: the wrapper is the flex item, so with
+  // the default `min-width: auto` it kept the select's intrinsic width, spilled
+  // out of the header group squeezing it and — since the caret is positioned
+  // against the wrapper — drew the caret on top of the theme button next door.
+  // The caller cannot fix it (its class lands on the select), so both boxes
+  // carry it here.
+  it("lets both the wrapper and the select shrink", () => {
+    const wrapper = mountSelect({ modelValue: "a", class: "text-sm" }, [["a", "A"]])
+
+    expect(wrapper.element.className).toContain("min-w-0")
+    expect(wrapper.get("select").classes()).toContain("min-w-0")
+  })
+
   it("passes disabled through to the select", () => {
     expect(
       mountSelect({ modelValue: "a", disabled: true }, [["a", "A"]])

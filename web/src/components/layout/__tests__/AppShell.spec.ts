@@ -13,8 +13,11 @@ vi.mock("vue-router", () => ({ useRoute: () => route }))
 
 import AppShell from "@/components/layout/AppShell.vue"
 import { useUiStore } from "@/stores/ui"
+import { stubViewport, type ViewportStub } from "@/test/viewport"
 
 const BACKDROP = ".fixed.inset-0"
+
+let viewport: ViewportStub
 
 // Every mount is unmounted again: a leftover shell keeps watching the shared
 // route object, and a watcher firing on its stale store would make pinia
@@ -37,10 +40,11 @@ function mountShell() {
   return wrapper
 }
 
-/** Narrow viewport with the drawer open. */
+/** Narrow viewport with the drawer open, driven through the media query the
+ * store actually listens to. */
 async function openDrawer() {
   const ui = useUiStore()
-  ui.narrowViewport = true
+  viewport.set(true)
   await nextTick() // the mode change resets the drawer before the toggle
   ui.toggleSidebar()
   await nextTick()
@@ -54,11 +58,13 @@ describe("AppShell drawer", () => {
     window.sessionStorage.clear()
     setActivePinia(createPinia())
     route.fullPath = "/overview"
+    viewport = stubViewport(false)
   })
 
   afterEach(() => {
     for (const wrapper of wrappers) wrapper.unmount()
     wrappers = []
+    viewport.restore()
   })
 
   it("renders the backdrop only in drawer mode and closes on a click", async () => {
@@ -85,6 +91,38 @@ describe("AppShell drawer", () => {
     await nextTick()
 
     expect(ui.sidebarOpen).toBe(false)
+  })
+
+  // The drawer overlays the content, so what is behind it must not be
+  // focusable, clickable or readable by a screen reader — one `inert`, which is
+  // also what keeps Tab inside the drawer.
+  it("makes the content behind the drawer inert, and only then", async () => {
+    const wrapper = mountShell()
+    // main's parent is the content column (TopBar + main).
+    const content = wrapper.get("main").element.parentElement!
+    expect(content.hasAttribute("inert")).toBe(false)
+
+    const ui = await openDrawer()
+    expect(content.hasAttribute("inert")).toBe(true)
+
+    ui.closeSidebar()
+    await nextTick()
+    expect(content.hasAttribute("inert")).toBe(false)
+  })
+
+  // A nested handler (the cluster listbox in the sidebar, a dialog) cancels its
+  // own Escape but does not stop it from bubbling to window, so dismissing a
+  // popup used to close the drawer under it as well.
+  it("ignores an Escape another handler has already taken", async () => {
+    mountShell()
+    const ui = await openDrawer()
+
+    const event = new KeyboardEvent("keydown", { key: "Escape", cancelable: true })
+    event.preventDefault()
+    window.dispatchEvent(event)
+    await nextTick()
+
+    expect(ui.sidebarOpen).toBe(true)
   })
 
   it("closes the drawer on navigation", async () => {
