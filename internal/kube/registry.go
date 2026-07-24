@@ -130,7 +130,13 @@ func (r *Registry) Get(name string) (*Upstream, bool) {
 // value), which callers echo back to the frontend on first login.
 func (r *Registry) Resolve(name string) (*Upstream, string, error) {
 	if name == "" {
-		return r.byName[r.def], r.def, nil
+		// The default goes through the same lookup as any other name rather
+		// than being returned unchecked: a registry whose default has no
+		// upstream (NewRegistry rejects that, NewRegistryFromUpstreams only
+		// documents it) would otherwise hand every caller a nil *Upstream with
+		// a nil error, and the first BaseURL dereference panics into a 500
+		// instead of failing closed with the 400 an unresolvable context gets.
+		name = r.def
 	}
 	up, ok := r.byName[name]
 	if !ok {

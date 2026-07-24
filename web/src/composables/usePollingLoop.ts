@@ -64,7 +64,11 @@ export function usePollingLoop(
     }
     live = true
     document.addEventListener("visibilitychange", onVisibilityChange)
-    await Promise.resolve(tick(g))
+    // A rejecting first poll must not kill the loop: without the catch it would
+    // skip schedule() and leave nothing armed, silently — every caller does
+    // `void loop.start()`, so the rejection has nowhere to surface. The
+    // self-rescheduling path already survives this through its .finally.
+    await Promise.resolve(tick(g)).catch(() => undefined)
     if (g !== gen) return
     schedule(g)
   }

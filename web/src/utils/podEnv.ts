@@ -168,8 +168,14 @@ function expandEnvFrom(
   const data = map.get(objName)
   if (data === undefined || data === null) {
     // Keys can't be enumerated without reading the object; surface one row.
+    // Its map key carries the source object, not just the displayed `<prefix>*`
+    // name: a container that imports two unreadable sources under the same
+    // prefix (the common case being none at all — a ConfigMap and a Secret)
+    // would otherwise have the second placeholder overwrite the first, hiding
+    // that the Pod references it at all. "*" is not a legal env-var name, so
+    // this key can never collide with a real entry from the `env` pass below.
     const name = `${prefix}*`
-    merged.set(name, {
+    merged.set(`${refKind}/${objName} ${name}`, {
       container,
       containerType,
       name,

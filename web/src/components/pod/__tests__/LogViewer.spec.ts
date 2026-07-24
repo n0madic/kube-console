@@ -1,5 +1,6 @@
 import { mount } from "@vue/test-utils"
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
+import { nextTick } from "vue"
 
 import LogViewer from "@/components/pod/LogViewer.vue"
 
@@ -61,5 +62,35 @@ describe("LogViewer", () => {
     const plainRow = wrapper.get("[data-index='1']")
     expect(plainRow.findAll("span")).toHaveLength(0)
     expect(plainRow.text()).toBe(plain)
+  })
+
+  // Regression: the follow watcher keyed on `lines.length`, but useLogsStream
+  // caps the buffer at MAX_LINES — past the cap every flush hands over a NEW
+  // array of the SAME length, so the watcher stopped firing and Follow silently
+  // froze while lines kept arriving. Identity is the signal, not length.
+  it("keeps following when a full buffer is replaced with a same-length array", async () => {
+    const first = Array.from({ length: 100 }, (_, i) => `a${i}`)
+    const second = Array.from({ length: 100 }, (_, i) => `b${i}`)
+
+    // @tanstack/vue-virtual's default scroll function calls
+    // scrollElement.scrollTo(), so counting those counts the scrolls.
+    async function scrollsAfterSameLengthUpdate(follow: boolean): Promise<number> {
+      const wrapper = mount(LogViewer, { props: { lines: first, follow } })
+      const scrollTo = vi.fn()
+      ;(wrapper.element as HTMLElement).scrollTo = scrollTo as unknown as HTMLElement["scrollTo"]
+      await wrapper.setProps({ lines: second }) // same length, new content
+      await nextTick()
+      return scrollTo.mock.calls.length
+    }
+
+    // The virtualizer adjusts on its own either way; only the follow watcher
+    // adds the scroll-to-bottom on top of that. It has to still fire when the
+    // length does not change: useLogsStream caps the buffer at MAX_LINES, so
+    // past the cap every flush hands over a NEW array of the SAME length — a
+    // length-keyed watcher stopped firing exactly there and Follow silently
+    // froze while lines kept arriving.
+    expect(await scrollsAfterSameLengthUpdate(true)).toBeGreaterThan(
+      await scrollsAfterSameLengthUpdate(false),
+    )
   })
 })

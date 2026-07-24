@@ -894,3 +894,64 @@ func TestExecEmptyTokenWithConfigCredentials(t *testing.T) {
 		}
 	})
 }
+
+// Regression: the idle timeout only cancelled the session context, which makes
+// coder/websocket close the socket from under readLoop — so the error frame the
+// teardown would have produced ("context canceled", itself meaningless in a
+// terminal) never reached the browser at all and the terminal just went dead.
+// The reason has to be written before the cancellation, not after it.
+func TestIdleTimeoutReportsWhyTheSessionEnded(t *testing.T) {
+	env := newTestEnv(t, 4,
+		func(cfg *rest.Config, method string, u *url.URL) (remotecommand.Executor, error) {
+			return &fakeExecutor{stream: func(ctx context.Context, opts remotecommand.StreamOptions) error {
+				<-ctx.Done() // an interactive shell: only cancellation ends it
+				return ctx.Err()
+			}}, nil
+		},
+		func(h *Handler) { h.idleTimeout = 50 * time.Millisecond },
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn := env.dial(t, ctx)
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	sendAuth(t, ctx, conn, validAuth())
+	if frame := readControlFrame(t, ctx, conn); frame.Type != "ready" {
+		t.Fatalf("expected ready, got %+v", frame)
+	}
+
+	frame := readControlFrame(t, ctx, conn)
+	if frame.Type != "error" {
+		t.Fatalf("expected an error frame after the idle timeout, got %+v", frame)
+	}
+	if strings.Contains(frame.Message, "context canceled") {
+		t.Errorf("error frame leaks the raw Go error: %q", frame.Message)
+	}
+	if !strings.Contains(frame.Message, "idle timeout") {
+		t.Errorf("error frame does not name the cause: %q", frame.Message)
+	}
+}
+
+// The counterpart: a real stream failure must still reach the browser as-is.
+func TestStreamFailureMessageIsForwardedVerbatim(t *testing.T) {
+	env := newTestEnv(t, 4,
+		func(cfg *rest.Config, method string, u *url.URL) (remotecommand.Executor, error) {
+			return &fakeExecutor{stream: func(ctx context.Context, opts remotecommand.StreamOptions) error {
+				return errors.New("pods \"web\" is forbidden: exec denied")
+			}}, nil
+		},
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn := env.dial(t, ctx)
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	sendAuth(t, ctx, conn, validAuth())
+	if frame := readControlFrame(t, ctx, conn); frame.Type != "ready" {
+		t.Fatalf("expected ready, got %+v", frame)
+	}
+	frame := readControlFrame(t, ctx, conn)
+	if frame.Type != "error" || !strings.Contains(frame.Message, "exec denied") {
+		t.Fatalf("upstream failure was not forwarded: %+v", frame)
+	}
+}

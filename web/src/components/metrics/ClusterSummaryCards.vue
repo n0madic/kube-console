@@ -71,7 +71,10 @@ const cards = computed<Gauge[]>(() => {
     {
       key: "pods",
       title: "Pods",
-      detail: `${d.pods.count} / ${d.pods.capacity}`,
+      // An em-dash, like the CPU/memory gauges: the count is null when the pod
+      // list could not be read, and "0 / 220" would be a claim about the
+      // cluster rather than about our own failure to ask.
+      detail: `${d.pods.count === null ? "—" : d.pods.count} / ${d.pods.capacity}`,
       percent: ratio(d.pods.count, d.pods.capacity),
       variant: "usage",
       // Against capacity, like the fill it sits inside — not against the pod

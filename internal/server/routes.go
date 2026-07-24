@@ -44,7 +44,17 @@ func NewHandler(d Deps) http.Handler {
 	// The credential carve-out's second fence, and the one the listen address
 	// cannot provide: without it, DNS rebinding turns any page the developer
 	// visits into a full-privilege client of this port. See RequireLoopbackHost.
-	if d.Cfg.UseKubeconfigCredentials {
+	//
+	// Asked of BOTH the flag and the registry, and mounted if either says yes.
+	// Every other credential-mode decision — the auth-mode endpoint,
+	// Registry.RequireToken, the exec auth frame, the gateway's Authorization
+	// strip — reads the registry (what RESTConfigs actually did); reading only
+	// cfg here would be a second source of truth for one fact, and the failure
+	// mode of a disagreement is the exact state this fence exists to prevent:
+	// upstream requests authenticated by the kubeconfig with no Host allowlist
+	// in front of them. Erring towards mounting it costs nothing — in token
+	// mode it is merely redundant.
+	if d.Cfg.UseKubeconfigCredentials || d.Registry.UsesConfigCredentials() {
 		r.Use(RequireLoopbackHost)
 	}
 	r.Use(SecurityHeaders)

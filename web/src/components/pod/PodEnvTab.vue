@@ -108,8 +108,15 @@ const rows = computed<EnvRow[]>(() => {
   return buildEnvRows(props.object, { configMaps, secrets })
 })
 
+// Name is unique per container for real variables, but not for the `<prefix>*`
+// placeholder an unreadable envFrom source produces — a container can import
+// two of those under the same prefix. The source object is what tells them
+// apart, so it belongs in both the list key and the reveal identity.
 function rowKey(row: EnvRow): string {
-  return `${row.containerType}:${row.container}:${row.name}`
+  const source = row.source.ref !== undefined
+    ? `${row.source.ref.kind}/${row.source.ref.name}`
+    : (row.source.label ?? "")
+  return `${row.containerType}:${row.container}:${source}:${row.name}`
 }
 
 function containerLabel(row: EnvRow): string {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/n0madic/kube-console/internal/config"
@@ -243,5 +244,34 @@ func TestNewRegistryDerivesCredentialModeFromPreparedConfig(t *testing.T) {
 	rec := httptest.NewRecorder()
 	if _, ok := reg.RequireToken(rec, httptest.NewRequest(http.MethodGet, "/k8s/api", nil)); ok {
 		t.Error("RequireToken must still require a bearer for an anonymized upstream")
+	}
+}
+
+// Regression: Resolve("") returned r.byName[r.def] unchecked, so a registry
+// whose default name has no upstream (NewRegistryFromUpstreams only documents
+// the precondition; it does not enforce it) handed every caller a nil
+// *Upstream with a nil error. The first BaseURL dereference then panicked into
+// a 500 instead of failing closed the way any other unresolvable context does.
+func TestResolveFailsClosedWhenTheDefaultHasNoUpstream(t *testing.T) {
+	base, _ := url.Parse("https://alpha.example")
+	reg := NewRegistryFromUpstreams("missing", map[string]*Upstream{
+		"alpha": {BaseURL: base, Transport: http.DefaultTransport},
+	})
+
+	up, name, err := reg.Resolve("")
+	if !errors.Is(err, ErrUnknownContext) {
+		t.Fatalf("Resolve(\"\") = %v/%q/%v, want ErrUnknownContext", up, name, err)
+	}
+	if up != nil {
+		t.Error("Resolve returned an upstream alongside the error")
+	}
+
+	// The HTTP chokepoint turns it into the canonical 400, never a panic.
+	rec := httptest.NewRecorder()
+	if _, _, ok := reg.ResolveRequest(rec, httptest.NewRequest(http.MethodGet, "/k8s/api", nil)); ok {
+		t.Fatal("ResolveRequest reported success for an unresolvable default")
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
 	}
 }

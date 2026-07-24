@@ -142,4 +142,26 @@ describe("usePollingLoop", () => {
     expect(h.ticks.length).toBe(afterStart)
     expect(h.onStop).toHaveBeenCalled()
   })
+
+  // Regression: `start()` awaited the first tick unguarded, so a tick that
+  // rejected skipped schedule() and left the loop with nothing armed — silently,
+  // since every caller does `void loop.start()`. Polling then stayed dead until
+  // the component remounted.
+  it("stays armed when the first poll rejects", async () => {
+    let first = true
+    const h = mountLoop(() => {
+      if (first) {
+        first = false
+        return Promise.reject(new Error("boom"))
+      }
+      return Promise.resolve()
+    })
+
+    await h.loop.start()
+    expect(h.ticks.length).toBe(1)
+
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.ticks.length).toBe(2) // the loop rescheduled despite the rejection
+    h.loop.stop()
+  })
 })

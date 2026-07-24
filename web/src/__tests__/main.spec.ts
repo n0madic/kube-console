@@ -112,4 +112,39 @@ describe("main.ts unauthorized handling", () => {
 
     expect(window.sessionStorage.getItem(SESSION_KEY) ?? "").not.toContain(SENTINEL)
   })
+
+  // Regression: the query pruner matched ANY element of the key
+  // (`queryKey.includes(context)`), so ending the "default" context's session
+  // also evicted another, still signed-in cluster's cached responses whenever
+  // some other slot happened to hold that name — a Pod Env entry for namespace
+  // "default", say. The context lives in slot 1 of every context-scoped key.
+  it("prunes only the ended context's queries, by the context slot", async () => {
+    const { QueryClient } = await import("@tanstack/vue-query")
+    const removeQueries = vi.spyOn(QueryClient.prototype, "removeQueries")
+
+    await boot("token")
+    const { apiFetch } = await import("@/api/http")
+    await expect(apiFetch("/k8s/api/v1/pods")).rejects.toMatchObject({ status: 401 })
+    await vi.waitFor(() => expect(removeQueries).toHaveBeenCalled())
+
+    const filters = removeQueries.mock.calls.at(-1)?.[0] as
+      | { predicate?: (q: { queryKey: readonly unknown[] }) => boolean }
+      | undefined
+    const matches = filters?.predicate
+    expect(matches).toBeTypeOf("function")
+
+    // The ended context's own entries go.
+    expect(matches!({ queryKey: ["discovery", "default"] })).toBe(true)
+    expect(matches!({ queryKey: ["podEnvSource", "default", "kube-system", "secrets", []] })).toBe(
+      true,
+    )
+    // Another cluster's entries stay — even when a later slot is called
+    // "default" (a namespace of that name is entirely ordinary).
+    expect(matches!({ queryKey: ["podEnvSource", "prod", "default", "secrets", []] })).toBe(false)
+    expect(matches!({ queryKey: ["discovery", "prod"] })).toBe(false)
+    // And the context list itself is not context-scoped at all.
+    expect(matches!({ queryKey: ["contexts"] })).toBe(false)
+
+    removeQueries.mockRestore()
+  })
 })

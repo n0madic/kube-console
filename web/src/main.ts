@@ -32,7 +32,14 @@ setCredentialProvider(new KubernetesTokenProvider())
 // switch-back; never queryClient.clear(). Registered before mount, so no
 // session can end without it.
 setQueryPruner((context) => {
-  queryClient.removeQueries({ predicate: (q) => q.queryKey.includes(context) })
+  // The context slot specifically, not `queryKey.includes(context)`: every
+  // context-scoped key carries it at index 1 (["discovery", ctx],
+  // ["namespaces", ctx], ["identity", ctx], ["podEnvSource", ctx, ns, ...]),
+  // while a plain `includes` also matches any *other* element that happens to
+  // equal the name — a Pod Env entry of a different, still signed-in cluster
+  // whose namespace is called "default" would be evicted along with the
+  // "default" context's session.
+  queryClient.removeQueries({ predicate: (q) => q.queryKey[1] === context })
 })
 setUnauthorizedHandler((context) => {
   // 401: end only the session of the context the request was routed to (a

@@ -174,4 +174,29 @@ describe("buildEnvRows", () => {
       source: { ref: { kind: "ConfigMap", name: "gone" } },
     })
   })
+
+  // Regression: the placeholder row for an unreadable envFrom source was keyed
+  // by its displayed `<prefix>*` name alone, so a container importing two
+  // unreadable sources under the same prefix (the common case being no prefix at
+  // all) had the second silently replace the first — the Pod referenced an
+  // object the table never mentioned.
+  it("lists every unreadable envFrom source, not just the last one", () => {
+    const denied: K8sObject = {
+      spec: {
+        containers: [
+          {
+            name: "c",
+            envFrom: [{ configMapRef: { name: "cm-gone" } }, { secretRef: { name: "sec-gone" } }],
+          },
+        ],
+      },
+    } as unknown as K8sObject
+    const out = buildEnvRows(denied, {
+      configMaps: new Map([["cm-gone", null]]),
+      secrets: new Map([["sec-gone", null]]),
+    })
+
+    expect(out).toHaveLength(2)
+    expect(out.map((r) => r.source.ref?.name).sort()).toEqual(["cm-gone", "sec-gone"])
+  })
 })

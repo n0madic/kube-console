@@ -62,8 +62,14 @@ const rows = computed(() =>
   }),
 )
 
+// Keyed on the array itself, never on its length: `useLogsStream` caps the
+// buffer at MAX_LINES, so once a chatty container reaches the cap every flush
+// hands over a *new* array of the *same* length. A length watcher would stop
+// firing exactly there and Follow would silently freeze while lines keep
+// arriving. The producer replaces the array on every flush, so identity is the
+// signal.
 watch(
-  () => props.lines.length,
+  () => props.lines,
   () => {
     if (props.follow && props.lines.length > 0) {
       virtualizer.value.scrollToIndex(props.lines.length - 1, { align: "end" })

@@ -514,6 +514,45 @@ func TestLoopbackHostGuardOnlyInCredentialMode(t *testing.T) {
 	}
 }
 
+// Regression: the fence was mounted off cfg.UseKubeconfigCredentials alone,
+// while every other credential-mode decision (auth mode, RequireToken, the exec
+// auth frame, the gateway's Authorization strip) reads the registry — what
+// RESTConfigs actually did. A registry that authenticates upstream with the
+// kubeconfig's own credentials must never be served without the Host allowlist,
+// whatever the flag on the Config next to it says.
+func TestLoopbackHostGuardFollowsTheRegistry(t *testing.T) {
+	h := NewHandler(Deps{
+		// Deliberately false: the registry is the authority here.
+		Cfg: &config.Config{MaxBodyBytes: 4 << 20, MaxExecSessions: 1},
+		Registry: kube.NewRegistryFromUpstreams("default", map[string]*kube.Upstream{
+			"default": {
+				BaseURL:              mustParseURL(t, "https://apiserver.example"),
+				Transport:            http.DefaultTransport,
+				UseConfigCredentials: true,
+			},
+		}),
+		Logger:  slog.New(slog.DiscardHandler),
+		Version: "test",
+		DistFS:  testDist,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Host = "console.example.com"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("non-loopback Host = %d, want 403 for a credentialed registry", rec.Code)
+	}
+
+	loopback := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	loopback.Host = "127.0.0.1:8080"
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, loopback)
+	if rec.Code != http.StatusOK {
+		t.Errorf("loopback Host = %d, want 200", rec.Code)
+	}
+}
+
 func mustParseURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	u, err := url.Parse(raw)

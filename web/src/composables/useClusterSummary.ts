@@ -20,7 +20,10 @@ export interface ClusterSummary {
   // usedCores/usedBytes are null when metrics-server is unavailable/forbidden.
   cpu: { usedCores: number | null; totalCores: number }
   memory: { usedBytes: number | null; totalBytes: number }
-  pods: { count: number; capacity: number }
+  // count is null when the pod list could not be read (RBAC, transient error),
+  // exactly like the metrics above: a failed count must not render as a cluster
+  // with zero pods, which is a statement the gauge has no basis for.
+  pods: { count: number | null; capacity: number }
   nodes: { ready: number; total: number }
 }
 
@@ -102,7 +105,7 @@ export function useClusterSummary() {
       usedBytes = mem
     }
 
-    const podCount = podsR.status === "fulfilled" ? podsR.value : 0
+    const podCount = podsR.status === "fulfilled" ? podsR.value : null
 
     data.value = {
       cpu: { usedCores, totalCores },

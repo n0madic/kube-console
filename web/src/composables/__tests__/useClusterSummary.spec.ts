@@ -149,4 +149,20 @@ describe("useClusterSummary", () => {
     expect(summary.available.value).toBe(false)
     expect(summary.data.value).toBeNull()
   })
+
+  // Regression: a failed pod count fell back to 0, so an RBAC denial or a
+  // transient error rendered as "0 / 220" with an empty ring — a statement
+  // about the cluster the gauge had no basis for. Unknown is null, like the
+  // metrics-server values beside it.
+  it("leaves the pod count null when the count could not be read", async () => {
+    mockNodes.mockResolvedValue(nodeList())
+    mockPods.mockRejectedValue(new Error("forbidden"))
+    mockMetrics.mockResolvedValue(metrics)
+
+    const summary = useInHost()
+    await summary.refresh()
+
+    expect(summary.available.value).toBe(true)
+    expect(summary.data.value?.pods).toEqual({ count: null, capacity: 220 })
+  })
 })

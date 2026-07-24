@@ -135,7 +135,26 @@ func (h *Handler) session(ctx context.Context, conn *websocket.Conn, releaseHand
 	}
 
 	// Idle timeout: no traffic in either direction ends the session.
-	idle := time.AfterFunc(h.idleTimeout, end)
+	//
+	// The reason is sent *before* ending it, and that ordering is the whole
+	// point: cancelling the session context makes coder/websocket close the
+	// socket from under readLoop, so nothing written afterwards — including the
+	// error frame the switch below would build from client-go's "context
+	// canceled" — ever reaches the browser. The terminal would simply go dead
+	// with no explanation of why or whether reconnecting helps.
+	idle := time.AfterFunc(h.idleTimeout, func() {
+		// Stop() cannot cancel a callback that has already started, so re-check:
+		// a session ending normally at this exact moment must not be handed a
+		// spurious timeout frame on its way out.
+		if sessionCtx.Err() != nil {
+			return
+		}
+		_ = writeControl(ctx, conn, &writeMu, ControlFrame{
+			Type:    "error",
+			Message: "exec session closed: idle timeout after " + h.idleTimeout.String(),
+		})
+		end()
+	})
 	defer idle.Stop()
 	activity := func() { idle.Reset(h.idleTimeout) }
 

@@ -8,6 +8,7 @@ import {
   type Cell,
   type ColumnDef,
   type ColumnSizingState,
+  type Row,
   type SortingState,
 } from "@tanstack/vue-table"
 import { useVirtualizer } from "@tanstack/vue-virtual"
@@ -189,6 +190,18 @@ function cellRoute(cell: Cell<K8sTableRow, unknown>): RouteLocationRaw | null {
   )
 }
 
+/**
+ * Visible cells paired with their route, resolved once per cell per render.
+ * The template used to ask twice for every cell (once in `v-if`, once for
+ * `:to`) on the hot path of a virtualized table — same reason MetadataCard
+ * precomputes `owners` and RecentEventsCard `rowsWithRoute`.
+ */
+function cellViews(
+  row: Row<K8sTableRow>,
+): Array<{ cell: Cell<K8sTableRow, unknown>; route: RouteLocationRaw | null }> {
+  return row.getVisibleCells().map((cell) => ({ cell, route: cellRoute(cell) }))
+}
+
 const totalWidth = computed(() => {
   // Track sizing state so the total refreshes during drag.
   void columnSizing.value
@@ -269,7 +282,7 @@ const totalSize = computed(() => virtualizer.value.getTotalSize())
         @click="emit('rowClick', tableRows[virtualRow.index]!.original)"
       >
         <div
-          v-for="cell in tableRows[virtualRow.index]!.getVisibleCells()"
+          v-for="{ cell, route } in cellViews(tableRows[virtualRow.index]!)"
           :key="cell.id"
           role="cell"
           class="shrink-0 truncate px-3 py-2"
@@ -284,8 +297,8 @@ const totalSize = computed(() => virtualizer.value.getTotalSize())
           <!-- Linked cell (e.g. an event's involved object): navigating to the
                referenced object must not also trigger the row click. -->
           <RouterLink
-            v-if="cellRoute(cell) !== null"
-            :to="cellRoute(cell)!"
+            v-if="route !== null"
+            :to="route"
             class="text-blue-600 hover:underline dark:text-blue-400"
             @click.stop
           >
