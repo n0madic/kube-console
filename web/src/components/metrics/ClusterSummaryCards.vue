@@ -8,6 +8,18 @@ import { formatBytes, formatCores } from "@/utils/units"
 
 import GaugeCard from "./GaugeCard.vue"
 
+// Problem pods come from ProblemPodsCard's cluster-wide scan (one walk feeds
+// both) via the page; null means "not known" — no scan has landed yet, or it
+// was forbidden — and is not the same as zero, which is a clean bill of health.
+const props = withDefaults(
+  defineProps<{
+    problemPods?: number | null
+    /** The scan hit its page cap, so the count above is a floor. */
+    problemPodsTruncated?: boolean
+  }>(),
+  { problemPods: null, problemPodsTruncated: false },
+)
+
 const podsRoute = resourceListRoute({ group: "", version: "v1", resource: "pods" })
 const nodesRoute = resourceListRoute({ group: "", version: "v1", resource: "nodes" })
 
@@ -27,12 +39,18 @@ interface Gauge {
   detail: string
   percent: number | null
   variant: "usage" | "health"
+  alertPercent?: number | null
+  alertLabel?: string
   to?: RouteLocationRaw
 }
 
 const cards = computed<Gauge[]>(() => {
   const d = summary.data.value
   if (d === null) return []
+  // Kept nullable on purpose: "no scan has landed / it was forbidden" must not
+  // collapse into "zero pods in trouble" anywhere below.
+  const problems = props.problemPods
+  const inTrouble = problems !== null && problems > 0
   const cpuUsed = d.cpu.usedCores === null ? "—" : formatCores(d.cpu.usedCores)
   const memUsed = d.memory.usedBytes === null ? "—" : formatBytes(d.memory.usedBytes)
   return [
@@ -56,6 +74,14 @@ const cards = computed<Gauge[]>(() => {
       detail: `${d.pods.count} / ${d.pods.capacity}`,
       percent: ratio(d.pods.count, d.pods.capacity),
       variant: "usage",
+      // Against capacity, like the fill it sits inside — not against the pod
+      // count, or the segment would not line up with the arc it colors.
+      alertPercent: inTrouble ? ratio(problems, d.pods.capacity) : null,
+      // "+" for a capped scan: the card's own heading marks it the same way,
+      // and an exact-looking number would be the one to trust least.
+      alertLabel: inTrouble
+        ? `${problems}${props.problemPodsTruncated ? "+" : ""} in trouble`
+        : undefined,
       to: podsRoute,
     },
     {
@@ -88,6 +114,8 @@ const cards = computed<Gauge[]>(() => {
         :detail="card.detail"
         :percent="card.percent"
         :variant="card.variant"
+        :alert-percent="card.alertPercent"
+        :alert-label="card.alertLabel"
         :to="card.to"
       />
     </div>

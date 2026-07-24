@@ -29,6 +29,15 @@ const memKey = () => `${auth.activeContext}:ns:${ui.namespace}:mem`
 const cpuBuffer = shallowRef(getMetricsBuffer(cpuKey()))
 const memBuffer = shallowRef(getMetricsBuffer(memKey()))
 const latestItems = shallowRef<MetricsItem[]>([])
+/** Problem-pod count from the card below, relayed to the Pods gauge above it
+ *  (with the scan's truncation, so the gauge can mark it as a floor). */
+const problemPods = ref<number | null>(null)
+const problemPodsTruncated = ref(false)
+
+function onProblemCount(count: number | null, truncated: boolean): void {
+  problemPods.value = count
+  problemPodsTruncated.value = truncated
+}
 
 function onSample(resp: MetricsResponse): void {
   const tsMs = Date.parse(resp.observedAt)
@@ -79,11 +88,16 @@ const memData = computed(() => memBuffer.value.toUplotData(METRICS_RANGE_SECONDS
   <div class="space-y-4 p-4">
     <h1 class="text-xl font-semibold">Overview</h1>
 
-    <ClusterSummaryCards />
+    <!-- The Pods gauge marks the problem pods inside its fill; the count comes
+         from the card's scan below, so the cluster is walked once, not twice. -->
+    <ClusterSummaryCards
+      :problem-pods="problemPods"
+      :problem-pods-truncated="problemPodsTruncated"
+    />
 
     <!-- Cluster-wide too (all namespaces, own slow scan); renders only when
          some pod is actually in trouble. -->
-    <ProblemPodsCard />
+    <ProblemPodsCard @count="onProblemCount" />
 
     <!-- Everything below follows the namespace selector; the heading and the
          rule above it separate it from the cluster-wide gauges, which do not. -->

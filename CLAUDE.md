@@ -810,6 +810,24 @@ shows "—") and a one-page `fetchPodCount` (`includeObject=None` Table +
 `remainingItemCount`). A forbidden node list (namespace-scoped tokens) hides the
 whole row; the Pods and Nodes gauges link to their lists.
 
+The Pods gauge also carries the problem-pod count: `GaugeCard`'s optional
+`alertPercent`/`alertLabel` paint a rose segment over the **end** of the filled
+arc (`alertOffset`) plus an "N in trouble" line under the detail. It closes the
+arc rather than starting it — drawn at the start it reads as a notch cut into
+the ring, with the fill's own round cap poking out ahead of it — and keeps the
+fill's round cap, so the two outer caps coincide and the ring ends in one tip.
+The segment is floored at `MIN_ALERT_ARC` (2%), since a few bad pods out of a
+cluster's capacity is otherwise an invisible sliver, and capped by the fill. The share is taken **against capacity**, the same
+denominator as the arc it colors. The count is *not* computed here: it comes
+from `ProblemPodsCard`'s scan below via a `count` event the page relays
+(`NamespaceOverviewPage`), so the cluster is walked once rather than twice. The
+event carries the scan's truncation as well, so a capped scan reads "137+ in
+trouble" exactly as the card's own heading marks it. `null` (no scan yet, or a
+failed/forbidden one) is distinct from 0 and draws no segment at all — a failed
+scan must not read as a clean bill of health — and is emitted **only** on a
+context switch: a plain rescan keeps the last count on the gauge instead of
+blanking the segment for the length of every scan.
+
 Below the gauges — still cluster-wide, so it ignores the namespace selector —
 `components/pod/ProblemPodsCard.vue` lists pods in trouble across all
 namespaces, and renders **nothing at all** when there are none (the common

@@ -32,8 +32,8 @@ function mockState(over: Partial<Record<string, unknown>> = {}) {
   return start
 }
 
-function mountCards() {
-  return mount(ClusterSummaryCards, { global: { stubs: routerLinkStub } })
+function mountCards(props: Record<string, unknown> = {}) {
+  return mount(ClusterSummaryCards, { props, global: { stubs: routerLinkStub } })
 }
 
 describe("ClusterSummaryCards", () => {
@@ -63,6 +63,31 @@ describe("ClusterSummaryCards", () => {
     const wrapper = mountCards()
     // CPU/Memory are plain sections; Pods/Nodes are links.
     expect(wrapper.findAll("a").length).toBe(2)
+  })
+
+  it("marks problem pods on the Pods gauge, against capacity", () => {
+    mockState()
+    const wrapper = mountCards({ problemPods: 11 })
+    expect(wrapper.text()).toContain("11 in trouble")
+    // 11 of the 220 capacity the fill is measured against, not of the 31 pods.
+    const rose = wrapper.findAll("circle").filter((c) => c.classes().includes("text-rose-500"))
+    expect(rose).toHaveLength(1)
+    expect(rose[0]?.attributes("stroke-dasharray")).toBe("5 95")
+  })
+
+  it("marks a capped scan's count as a floor", () => {
+    mockState()
+    const wrapper = mountCards({ problemPods: 137, problemPodsTruncated: true })
+    expect(wrapper.text()).toContain("137+ in trouble")
+  })
+
+  it("leaves the gauges untouched with no problem pods, and with none known", () => {
+    mockState()
+    for (const problemPods of [0, null]) {
+      const wrapper = mountCards({ problemPods })
+      expect(wrapper.text()).not.toContain("in trouble")
+      expect(wrapper.findAll("circle").filter((c) => c.classes().includes("text-rose-500"))).toHaveLength(0)
+    }
   })
 
   it("renders nothing when the cluster summary is unavailable", () => {

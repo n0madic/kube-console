@@ -49,6 +49,43 @@ describe("GaugeCard", () => {
     expect(degraded.html()).toContain("text-amber-500")
   })
 
+  it("paints a trouble segment inside the fill and labels it", () => {
+    const wrapper = mount(GaugeCard, {
+      props: {
+        title: "Pods",
+        detail: "31 / 220",
+        percent: 14,
+        alertPercent: 5,
+        alertLabel: "11 in trouble",
+      },
+    })
+    expect(wrapper.text()).toContain("11 in trouble")
+    const arcs = wrapper.findAll("circle")
+    expect(arcs.length).toBe(3) // track + fill + trouble
+    expect(arcs[1]?.attributes("stroke-dasharray")).toBe("14 86")
+    expect(arcs[2]?.attributes("stroke-dasharray")).toBe("5 95")
+    // Closing the fill (14%), not cutting into its start.
+    expect(arcs[2]?.attributes("stroke-dashoffset")).toBe("-9")
+    expect(arcs[2]?.classes()).toContain("text-rose-500")
+  })
+
+  it("never lets the trouble segment outgrow the fill it sits in", () => {
+    const wrapper = mount(GaugeCard, {
+      props: { title: "Pods", detail: "1 / 100", percent: 1, alertPercent: 1 },
+    })
+    // The 2% visibility floor is capped by the 1% fill.
+    expect(wrapper.findAll("circle")[2]?.attributes("stroke-dasharray")).toBe("1 99")
+  })
+
+  it("draws no trouble segment without a count", () => {
+    for (const alertPercent of [null, 0]) {
+      const wrapper = mount(GaugeCard, {
+        props: { title: "Pods", detail: "31 / 220", percent: 14, alertPercent },
+      })
+      expect(wrapper.findAll("circle").length).toBe(2)
+    }
+  })
+
   it("renders as a link when a route is provided", () => {
     const wrapper = mount(GaugeCard, {
       props: { title: "Pods", detail: "3 / 4", percent: 75, to: { name: "resource-list" } },

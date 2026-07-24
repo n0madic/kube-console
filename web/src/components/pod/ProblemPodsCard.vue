@@ -13,6 +13,14 @@
 // on a 403: listing pods cluster-wide needs cluster RBAC, and a
 // namespace-scoped token must not turn the Overview into a permission error.
 // It ignores the namespace selector, like the gauges above it.
+//
+// It also reports the match count upwards (`count`), which the page relays to
+// the Pods gauge: one cluster-wide walk feeds both, and the alternative — the
+// gauge counting problem pods itself — would be a second full scan of the same
+// collection. `null` means not known (no scan has landed, or it was forbidden)
+// and is deliberately distinct from 0. The second argument carries the scan's
+// truncation, so the gauge can mark the count as a floor exactly like the
+// card's own heading does.
 
 import { computed, onMounted, ref, watch } from "vue"
 
@@ -37,6 +45,8 @@ const MAX_PAGES = 6
 /** Cap on rendered rows — a cluster in real trouble must not print thousands. */
 const MAX_ROWS = 50
 const REFRESH_INTERVAL_MS = 60_000
+
+const emit = defineEmits<{ count: [count: number | null, truncated: boolean] }>()
 
 const auth = useAuthStore()
 
@@ -105,6 +115,7 @@ async function tick(gen: number): Promise<void> {
     matchCount.value = matched.length
     scanTruncated.value = result.truncated
     errorText.value = null
+    emit("count", matched.length, result.truncated)
   } catch (e) {
     if (!current()) return
     rows.value = []
@@ -113,6 +124,9 @@ async function tick(gen: number): Promise<void> {
     // leaves the card in its invisible state (no rows, no error) instead of
     // turning the Overview into a permission error on every visit.
     errorText.value = asApiError(e).status === 403 ? null : messageFromError(e)
+    // A failed scan proves nothing about the cluster: the gauge must show no
+    // trouble segment rather than a stale or invented count.
+    emit("count", null, false)
   } finally {
     if (current()) loading.value = false
   }
@@ -133,6 +147,10 @@ watch(
     loop.stop()
     reset()
     loading.value = false
+    // Nothing is known about the new cluster yet — and only here: a plain
+    // rescan (Refresh, the 60s tick) keeps the last count on the gauge instead
+    // of blanking its segment for the duration of every scan.
+    emit("count", null, false)
     if (!auth.isAuthenticated) return
     void loop.start()
   },

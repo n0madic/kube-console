@@ -167,6 +167,32 @@ describe("ProblemPodsCard", () => {
     expect(wrapper.text()).not.toContain("older-scan")
   })
 
+  // The Pods gauge draws its trouble segment from this count, so a scan that
+  // proves nothing (403, failure) must report null, never 0.
+  it("reports the match count upwards", async () => {
+    mockScan([
+      pod("default", "healthy", "1/1", "Running"),
+      pod("a-ns", "crashing", "0/1", "CrashLoopBackOff"),
+    ])
+    const wrapper = mountCard()
+    await flushPromises()
+    expect(wrapper.emitted("count")?.at(-1)).toEqual([1, false])
+  })
+
+  it("reports a capped scan's count as a floor", async () => {
+    mockScan([pod("a-ns", "crashing", "0/1", "CrashLoopBackOff")], true)
+    const wrapper = mountCard()
+    await flushPromises()
+    expect(wrapper.emitted("count")?.at(-1)).toEqual([1, true])
+  })
+
+  it("reports an unknown count when the scan fails", async () => {
+    mockedList.mockRejectedValue(new ApiError(403, "pods is forbidden"))
+    const wrapper = mountCard()
+    await flushPromises()
+    expect(wrapper.emitted("count")?.at(-1)).toEqual([null, false])
+  })
+
   it("rescans on demand", async () => {
     mockScan([pod("default", "crashing", "0/1", "Error")])
     const wrapper = mountCard()
