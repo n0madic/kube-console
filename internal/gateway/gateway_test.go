@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"k8s.io/client-go/rest"
@@ -25,12 +27,36 @@ type recordedRequest struct {
 	Body   []byte
 }
 
-func newTestGateway(t *testing.T, upstream http.HandlerFunc) (*Gateway, *[]recordedRequest, *httptest.Server) {
+// recorder is what the fake upstreams write into. It is guarded because the
+// handler runs on the httptest server's goroutine while the test reads from its
+// own: for most cases the response the test waited for carries a happens-before
+// edge to the append, but not for every case — the gateway answers a 413 having
+// never waited for the upstream at all, so that read raced the append (CI, -race).
+type recorder struct {
+	mu       sync.Mutex
+	requests []recordedRequest
+}
+
+func (r *recorder) add(req recordedRequest) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.requests = append(r.requests, req)
+}
+
+// all returns a snapshot: the caller must not hold a slice the upstream can
+// still append to.
+func (r *recorder) all() []recordedRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.requests)
+}
+
+func newTestGateway(t *testing.T, upstream http.HandlerFunc) (*Gateway, *recorder, *httptest.Server) {
 	t.Helper()
-	var recorded []recordedRequest
+	recorded := &recorder{}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		recorded = append(recorded, recordedRequest{
+		recorded.add(recordedRequest{
 			Method: r.Method,
 			Path:   r.URL.Path,
 			Query:  r.URL.RawQuery,
@@ -51,7 +77,7 @@ func newTestGateway(t *testing.T, upstream http.HandlerFunc) (*Gateway, *[]recor
 	}
 	up := &kube.Upstream{BaseURL: base, Transport: http.DefaultTransport}
 	reg := kube.NewRegistryFromUpstreams("default", map[string]*kube.Upstream{"default": up})
-	return New(reg, slog.New(slog.DiscardHandler)), &recorded, ts
+	return New(reg, slog.New(slog.DiscardHandler)), recorded, ts
 }
 
 func doGateway(gw *Gateway, method, target string, header http.Header, body io.Reader) *httptest.ResponseRecorder {
@@ -93,8 +119,8 @@ func TestGatewayBlockedSubresourcesNeverReachUpstream(t *testing.T) {
 			t.Errorf("GET %s body kind = %v, want Status", p, status["kind"])
 		}
 	}
-	if len(*recorded) != 0 {
-		t.Fatalf("upstream was called %d times for blocked paths", len(*recorded))
+	if len(recorded.all()) != 0 {
+		t.Fatalf("upstream was called %d times for blocked paths", len(recorded.all()))
 	}
 }
 
@@ -104,10 +130,10 @@ func TestGatewayLogSubresourcePasses(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if len(*recorded) != 1 {
-		t.Fatalf("upstream called %d times, want 1", len(*recorded))
+	if len(recorded.all()) != 1 {
+		t.Fatalf("upstream called %d times, want 1", len(recorded.all()))
 	}
-	got := (*recorded)[0]
+	got := recorded.all()[0]
 	if got.Path != "/api/v1/namespaces/ns/pods/p/log" {
 		t.Errorf("upstream path = %q", got.Path)
 	}
@@ -155,7 +181,7 @@ func TestGatewayHeaderSanitization(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	got := (*recorded)[0]
+	got := recorded.all()[0]
 	for _, name := range []string{"Cookie", "Impersonate-User", "X-Remote-User", "X-Forwarded-For", "Forwarded", "Referer"} {
 		if v := got.Header.Get(name); v != "" {
 			t.Errorf("upstream received %s = %q, want removed", name, v)
@@ -179,7 +205,7 @@ func TestGatewayMissingBearer(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rec.Code)
 	}
-	if len(*recorded) != 0 {
+	if len(recorded.all()) != 0 {
 		t.Fatal("upstream must not be called without a bearer token")
 	}
 }
@@ -193,7 +219,7 @@ func TestGatewayRejectsInboundUpgrade(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
-	if len(*recorded) != 0 {
+	if len(recorded.all()) != 0 {
 		t.Fatal("upstream must not be called for upgrade requests")
 	}
 }
@@ -206,7 +232,7 @@ func TestGatewayMethodNotAllowed(t *testing.T) {
 			t.Errorf("%s status = %d, want 405", m, rec.Code)
 		}
 	}
-	if len(*recorded) != 0 {
+	if len(recorded.all()) != 0 {
 		t.Fatal("upstream must not be called for disallowed methods")
 	}
 }
@@ -264,7 +290,7 @@ func TestGatewayStreamingResponse(t *testing.T) {
 }
 
 func TestGatewayBodyTooLarge(t *testing.T) {
-	gw, recorded, _ := newTestGateway(t, nil)
+	gw, recorded, upstream := newTestGateway(t, nil)
 	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, 16)
 		gw.ServeHTTP(w, r)
@@ -286,7 +312,12 @@ func TestGatewayBodyTooLarge(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
 		t.Fatalf("413 body is not JSON: %v", err)
 	}
-	for _, rr := range *recorded {
+	// The 413 is written without waiting for the upstream, so the request it
+	// aborted may still be in that handler. Close waits for it (and is
+	// idempotent, so the t.Cleanup close stays fine): otherwise this loop could
+	// read an empty log and pass without ever seeing what reached upstream.
+	upstream.Close()
+	for _, rr := range recorded.all() {
 		if len(rr.Body) > 16 {
 			t.Fatal("oversized body must not fully reach upstream")
 		}
@@ -295,12 +326,12 @@ func TestGatewayBodyTooLarge(t *testing.T) {
 
 // newMultiContextGateway wires two recording upstreams (alpha default + beta)
 // so context routing and header stripping can be asserted.
-func newMultiContextGateway(t *testing.T) (*Gateway, *[]recordedRequest, *[]recordedRequest) {
+func newMultiContextGateway(t *testing.T) (*Gateway, *recorder, *recorder) {
 	t.Helper()
-	newUpstream := func() (*kube.Upstream, *[]recordedRequest) {
-		var recorded []recordedRequest
+	newUpstream := func() (*kube.Upstream, *recorder) {
+		recorded := &recorder{}
 		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			recorded = append(recorded, recordedRequest{
+			recorded.add(recordedRequest{
 				Method: r.Method,
 				Path:   r.URL.Path,
 				Header: r.Header.Clone(),
@@ -309,7 +340,7 @@ func newMultiContextGateway(t *testing.T) (*Gateway, *[]recordedRequest, *[]reco
 		}))
 		t.Cleanup(ts.Close)
 		base, _ := url.Parse(ts.URL)
-		return &kube.Upstream{BaseURL: base, Transport: http.DefaultTransport}, &recorded
+		return &kube.Upstream{BaseURL: base, Transport: http.DefaultTransport}, recorded
 	}
 	alpha, alphaRec := newUpstream()
 	beta, betaRec := newUpstream()
@@ -324,8 +355,8 @@ func TestGatewayRoutesByContextHeader(t *testing.T) {
 	if rec := doGateway(gw, http.MethodGet, "/k8s/api/v1/pods", bearerHeader(), nil); rec.Code != http.StatusOK {
 		t.Fatalf("default route status = %d", rec.Code)
 	}
-	if len(*alphaRec) != 1 || len(*betaRec) != 0 {
-		t.Fatalf("default routing: alpha=%d beta=%d, want alpha", len(*alphaRec), len(*betaRec))
+	if len(alphaRec.all()) != 1 || len(betaRec.all()) != 0 {
+		t.Fatalf("default routing: alpha=%d beta=%d, want alpha", len(alphaRec.all()), len(betaRec.all()))
 	}
 
 	// Explicit beta header → beta upstream.
@@ -334,8 +365,8 @@ func TestGatewayRoutesByContextHeader(t *testing.T) {
 	if rec := doGateway(gw, http.MethodGet, "/k8s/api/v1/pods", h, nil); rec.Code != http.StatusOK {
 		t.Fatalf("beta route status = %d", rec.Code)
 	}
-	if len(*alphaRec) != 1 || len(*betaRec) != 1 {
-		t.Fatalf("beta routing: alpha=%d beta=%d, want beta", len(*alphaRec), len(*betaRec))
+	if len(alphaRec.all()) != 1 || len(betaRec.all()) != 1 {
+		t.Fatalf("beta routing: alpha=%d beta=%d, want beta", len(alphaRec.all()), len(betaRec.all()))
 	}
 }
 
@@ -347,8 +378,8 @@ func TestGatewayUnknownContextRejected(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("unknown context status = %d, want 400", rec.Code)
 	}
-	if len(*alphaRec) != 0 || len(*betaRec) != 0 {
-		t.Fatalf("unknown context reached an upstream: alpha=%d beta=%d", len(*alphaRec), len(*betaRec))
+	if len(alphaRec.all()) != 0 || len(betaRec.all()) != 0 {
+		t.Fatalf("unknown context reached an upstream: alpha=%d beta=%d", len(alphaRec.all()), len(betaRec.all()))
 	}
 }
 
@@ -360,10 +391,10 @@ func TestGatewayContextHeaderStrippedFromUpstream(t *testing.T) {
 	if rec := doGateway(gw, http.MethodGet, "/k8s/api/v1/pods", h, nil); rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
-	if len(*betaRec) != 1 {
-		t.Fatalf("beta upstream calls = %d, want 1", len(*betaRec))
+	if len(betaRec.all()) != 1 {
+		t.Fatalf("beta upstream calls = %d, want 1", len(betaRec.all()))
 	}
-	if leaked := (*betaRec)[0].Header.Get("X-Kube-Context"); leaked != "" {
+	if leaked := betaRec.all()[0].Header.Get("X-Kube-Context"); leaked != "" {
 		t.Fatalf("X-Kube-Context leaked upstream: %q", leaked)
 	}
 }
@@ -390,11 +421,11 @@ func TestGatewayAuthorizationNotEchoedInErrors(t *testing.T) {
 // rest.Config that carries the kubeconfig's bearer token, so the test exercises
 // client-go's real "do not overwrite an existing Authorization" behaviour
 // rather than a stand-in for it.
-func newCredentialedGateway(t *testing.T, configToken string) (*Gateway, *[]recordedRequest) {
+func newCredentialedGateway(t *testing.T, configToken string) (*Gateway, *recorder) {
 	t.Helper()
-	var recorded []recordedRequest
+	recorded := &recorder{}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		recorded = append(recorded, recordedRequest{
+		recorded.add(recordedRequest{
 			Method: r.Method,
 			Path:   r.URL.Path,
 			Header: r.Header.Clone(),
@@ -412,7 +443,7 @@ func newCredentialedGateway(t *testing.T, configToken string) (*Gateway, *[]reco
 	}
 	up := &kube.Upstream{BaseURL: base, Transport: rt, UseConfigCredentials: true}
 	reg := kube.NewRegistryFromUpstreams("default", map[string]*kube.Upstream{"default": up})
-	return New(reg, slog.New(slog.DiscardHandler)), &recorded
+	return New(reg, slog.New(slog.DiscardHandler)), recorded
 }
 
 // In the carve-out the browser sends no token at all, and the request must
@@ -423,10 +454,10 @@ func TestGatewayConfigCredentialsWithoutInboundBearer(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (no bearer is expected in this mode)", rec.Code)
 	}
-	if len(*recorded) != 1 {
-		t.Fatalf("upstream called %d times, want 1", len(*recorded))
+	if len(recorded.all()) != 1 {
+		t.Fatalf("upstream called %d times, want 1", len(recorded.all()))
 	}
-	if got := (*recorded)[0].Header.Get("Authorization"); got != "Bearer kubeconfig-token" {
+	if got := recorded.all()[0].Header.Get("Authorization"); got != "Bearer kubeconfig-token" {
 		t.Errorf("upstream Authorization = %q, want the kubeconfig's own credentials", got)
 	}
 }
@@ -443,10 +474,10 @@ func TestGatewayConfigCredentialsOverrideInboundBearer(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if len(*recorded) != 1 {
-		t.Fatalf("upstream called %d times, want 1", len(*recorded))
+	if len(recorded.all()) != 1 {
+		t.Fatalf("upstream called %d times, want 1", len(recorded.all()))
 	}
-	got := (*recorded)[0].Header.Get("Authorization")
+	got := recorded.all()[0].Header.Get("Authorization")
 	if strings.Contains(got, "SENTINEL-client-chosen-token") {
 		t.Fatalf("client-supplied token reached the apiserver: %q", got)
 	}
