@@ -52,6 +52,17 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, version s
 		"upstream", registry.Default().BaseURL.Redacted(),
 		"version", version,
 	)
+	if cfg.UseKubeconfigCredentials {
+		// The zero-credential invariant is off. Say so loudly and in full: from
+		// here on there is no login page and no per-user token — anyone who can
+		// reach this port acts as the owner of the kubeconfig, on every context
+		// it enumerates. config.validate has already pinned the listener to
+		// loopback, which is the only thing keeping "anyone" to this machine.
+		logger.Warn("kubeconfig credentials are in use — no login required",
+			"addr", cfg.ListenAddr,
+			"contexts", len(registry.Names()),
+			"warning", "every request to this loopback address acts as the kubeconfig owner")
+	}
 	// The IP-keyed limits are opt-in, so state what is actually in force
 	// instead of leaving an operator to infer it from the absence of 429s.
 	logger.Info("abuse limits",

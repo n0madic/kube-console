@@ -41,6 +41,12 @@ func NewHandler(d Deps) http.Handler {
 	// after next.ServeHTTP returns, so a panic escaping it would be unlogged.)
 	r.Use(RequestLogger(d.Logger))
 	r.Use(Recoverer(d.Logger))
+	// The credential carve-out's second fence, and the one the listen address
+	// cannot provide: without it, DNS rebinding turns any page the developer
+	// visits into a full-privilege client of this port. See RequireLoopbackHost.
+	if d.Cfg.UseKubeconfigCredentials {
+		r.Use(RequireLoopbackHost)
+	}
 	r.Use(SecurityHeaders)
 	// A client that stops reading must not be able to hold a handler, its
 	// in-flight slot and its upstream connection open forever. Per-write, not

@@ -5,7 +5,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # Deferred (=): resolved only when a Go target actually runs.
 GO_PACKAGES = $(shell go list ./... | grep -v '/node_modules/')
 
-.PHONY: all web-install web-build web-test web-typecheck web-lint go-build go-test vet run-dev docker-build helm-lint verify clean
+.PHONY: all web-install web-build web-test web-typecheck web-lint go-build go-test vet run-dev run-dev-auth docker-build helm-lint verify clean
 
 all: go-build
 
@@ -35,6 +35,12 @@ vet:
 
 run-dev: web-build
 	go run ./cmd/kube-console --log-level debug
+
+# Same, but authenticated by the kubeconfig itself: no login screen, no token to
+# paste. Loopback-only and kubeconfig-only — the backend refuses to start
+# otherwise (see README).
+run-dev-auth: web-build
+	go run ./cmd/kube-console --log-level debug --listen 127.0.0.1:8080 --use-kubeconfig-credentials
 
 docker-build:
 	docker build -t kube-console:$(VERSION) .

@@ -18,6 +18,26 @@ type Upstream struct {
 	BaseURL    *url.URL
 	Transport  http.RoundTripper
 	RestConfig *rest.Config
+	// UseConfigCredentials marks the --use-kubeconfig-credentials carve-out: the
+	// Transport above authenticates by itself (kubeconfig token, client cert or
+	// exec plugin) and there is no user token to attach. Set by NewRegistry;
+	// false everywhere the zero-credential invariant holds, which is every
+	// deployed configuration.
+	UseConfigCredentials bool
+}
+
+// RoundTripper returns the transport to use for one user token: the shared
+// credential-free transport wrapped with that bearer, or — in
+// use-kubeconfig-credentials mode, where the token is empty — the credentialed
+// transport as it is. Every caller that speaks to the apiserver *on behalf of a
+// user* goes through here (kube.Do, and so every adapter), so the two modes
+// cannot drift apart. The readiness probe is deliberately outside it: it has no
+// request identity to speak for and says so at its own call site.
+func (u *Upstream) RoundTripper(token string) http.RoundTripper {
+	if u.UseConfigCredentials {
+		return u.Transport
+	}
+	return WithBearer(u.Transport, token)
 }
 
 // NewUpstream builds the shared transport from a credential-free rest.Config.

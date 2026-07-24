@@ -77,6 +77,58 @@ A kubeconfig `proxy-url` **keeps** its userinfo: it authenticates kube-console
 to the operator's egress proxy, goes only into `Proxy-Authorization` on the
 CONNECT hop, never reaches the apiserver or a client, and is never logged.
 
+**The one carve-out: `--use-kubeconfig-credentials`** (`Config.
+UseKubeconfigCredentials`). The invariant above stays the default and every
+deployed configuration; this flag is opt-in local development, where the
+alternative is pasting a bearer token per cluster that the same kubeconfig
+already holds. With it, `RESTConfigs` swaps `anonymize` for
+`keepUserCredentials` on the **kubeconfig branch only** — which does nothing but
+`stripHostCredentials`, so URL userinfo is dropped even here (client-go would
+turn it into `Authorization: Basic`, which its own bearer round tripper then
+refuses to overwrite, sending the operator's credentials instead of the
+context's; and that URL is what startup prints). Token/`tokenFile`/client-cert/
+`ExecProvider` kubeconfigs all ride along for free: `rest.TransportFor` already
+handles them. The fences are `config.validate` **startup errors**, not warnings:
+
+- kubeconfig only — `--api-server` is rejected, and so is running in a pod,
+  checked as `KUBERNETES_SERVICE_HOST` **directly** rather than via the derived
+  `KubeAPIServer`: `applyInClusterDefaults` returns early when a kubeconfig is
+  set, so an in-cluster pod with one mounted would otherwise sail through, and
+  a pod's loopback is shared with every container in it;
+- `isLoopbackListen(ListenAddr)` — `127.0.0.1`/`[::1]`/`localhost`, since
+  reaching the listener *is* holding the kubeconfig, like `kubectl proxy`;
+- `RequireLoopbackHost` (`server/middleware.go`), mounted only in this mode:
+  the listen address stops other machines, not the developer's own browser, and
+  a page rebound to 127.0.0.1 by DNS arrives with `Host`/`Origin` both set to
+  its own name — same-origin, so CORS never applies and coder/websocket's
+  origin check (Origin vs Host) passes. This is `kubectl proxy`'s
+  `--accept-hosts`, and without it the whole mode is one visited site away from
+  handing over the cluster;
+- a startup `WARN` in `server.Run`, and the Helm chart never exposes the flag.
+
+Mechanically: `Upstream.UseConfigCredentials` + `Upstream.RoundTripper(token)`
+is the chokepoint (`kube.Do` calls it instead of `WithBearer`; the readiness
+probe is the one deliberate exception, having no user to speak for), and
+`Registry.RequireToken` — which replaced the token gate copied into six
+handlers — returns `("", true)` in this mode instead of a 401, so callers pass
+`""` down. The flag is stamped onto each upstream from `NamedConfig.
+UseCredentials` — what `RESTConfigs` actually *did* — never re-read from
+`cfg`: only the kubeconfig branch keeps credentials, and an anonymized upstream
+marked credentialed would authenticate with nothing at all. `Registry.
+useConfigCreds` is likewise derived from the default upstream, in both
+constructors. Two consequences worth keeping in mind: the gateway **deletes the
+inbound `Authorization` header** in `rewriteFor` (client-go will not overwrite
+one, so a client-supplied token would otherwise pick the identity the apiserver
+sees) — keyed off the **upstream** the proxy dispatches to, not a process-wide
+copy, so a mixed registry cannot leave the strip off for a credentialed context
+— and `exec`'s auth frame requires the token to be **empty**
+(`validate(requireToken)` rejects a non-empty one, mirroring that Del rather
+than relying on `session.go` merely ignoring it) while `session.go` leaves
+`cfg.BearerToken` alone rather than blanking the kubeconfig's own.
+`GET /api/ui/auth/mode` (unauthenticated, `adapters.go`) is how
+the SPA learns which mode it is in before the route guard runs; in token mode it
+is a constant, and in kubeconfig mode the listener is loopback-only anyway.
+
 **Multi-cluster is per-context, credential-free.** `internal/kube/registry.go`
 holds one anonymous `kube.Upstream` per kubeconfig context; a request selects
 one with `X-Kube-Context` (`kube.ContextHeader`). The value is **only ever a
@@ -244,6 +296,25 @@ not authentication, or switching to a stale context flashes past the login guard
 as authorized. A restore that drops expired/tampered entries rewrites
 sessionStorage immediately; tests assert all of this with sentinel tokens.
 
+In the `--use-kubeconfig-credentials` mode none of this runs: `stores/auth.ts`
+holds a plain `localAuth` flag (set once in `main.ts` from `fetchAuthMode()`,
+awaited **before** `app.mount` because the route guard needs it on the first
+navigation; a fetch failure falls back to token mode, i.e. onto the login page).
+`isAuthenticated`/`hasSession` then answer true for every context and `token`
+reads `null` — **explicitly** so, not merely because no session exists: a record
+left over from a previous run in token mode would otherwise attach a stale
+bearer to every request that nothing in this mode can clear (Sign out is hidden,
+the 401 handler and `logout` are no-ops). No credential reaches sessionStorage;
+a cluster switch still persists the selected context *name* through the shared
+`setActiveContext`, which is a name, not a token. `identity` resolves from
+`localIdentity`, filled by
+`useLocalIdentity` (a `["identity", ctx]` query called in `App.vue`, so `TopBar`
+keeps reading `auth.identity` and needs no vue-query of its own); `TopBar` hides
+Sign out; `KubernetesTokenProvider.logout` is a no-op; `main.ts`'s 401 handler
+returns early — a 401 there means the apiserver rejected the *backend's*
+credentials, and `/login` would be a loop in front of a form with nothing to
+fill in.
+
 The only other stored UI state is the selected namespace
 (`kube-console.namespace.v1`, `stores/ui.ts`, tab-scoped, non-sensitive, never
 localStorage).
@@ -347,7 +418,9 @@ enumerated; `--context` picks the default, all stay switchable);
 **non-default** context is warned + skipped; a broken **default** one is a hard
 error. `anonymize` (`rest.AnonymousClientConfig` + `stripHostCredentials`)
 strips credentials on every path, so the zero-credential invariant holds
-regardless of source. The Helm chart needs no
+regardless of source — except under `--use-kubeconfig-credentials`, which
+substitutes `keepUserCredentials` on the kubeconfig branch (see the carve-out
+above). The Helm chart needs no
 connection config: the host is derived in-cluster, the CA defaults to the
 auto-published `kube-root-ca.crt` ConfigMap (public cert, no SA token).
 

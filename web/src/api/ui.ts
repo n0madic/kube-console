@@ -2,6 +2,7 @@
 
 import { apiFetch, apiJson } from "./http"
 import type {
+  AuthModeResponse,
   ContextsResponse,
   DiscoveryResponse,
   MetricsCapabilities,
@@ -23,6 +24,27 @@ export async function verifyToken(token: string, context?: string): Promise<Veri
     headers,
     skipUnauthorizedHandler: true,
   })
+  return (await resp.json()) as VerifyResponse
+}
+
+/**
+ * How this backend expects the SPA to authenticate. Unauthenticated, and asked
+ * once at startup: the route guard needs the answer before anything else, and
+ * /api/ui/contexts cannot provide it — in token mode it needs the very token
+ * the client does not have yet.
+ */
+export function fetchAuthMode(signal?: AbortSignal): Promise<AuthModeResponse> {
+  return apiJson<AuthModeResponse>("/api/ui/auth/mode", { signal })
+}
+
+/**
+ * Who the backend's kubeconfig credentials authenticate as, for the local
+ * kubeconfig mode. Deliberately sends no Authorization header of its own, and
+ * apiFetch adds none either — the store's `token` is null whenever localAuth is
+ * set — so the backend answers from its own SelfSubjectReview.
+ */
+export async function fetchIdentity(): Promise<VerifyResponse> {
+  const resp = await apiFetch("/api/ui/auth/verify", { method: "POST" })
   return (await resp.json()) as VerifyResponse
 }
 

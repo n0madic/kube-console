@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/client-go/rest"
+
 	"github.com/n0madic/kube-console/internal/kube"
 )
 
@@ -380,5 +382,75 @@ func TestGatewayAuthorizationNotEchoedInErrors(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), sentinel) {
 		t.Fatal("error response leaked the bearer token")
+	}
+}
+
+// newCredentialedGateway wires the --use-kubeconfig-credentials carve-out the
+// way NewUpstream does: the transport is client-go's own, built from a
+// rest.Config that carries the kubeconfig's bearer token, so the test exercises
+// client-go's real "do not overwrite an existing Authorization" behaviour
+// rather than a stand-in for it.
+func newCredentialedGateway(t *testing.T, configToken string) (*Gateway, *[]recordedRequest) {
+	t.Helper()
+	var recorded []recordedRequest
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recorded = append(recorded, recordedRequest{
+			Method: r.Method,
+			Path:   r.URL.Path,
+			Header: r.Header.Clone(),
+		})
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(ts.Close)
+	base, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := rest.TransportFor(&rest.Config{Host: ts.URL, BearerToken: configToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := &kube.Upstream{BaseURL: base, Transport: rt, UseConfigCredentials: true}
+	reg := kube.NewRegistryFromUpstreams("default", map[string]*kube.Upstream{"default": up})
+	return New(reg, slog.New(slog.DiscardHandler)), &recorded
+}
+
+// In the carve-out the browser sends no token at all, and the request must
+// still be proxied — authenticated with the kubeconfig's credentials.
+func TestGatewayConfigCredentialsWithoutInboundBearer(t *testing.T) {
+	gw, recorded := newCredentialedGateway(t, "kubeconfig-token")
+	rec := doGateway(gw, http.MethodGet, "/k8s/api/v1/pods", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (no bearer is expected in this mode)", rec.Code)
+	}
+	if len(*recorded) != 1 {
+		t.Fatalf("upstream called %d times, want 1", len(*recorded))
+	}
+	if got := (*recorded)[0].Header.Get("Authorization"); got != "Bearer kubeconfig-token" {
+		t.Errorf("upstream Authorization = %q, want the kubeconfig's own credentials", got)
+	}
+}
+
+// Regression for the Header.Del in rewriteFor: client-go's bearer round tripper
+// declines to overwrite an Authorization header that is already set, so without
+// the strip a client-supplied token would reach the apiserver *instead of* the
+// kubeconfig's credentials — letting the browser pick the identity.
+func TestGatewayConfigCredentialsOverrideInboundBearer(t *testing.T) {
+	gw, recorded := newCredentialedGateway(t, "kubeconfig-token")
+	h := http.Header{}
+	h.Set("Authorization", "Bearer SENTINEL-client-chosen-token")
+	rec := doGateway(gw, http.MethodGet, "/k8s/api/v1/pods", h, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if len(*recorded) != 1 {
+		t.Fatalf("upstream called %d times, want 1", len(*recorded))
+	}
+	got := (*recorded)[0].Header.Get("Authorization")
+	if strings.Contains(got, "SENTINEL-client-chosen-token") {
+		t.Fatalf("client-supplied token reached the apiserver: %q", got)
+	}
+	if got != "Bearer kubeconfig-token" {
+		t.Errorf("upstream Authorization = %q, want the kubeconfig's own credentials", got)
 	}
 }

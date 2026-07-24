@@ -3,6 +3,10 @@
 // gone when the tab closes) so a page reload keeps the sessions — each bounded
 // by an absolute TTL. Tokens never touch localStorage, IndexedDB, cookies or
 // URLs. The active context selects which session the getters resolve.
+//
+// `localAuth` is the one state with no token behind it at all: the backend runs
+// with --use-kubeconfig-credentials and authenticates upstream itself, so the
+// tab is signed in everywhere while storing nothing.
 
 import { defineStore } from "pinia"
 import { computed, ref } from "vue"
@@ -143,6 +147,31 @@ export const useAuthStore = defineStore("auth", () => {
   const activeContext = ref(restored.activeContext)
   const sessions = ref<Record<string, StoredSession>>(restored.sessions)
 
+  /**
+   * The backend runs with --use-kubeconfig-credentials: it authenticates
+   * upstream with the kubeconfig's own credentials, so this tab is authenticated
+   * for every context without holding a token for any of them. Set once at
+   * startup from GET /api/ui/auth/mode (main.ts), before the app mounts.
+   *
+   * No credential is persisted, because none exists: `token` reads null, no
+   * session record is ever created, and setting this writes nothing. Switching
+   * clusters still persists the selected context *name* through the shared
+   * setActiveContext (`{activeContext, sessions:{}}`) so a reload keeps the
+   * cluster — a name, never a token, and the same non-sensitive thing the
+   * namespace key already stores.
+   */
+  const localAuth = ref(false)
+  /** Identity reported for the kubeconfig's credentials; see useLocalIdentity. */
+  const localIdentity = ref<{ identity: Identity | null; unavailable: boolean } | null>(null)
+
+  function setLocalAuth(enabled: boolean): void {
+    localAuth.value = enabled
+  }
+
+  function setLocalIdentity(newIdentity: Identity | null, unavailable: boolean): void {
+    localIdentity.value = { identity: newIdentity, unavailable }
+  }
+
   function persist(): void {
     writeStoredSessions({ activeContext: activeContext.value, sessions: sessions.value })
   }
@@ -156,12 +185,28 @@ export const useAuthStore = defineStore("auth", () => {
 
   const active = computed<StoredSession | null>(() => sessionFor(sessions.value, activeContext.value))
 
-  const token = computed<string | null>(() => active.value?.token ?? null)
-  const identity = computed<Identity | null>(() => active.value?.identity ?? null)
-  const identityUnavailable = computed(() => active.value?.identityUnavailable ?? false)
+  /** null under localAuth even when a session record survives from a previous
+   * run in token mode: the backend picks the identity there, so attaching a
+   * leftover bearer would send a stale credential on every request that nothing
+   * in this mode can ever clear (Sign out is hidden, the 401 handler and logout
+   * are no-ops). */
+  const token = computed<string | null>(() =>
+    localAuth.value ? null : (active.value?.token ?? null),
+  )
+  const identity = computed<Identity | null>(() =>
+    localAuth.value ? (localIdentity.value?.identity ?? null) : (active.value?.identity ?? null),
+  )
+  const identityUnavailable = computed(() =>
+    localAuth.value
+      ? (localIdentity.value?.unavailable ?? false)
+      : (active.value?.identityUnavailable ?? false),
+  )
   /** A token alone is not authentication: an expired one must never read as
-   * signed in, or switching to a stale context flashes past the login guard. */
+   * signed in, or switching to a stale context flashes past the login guard.
+   * With localAuth there is no token to check — the backend holds the
+   * credentials, and every context is reachable. */
   const isAuthenticated = computed(() => {
+    if (localAuth.value) return true
     const session = active.value
     return session !== null && session.token !== "" && !isSessionExpired(session)
   })
@@ -174,6 +219,9 @@ export const useAuthStore = defineStore("auth", () => {
    * computeds that call this.
    */
   function hasSession(context: string): boolean {
+    // With localAuth every context is usable without a token of its own, so the
+    // cluster switcher marks them all as signed in — which they are.
+    if (localAuth.value) return true
     const session = sessionFor(sessions.value, context)
     return session !== null && session.token !== "" && !isSessionExpired(session)
   }
@@ -275,6 +323,9 @@ export const useAuthStore = defineStore("auth", () => {
     identity,
     identityUnavailable,
     isAuthenticated,
+    localAuth,
+    setLocalAuth,
+    setLocalIdentity,
     hasSession,
     signedInContexts,
     setSession,

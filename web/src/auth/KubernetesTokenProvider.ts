@@ -22,6 +22,10 @@ export class KubernetesTokenProvider implements CredentialProvider {
 
   async logout(context?: string): Promise<void> {
     const store = useAuthStore()
+    // Nothing to end in the local kubeconfig mode: the credentials are the
+    // backend's, this tab holds no session, and clearing one would only evict
+    // caches for a session that never existed.
+    if (store.localAuth) return
     // The caller passes the context the failed request was routed to, which is
     // not necessarily the active one any more: a 401 arriving after a cluster
     // switch must end the session it belongs to, never the newly selected one.

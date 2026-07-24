@@ -43,7 +43,7 @@ func New(reg *kube.Registry, logger *slog.Logger) *Gateway {
 	for _, name := range reg.Names() {
 		up, _ := reg.Get(name)
 		g.proxies[name] = &httputil.ReverseProxy{
-			Rewrite:       g.rewriteFor(up.BaseURL),
+			Rewrite:       g.rewriteFor(up),
 			Transport:     up.Transport,
 			FlushInterval: -1, // flush immediately: watch/log streams
 			ModifyResponse: func(resp *http.Response) error {
@@ -68,8 +68,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "BadRequest", "protocol upgrade is not allowed on /k8s")
 		return
 	}
-	if kube.ExtractBearer(r) == "" {
-		httpx.WriteError(w, http.StatusUnauthorized, "Unauthorized", "missing bearer token")
+	if _, ok := g.registry.RequireToken(w, r); !ok {
 		return
 	}
 	stripped := strings.TrimPrefix(r.URL.EscapedPath(), Prefix)
@@ -99,8 +98,13 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
-// rewriteFor builds a ReverseProxy Rewrite bound to a single upstream base URL.
-func (g *Gateway) rewriteFor(base *url.URL) func(*httputil.ProxyRequest) {
+// rewriteFor builds a ReverseProxy Rewrite bound to a single upstream. It takes
+// the upstream rather than just its base URL because the Authorization strip
+// below must follow the transport this proxy actually dispatches to — reading a
+// process-wide copy of the mode instead would leave the strip off for a
+// credentialed upstream in any registry whose contexts disagree.
+func (g *Gateway) rewriteFor(up *kube.Upstream) func(*httputil.ProxyRequest) {
+	base := up.BaseURL
 	return func(pr *httputil.ProxyRequest) {
 		out := pr.Out
 
@@ -109,6 +113,14 @@ func (g *Gateway) rewriteFor(base *url.URL) func(*httputil.ProxyRequest) {
 		// and the X-Kube-Context router header. The inbound Authorization header
 		// passes through untouched.
 		SanitizeHeaders(out.Header)
+		if up.UseConfigCredentials {
+			// The upstream transport authenticates by itself here, and client-go's
+			// bearer round tripper declines to overwrite an Authorization header
+			// that is already set — so a client-supplied token would be forwarded
+			// *instead of* the kubeconfig's credentials. Drop it: in this mode the
+			// browser sends none, and one that does must not pick the identity.
+			out.Header.Del("Authorization")
+		}
 
 		escaped := base.EscapedPath() + strings.TrimPrefix(pr.In.URL.EscapedPath(), Prefix)
 		unescaped, err := url.PathUnescape(escaped)

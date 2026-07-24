@@ -3,6 +3,7 @@ import { onBeforeUnmount, watchEffect } from "vue"
 import { useRoute } from "vue-router"
 
 import AppShell from "@/components/layout/AppShell.vue"
+import { useLocalIdentity } from "@/composables/useLocalIdentity"
 import { usePageTitle } from "@/composables/usePageTitle"
 import { usePreferencesStore } from "@/stores/preferences"
 
@@ -11,6 +12,9 @@ const prefs = usePreferencesStore()
 
 // Tab title follows the active cluster (see composables/usePageTitle.ts).
 usePageTitle()
+// Local kubeconfig mode only (the query is disabled otherwise): resolve who the
+// backend's credentials are, so TopBar names them like any signed-in user.
+useLocalIdentity()
 
 // Theme: toggle the .dark class on <html> (see @custom-variant in style.css).
 const media = window.matchMedia("(prefers-color-scheme: dark)")

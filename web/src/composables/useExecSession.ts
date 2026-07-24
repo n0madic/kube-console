@@ -4,6 +4,7 @@
 import { onBeforeUnmount, ref } from "vue"
 
 import { getCredentialProvider } from "@/api/http"
+import { useAuthStore } from "@/stores/auth"
 
 export interface ExecTarget {
   namespace: string
@@ -48,7 +49,9 @@ export function useExecSession(handlers: ExecHandlers) {
     const context = provider !== null ? provider.getContext() : null
     // Stopped/unmounted/superseded while awaiting the token: do not connect.
     if (myGen !== gen) return
-    if (token === null || token === "") {
+    // In the local kubeconfig mode there is no token by design — the auth frame
+    // carries "" and the backend authenticates the exec stream itself.
+    if ((token === null || token === "") && !useAuthStore().localAuth) {
       status.value = "error"
       errorMessage.value = "Not authenticated."
       return
@@ -63,7 +66,9 @@ export function useExecSession(handlers: ExecHandlers) {
       socket.send(
         JSON.stringify({
           type: "auth",
-          token,
+          // "" is the local kubeconfig mode's token: the frame shape is fixed,
+          // and the backend accepts an empty one only in that mode.
+          token: token ?? "",
           // Carry the active cluster alongside the token (empty → default).
           ...(context !== null && context !== "" ? { context } : {}),
           namespace: target.namespace,

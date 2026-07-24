@@ -64,7 +64,10 @@ authorization model of its own.
   creates no RBAC bindings and no ServiceAccount.
 - The backend only needs the apiserver URL and a CA bundle. Any credentials
   present in a kubeconfig used for local development are always stripped,
-  including in multi-cluster mode.
+  including in multi-cluster mode. The single exception is the opt-in
+  [`--use-kubeconfig-credentials`](#local-development-without-a-token---use-kubeconfig-credentials)
+  local mode, which is kubeconfig-only, loopback-only and unavailable in the
+  Helm chart.
 - Every request is authenticated with **your** bearer token, forwarded
   per-request. The backend never stores, caches or logs tokens, and they
   never appear in a URL. In multi-cluster mode the target cluster is chosen
@@ -193,6 +196,7 @@ Flags take precedence over environment variables.
 | `--ca-file` | `KUBE_CA_FILE` | — | CA bundle for apiserver TLS verification; defaults in-cluster to the mounted `serviceaccount/ca.crt` when present |
 | `--kubeconfig` | `KUBE_CONSOLE_KUBECONFIG` | — | dev only: server URL/CA from kubeconfig, credentials stripped |
 | `--context` | `KUBE_CONSOLE_KUBECONTEXT` | — | default kubeconfig context (overrides current-context); every context stays switchable in the UI |
+| `--use-kubeconfig-credentials` | `KUBE_CONSOLE_USE_KUBECONFIG_CREDENTIALS` | `false` | local dev only: authenticate upstream with the kubeconfig's own credentials and skip the login page; requires a kubeconfig and a loopback `--listen` (see below) |
 | `--cluster-name` | `KUBE_CONSOLE_CLUSTER_NAME` | — | display name of the cluster, shown in the browser page title and at the top of the sidebar; applies to every context (see below) |
 | `--listen` | `KUBE_CONSOLE_LISTEN_ADDR` | `:8080` | listen address |
 | `--metrics-disable` | `KUBE_CONSOLE_METRICS_DISABLE` | `false` | disable the Metrics Server adapter |
@@ -226,7 +230,53 @@ wins; otherwise, running in-cluster, the apiserver URL is derived from
 `serviceaccount/ca.crt` (when present); otherwise the standard kubeconfig is
 loaded — `$KUBECONFIG` (colon-separated list), then `~/.kube/config`.
 `--context` selects the default context from whichever kubeconfig is used.
-Credentials are always stripped regardless of the source.
+Credentials are always stripped regardless of the source — except in the one
+local-development mode below.
+
+### Local development without a token: `--use-kubeconfig-credentials`
+
+Normally the kubeconfig gives up only its server URL and CA, so you still paste
+a bearer token into the UI for every cluster — even though the same kubeconfig
+already holds working credentials. This flag is the explicit opt-out: upstream
+requests (proxy, adapters and the exec terminal alike) are made with the
+kubeconfig context's **own** credentials, and the SPA skips the login page
+entirely, showing the identity the apiserver reports for them. Everything the
+kubeconfig can authenticate with works, because client-go handles it: `token`,
+`tokenFile`, client certificates and `exec` credential plugins such as
+`aws eks get-token` or `gke-gcloud-auth-plugin`.
+
+This is a deliberate exception to "zero backend credentials", so it is fenced
+in and the fences are startup errors, not warnings:
+
+- **kubeconfig only.** With `--api-server` the process refuses to start —
+  it carries no credentials, and the ServiceAccount token is never read in any
+  mode. Running in a pod (`KUBERNETES_SERVICE_HOST` set) is refused too, even
+  with a kubeconfig mounted: a pod's loopback is shared with every container in
+  it, so a sidecar or a `kubectl debug` container would inherit the kubeconfig.
+- **loopback only.** `--listen` must be `127.0.0.1`, `[::1]` or `localhost`
+  (any port); `:8080` and `0.0.0.0:8080` are rejected. Anyone who reaches the
+  listener acts as the owner of that kubeconfig, on every context in it — the
+  same reason `kubectl proxy` binds loopback by default.
+- **loopback `Host` only.** Requests whose `Host` header is not a loopback name
+  are refused with 403. Binding 127.0.0.1 keeps other machines out but not the
+  developer's own browser: a page whose DNS is rebound to 127.0.0.1 arrives
+  same-origin, so CORS never applies and the WebSocket origin check passes.
+  This is `kubectl proxy`'s `--accept-hosts`, and it is what makes the mode
+  safe to leave running.
+- A loud `WARN` is logged at startup whenever it is on.
+- The Helm chart does not expose it at all.
+
+```bash
+go run ./cmd/kube-console --kubeconfig ~/.kube/config \
+    --listen 127.0.0.1:8080 --use-kubeconfig-credentials
+# or: make run-dev-auth
+```
+
+In this mode the browser holds no credential at all: no token reaches
+`sessionStorage` (only the selected context name, as always), there is no Sign
+out button, and a client cannot choose the identity the apiserver sees — an
+inbound `Authorization` header is stripped before the request leaves the
+gateway, and an exec auth frame carrying a token is refused outright.
 
 ## Multi-cluster
 

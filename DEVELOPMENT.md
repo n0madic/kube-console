@@ -20,6 +20,9 @@ for AI coding assistants, but detailed enough for humans), see
 # terminal 1 — backend on :8080
 make run-dev                     # uses $KUBECONFIG or ~/.kube/config
 
+# ...or skip the login screen entirely, on 127.0.0.1:8080 only
+make run-dev-auth                # --listen 127.0.0.1:8080 --use-kubeconfig-credentials
+
 # terminal 2 — frontend with hot reload on :5173
 cd web && npm install && npm run dev
 ```
@@ -35,6 +38,15 @@ accepts, e.g.:
 ```bash
 kubectl create token default --duration=1h
 ```
+
+`run-dev-auth` removes that step: the backend authenticates upstream with the
+kubeconfig context's own credentials (token, client cert or an `exec` plugin
+like `aws eks get-token`) and the SPA opens straight on the Overview, with the
+cluster switcher covering every context. It is the one exception to the
+zero-credential invariant, so it refuses to start unless a kubeconfig is the
+source *and* `--listen` is loopback, and it logs a `WARN` while it runs — see
+[README.md](README.md#local-development-without-a-token---use-kubeconfig-credentials).
+`run-dev` is unchanged and still asks for a token.
 
 ## Building
 

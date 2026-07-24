@@ -75,4 +75,15 @@ describe("TopBar sign out", () => {
     expect(queryClient.getQueryData(["namespaces", "alpha"])).toBeUndefined()
     expect(queryClient.getQueryData(["namespaces", "beta"])).toEqual(["kube-system"])
   })
+  // In the local kubeconfig mode the credentials belong to the backend: there
+  // is no session to end, and the login page it would push to has no form.
+  it("hides Sign out in the local kubeconfig mode", () => {
+    const auth = useAuthStore()
+    auth.setLocalAuth(true)
+
+    const wrapper = mountBar()
+
+    expect(wrapper.find("button").exists()).toBe(false)
+    expect(wrapper.text()).not.toContain("Sign out")
+  })
 })

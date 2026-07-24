@@ -355,3 +355,82 @@ func TestParseHostErrorKeepsCredentialsOut(t *testing.T) {
 		t.Errorf("error leaked the password: %q", err.Error())
 	}
 }
+
+// --use-kubeconfig-credentials is the one mode where a context keeps what it
+// authenticates with. The leak tests above must stay untouched: they cover the
+// default, and this covers the carve-out.
+func TestRESTConfigsKeepsCredentialsWhenConfigured(t *testing.T) {
+	configs, defaultName, err := RESTConfigs(&config.Config{
+		Kubeconfig:               writeKubeconfig(t),
+		UseKubeconfigCredentials: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaultName != "alpha" {
+		t.Errorf("defaultName = %q, want alpha", defaultName)
+	}
+	byName := map[string]*rest.Config{}
+	for _, nc := range configs {
+		byName[nc.Name] = nc.Config
+	}
+	if len(byName) != 2 {
+		t.Fatalf("got %d contexts, want alpha+beta", len(byName))
+	}
+	// Every context keeps its own credentials, not just the default one.
+	if byName["alpha"].BearerToken != "alpha-secret-token" {
+		t.Errorf("alpha BearerToken = %q, want the kubeconfig's own token", byName["alpha"].BearerToken)
+	}
+	if byName["beta"].BearerToken != "beta-secret-token" {
+		t.Errorf("beta BearerToken = %q, want the kubeconfig's own token", byName["beta"].BearerToken)
+	}
+}
+
+// Userinfo in the server URL is dropped even in the carve-out: client-go would
+// turn it into an Authorization: Basic header that its own bearer round tripper
+// then refuses to overwrite, sending the URL's credentials upstream instead of
+// the context's — and this URL is what gets printed at startup.
+func TestRESTConfigsKeepsCredentialsButStripsHostUserinfo(t *testing.T) {
+	logs := captureDefaultLogs(t)
+	configs, _, err := RESTConfigs(&config.Config{
+		Kubeconfig:               writeFile(t, credentialsInURLKubeconfig),
+		UseKubeconfigCredentials: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rc *rest.Config
+	for _, nc := range configs {
+		if nc.Name == "leaky" {
+			rc = nc.Config
+		}
+	}
+	if rc == nil {
+		t.Fatal("leaky context missing")
+	}
+	if rc.Host != "https://leaky.example:6443" {
+		t.Errorf("Host = %q, want the URL without userinfo even in this mode", rc.Host)
+	}
+	if rc.BearerToken != "leaky-secret-token" {
+		t.Errorf("BearerToken = %q, want the context's own token", rc.BearerToken)
+	}
+	if strings.Contains(logs.String(), "url-secret-password") {
+		t.Errorf("startup log leaked the URL password: %q", logs.String())
+	}
+}
+
+// The carve-out is kubeconfig-only. config.validate rejects --api-server with
+// it, but that branch must be unconditionally anonymous regardless.
+func TestRESTConfigsAPIServerIgnoresCredentialMode(t *testing.T) {
+	configs, _, err := RESTConfigs(&config.Config{
+		KubeAPIServer:            "https://explicit.example:6443",
+		UseKubeconfigCredentials: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// configsByName asserts the zero-credential invariant on every entry.
+	if byName := configsByName(t, configs); byName["default"].Host != "https://explicit.example:6443" {
+		t.Errorf("api-server mode = %+v, want a single anonymous 'default'", byName)
+	}
+}

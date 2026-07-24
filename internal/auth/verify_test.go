@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/client-go/rest"
+
 	"github.com/n0madic/kube-console/internal/kube"
 )
 
@@ -211,5 +213,44 @@ func TestVerifyUpstreamStallBoundedByTimeout(t *testing.T) {
 	}
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502; body %s", rec.Code, rec.Body.String())
+	}
+}
+
+// In --use-kubeconfig-credentials mode the SPA calls verify with no bearer at
+// all, to learn who the kubeconfig authenticates it as. The handler must not
+// gate on an absent token, and the upstream call must carry the config's
+// credentials instead of a forwarded one.
+func TestVerifyWithoutBearerInConfigCredentialsMode(t *testing.T) {
+	var upstreamAuth string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview",
+			"status":{"userInfo":{"username":"kubeconfig-user"}}}`))
+	}))
+	t.Cleanup(ts.Close)
+	base, _ := url.Parse(ts.URL)
+	rt, err := rest.TransportFor(&rest.Config{Host: ts.URL, BearerToken: "kubeconfig-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := &kube.Upstream{BaseURL: base, Transport: rt, UseConfigCredentials: true}
+	reg := kube.NewRegistryFromUpstreams("default", map[string]*kube.Upstream{"default": up})
+	h := NewHandler(reg, slog.New(slog.DiscardHandler))
+
+	rec := postVerify(h, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 without a bearer in this mode: %s", rec.Code, rec.Body.String())
+	}
+	if upstreamAuth != "Bearer kubeconfig-token" {
+		t.Errorf("upstream Authorization = %q, want the kubeconfig's own credentials", upstreamAuth)
+	}
+	var out VerifyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.Authenticated || out.Identity == nil || out.Identity.Username != "kubeconfig-user" {
+		t.Errorf("response = %+v, want the identity the apiserver reports", out)
 	}
 }

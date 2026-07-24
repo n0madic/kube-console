@@ -334,3 +334,111 @@ func TestLoadRejectsBadClusterName(t *testing.T) {
 		t.Errorf("64 runes rejected: %v", err)
 	}
 }
+
+// --use-kubeconfig-credentials is the carve-out from the zero-credential
+// invariant, so what it accepts and what it refuses is the whole guard.
+func TestLoadUseKubeconfigCredentials(t *testing.T) {
+	clearConnectionEnv := func(t *testing.T) {
+		t.Helper()
+		t.Setenv("KUBE_API_SERVER", "")
+		t.Setenv("KUBE_CONSOLE_KUBECONFIG", "")
+		t.Setenv(envServiceHost, "")
+		t.Setenv(envServicePort, "")
+	}
+
+	t.Run("off by default", func(t *testing.T) {
+		t.Setenv("KUBE_API_SERVER", "https://kubernetes.default.svc")
+		cfg, err := Load(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.UseKubeconfigCredentials {
+			t.Error("UseKubeconfigCredentials must default to false")
+		}
+	})
+
+	t.Run("flag", func(t *testing.T) {
+		clearConnectionEnv(t)
+		cfg, err := Load([]string{"--kubeconfig=/tmp/kc", "--listen=127.0.0.1:8080", "--use-kubeconfig-credentials"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !cfg.UseKubeconfigCredentials {
+			t.Error("--use-kubeconfig-credentials did not set the field")
+		}
+	})
+
+	t.Run("env", func(t *testing.T) {
+		clearConnectionEnv(t)
+		t.Setenv(envUseKubeconfigCreds, "true")
+		t.Setenv(envListenAddr, "localhost:8080")
+		t.Setenv("KUBE_CONSOLE_KUBECONFIG", "/tmp/kc")
+		cfg, err := Load(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !cfg.UseKubeconfigCredentials {
+			t.Errorf("%s=true did not set the field", envUseKubeconfigCreds)
+		}
+	})
+
+	t.Run("loopback listen addresses", func(t *testing.T) {
+		for _, addr := range []string{"127.0.0.1:8080", "[::1]:8080", "localhost:8080", "127.0.0.2:9000"} {
+			clearConnectionEnv(t)
+			if _, err := Load([]string{"--kubeconfig=/tmp/kc", "--listen=" + addr, "--use-kubeconfig-credentials"}); err != nil {
+				t.Errorf("--listen=%s rejected: %v", addr, err)
+			}
+		}
+	})
+
+	t.Run("non-loopback listen rejected", func(t *testing.T) {
+		// Reaching the listener is enough to act as the kubeconfig's owner, so a
+		// published one is a startup error, not a warning.
+		for _, addr := range []string{":8080", "0.0.0.0:8080", "10.0.0.5:8080", "[::]:8080", "8080"} {
+			clearConnectionEnv(t)
+			_, err := Load([]string{"--kubeconfig=/tmp/kc", "--listen=" + addr, "--use-kubeconfig-credentials"})
+			if err == nil {
+				t.Errorf("--listen=%s accepted, want a loopback-only error", addr)
+				continue
+			}
+			if !strings.Contains(err.Error(), "loopback") {
+				t.Errorf("--listen=%s error = %q, want it to name loopback", addr, err)
+			}
+		}
+	})
+
+	t.Run("api-server rejected", func(t *testing.T) {
+		clearConnectionEnv(t)
+		_, err := Load([]string{"--api-server=https://explicit:6443", "--listen=127.0.0.1:8080", "--use-kubeconfig-credentials"})
+		if err == nil {
+			t.Fatal("--api-server carries no credentials; the combination must fail")
+		}
+		if !strings.Contains(err.Error(), "kubeconfig") {
+			t.Errorf("error = %q, want it to name the kubeconfig requirement", err)
+		}
+	})
+
+	t.Run("in-cluster rejected", func(t *testing.T) {
+		// The ServiceAccount token is never read, so in-cluster there would be
+		// nothing to authenticate with. Both shapes must fail: without a
+		// kubeconfig (applyInClusterDefaults fills KubeAPIServer) and — the one
+		// a derived-KubeAPIServer check misses — with one mounted, where
+		// applyInClusterDefaults returns early and leaves it empty. A pod's
+		// loopback is shared with every container in it, so the listen fence
+		// alone would hand the kubeconfig to any sidecar.
+		for name, args := range map[string][]string{
+			"no kubeconfig":    {"--listen=127.0.0.1:8080", "--use-kubeconfig-credentials"},
+			"kubeconfig mount": {"--kubeconfig=/etc/kc/config", "--listen=127.0.0.1:8080", "--use-kubeconfig-credentials"},
+		} {
+			t.Run(name, func(t *testing.T) {
+				clearConnectionEnv(t)
+				t.Setenv(envServiceHost, "10.96.0.1")
+				t.Setenv(envServicePort, "443")
+				withCAFile(t, true)
+				if _, err := Load(args); err == nil {
+					t.Fatal("in-cluster mode must reject --use-kubeconfig-credentials")
+				}
+			})
+		}
+	})
+}

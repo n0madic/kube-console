@@ -31,7 +31,7 @@ func Do(ctx context.Context, up *Upstream, token, method, path string, header ht
 		req.Header[k] = vs
 	}
 	client := &http.Client{
-		Transport: WithBearer(up.Transport, token),
+		Transport: up.RoundTripper(token),
 		// Never follow redirects: WithBearer re-attaches the bearer token on
 		// every hop, which would leak it to a redirect target. Hand the 3xx
 		// back to the caller unchanged instead.

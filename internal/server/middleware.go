@@ -9,8 +9,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"runtime/debug"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -35,6 +37,51 @@ func SecurityHeaders(next http.Handler) http.Handler {
 		h.Set("Permissions-Policy", "accelerometer=(), camera=(), geolocation=(), gyroscope=(), microphone=(), payment=(), usb=()")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// RequireLoopbackHost rejects any request whose Host header does not name the
+// loopback interface. It is mounted **only** in --use-kubeconfig-credentials
+// mode, where it closes the hole the loopback listen address alone leaves open:
+// DNS rebinding.
+//
+// Binding 127.0.0.1 stops other machines from connecting, but it does not stop
+// the developer's own browser from being aimed at it. A page on evil.example
+// whose DNS record is rebound to 127.0.0.1 reaches this listener with Host and
+// Origin both "evil.example" — so the request is same-origin, CORS never
+// applies, and coder/websocket's default origin check (which compares Origin
+// against Host) passes too. Without a Host check, every site the developer
+// visits could read Secrets and open a shell in any pod as the kubeconfig's
+// owner. This is exactly why `kubectl proxy` ships --accept-hosts defaulting to
+// localhost/127.0.0.1/[::1], and this is that check.
+//
+// The token mode does not need it: there a request without the user's bearer
+// token gets nothing but a 401 from the apiserver.
+func RequireLoopbackHost(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLoopbackHost(r.Host) {
+			httpx.WriteError(w, http.StatusForbidden, "Forbidden",
+				"kube-console is reachable on loopback names only in this mode")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isLoopbackHost reports whether a Host header value names the loopback
+// interface: "localhost" exactly (never a suffix like "localhost.evil.example")
+// or a loopback IP literal, with or without a port.
+func isLoopbackHost(host string) bool {
+	name := host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		name = h
+	}
+	if strings.EqualFold(name, "localhost") {
+		return true
+	}
+	// An IPv6 literal keeps its brackets when there is no port to split off.
+	name = strings.TrimSuffix(strings.TrimPrefix(name, "["), "]")
+	ip, err := netip.ParseAddr(name)
+	return err == nil && ip.IsLoopback()
 }
 
 // RequestLogger logs method, path, status and duration. It never logs

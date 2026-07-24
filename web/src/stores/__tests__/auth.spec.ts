@@ -411,4 +411,52 @@ describe("auth store", () => {
     expect(raw).not.toBeNull()
     expect(JSON.parse(raw as string).theme).toBe("dark")
   })
+  // The local kubeconfig mode: the backend holds the credentials, so the tab is
+  // authenticated everywhere while storing nothing at all.
+  describe("local kubeconfig mode", () => {
+    it("authenticates every context without writing storage", () => {
+      const auth = useAuthStore()
+      expect(auth.isAuthenticated).toBe(false)
+
+      auth.setLocalAuth(true)
+
+      expect(auth.isAuthenticated).toBe(true)
+      expect(auth.hasSession("alpha")).toBe(true)
+      expect(auth.hasSession("beta")).toBe(true)
+      // No token exists, so apiFetch sends no Authorization header.
+      expect(auth.token).toBeNull()
+      expect(window.sessionStorage.getItem(SESSION_STORAGE_KEY)).toBeNull()
+      expect(window.localStorage.getItem(SESSION_STORAGE_KEY)).toBeNull()
+    })
+
+    // Regression: a session record left over from a previous run in token mode
+    // must not keep attaching a stale bearer. Nothing in this mode could ever
+    // clear it — Sign out is hidden, the 401 handler and logout are no-ops.
+    it("attaches no leftover token from a previous token-mode session", () => {
+      const auth = useAuthStore()
+      auth.setSession("alpha", SENTINEL, { username: "jane" }, false)
+      expect(auth.token).toBe(SENTINEL)
+
+      auth.setLocalAuth(true)
+
+      expect(auth.token).toBeNull()
+      expect(auth.isAuthenticated).toBe(true)
+    })
+
+    it("resolves the identity from the backend's credentials", () => {
+      const auth = useAuthStore()
+      auth.setLocalAuth(true)
+      expect(auth.identity).toBeNull()
+
+      auth.setLocalIdentity({ username: "kubeconfig-user" }, false)
+      expect(auth.identity).toEqual({ username: "kubeconfig-user" })
+      expect(auth.identityUnavailable).toBe(false)
+
+      auth.setLocalIdentity(null, true)
+      expect(auth.identity).toBeNull()
+      expect(auth.identityUnavailable).toBe(true)
+      // Still nothing persisted.
+      expect(window.sessionStorage.getItem(SESSION_STORAGE_KEY)).toBeNull()
+    })
+  })
 })

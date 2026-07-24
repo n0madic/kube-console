@@ -31,7 +31,11 @@ async function logout(): Promise<void> {
         <template v-if="auth.identity !== null">{{ auth.identity.username }}</template>
         <template v-else-if="auth.identityUnavailable">signed in (identity unavailable)</template>
       </span>
+      <!-- Nothing to sign out of in the local kubeconfig mode: the credentials
+           are the backend's, and the login page it leads to has no form to
+           come back through. -->
       <BaseButton
+        v-if="!auth.localAuth"
         variant="ghost"
         :title="auth.activeContext !== '' ? `Sign out of ${auth.activeContext}` : 'Sign out'"
         @click="logout"

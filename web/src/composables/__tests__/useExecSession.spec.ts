@@ -1,9 +1,11 @@
 import { mount } from "@vue/test-utils"
+import { createPinia, setActivePinia } from "pinia"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { defineComponent, h } from "vue"
 
 import { setCredentialProvider } from "@/api/http"
 import { useExecSession, type ExecHandlers } from "@/composables/useExecSession"
+import { useAuthStore } from "@/stores/auth"
 
 const SENTINEL = "SENTINEL-exec-token"
 
@@ -69,6 +71,7 @@ function setupSession(handlers?: Partial<ExecHandlers>) {
 describe("useExecSession", () => {
   beforeEach(() => {
     MockWebSocket.instances = []
+    setActivePinia(createPinia())
     vi.stubGlobal("WebSocket", MockWebSocket)
     setCredentialProvider({
       async getBearerToken() {
@@ -192,5 +195,51 @@ describe("useExecSession", () => {
     await startPromise
     // The post-await guard must have prevented socket creation.
     expect(MockWebSocket.instances).toHaveLength(0)
+  })
+  // Without a token the session normally refuses to connect — except in the
+  // local kubeconfig mode, where there is no token by design and the backend
+  // authenticates the exec stream itself.
+  describe("with no token", () => {
+    beforeEach(() => {
+      setCredentialProvider({
+        async getBearerToken() {
+          return null
+        },
+        getContext() {
+          return "beta"
+        },
+        async logout() {},
+      })
+    })
+
+    it("refuses to connect in token mode", async () => {
+      const ctx = setupSession()
+      await ctx.session.start({
+        namespace: "default",
+        pod: "api-1",
+        container: "app",
+        command: ["/bin/sh"],
+      })
+      expect(MockWebSocket.instances).toHaveLength(0)
+      expect(ctx.session.status.value).toBe("error")
+      expect(ctx.session.errorMessage.value).toBe("Not authenticated.")
+    })
+
+    it("connects with an empty token in the local kubeconfig mode", async () => {
+      useAuthStore().setLocalAuth(true)
+      const ctx = setupSession()
+      await ctx.session.start({
+        namespace: "default",
+        pod: "api-1",
+        container: "app",
+        command: ["/bin/sh"],
+      })
+      const socket = MockWebSocket.instances[0]
+      expect(socket).toBeDefined()
+      ;(socket as MockWebSocket).open()
+      const frame = JSON.parse(String((socket as MockWebSocket).sent[0])) as Record<string, unknown>
+      expect(frame.type).toBe("auth")
+      expect(frame.token).toBe("")
+    })
   })
 })

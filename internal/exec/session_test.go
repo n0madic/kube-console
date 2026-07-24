@@ -825,3 +825,72 @@ func TestBuildExecURLHappyPath(t *testing.T) {
 		t.Errorf("unexpected exec path %q", u.Path)
 	}
 }
+
+// In --use-kubeconfig-credentials mode the browser sends an auth frame with no
+// token, and the per-connection config must keep the context's own credentials
+// instead of being blanked by the empty one. Outside that mode the same frame
+// is still rejected.
+func TestExecEmptyTokenWithConfigCredentials(t *testing.T) {
+	newEnv := func(t *testing.T, useConfigCreds bool, gotToken chan<- string) *testEnv {
+		t.Helper()
+		base, _ := url.Parse("https://kubernetes.example")
+		up := &kube.Upstream{
+			BaseURL:              base,
+			Transport:            http.DefaultTransport,
+			RestConfig:           &rest.Config{Host: "https://kubernetes.example", BearerToken: "kubeconfig-token"},
+			UseConfigCredentials: useConfigCreds,
+		}
+		reg := kube.NewRegistryFromUpstreams("default", map[string]*kube.Upstream{"default": up})
+		return newTestEnvForRegistry(t, reg, 4, func(cfg *rest.Config, method string, u *url.URL) (remotecommand.Executor, error) {
+			gotToken <- cfg.BearerToken
+			return &fakeExecutor{stream: func(ctx context.Context, opts remotecommand.StreamOptions) error {
+				return nil
+			}}, nil
+		})
+	}
+
+	t.Run("accepted in config-credentials mode", func(t *testing.T) {
+		gotToken := make(chan string, 1)
+		env := newEnv(t, true, gotToken)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		conn := env.dial(t, ctx)
+		defer conn.Close(websocket.StatusNormalClosure, "")
+
+		auth := validAuth()
+		auth.Token = ""
+		sendAuth(t, ctx, conn, auth)
+		if frame := readControlFrame(t, ctx, conn); frame.Type != "ready" {
+			t.Fatalf("expected ready for a tokenless frame in this mode, got %+v", frame)
+		}
+		select {
+		case token := <-gotToken:
+			if token != "kubeconfig-token" {
+				t.Fatalf("executor config BearerToken = %q, want the kubeconfig's own", token)
+			}
+		case <-ctx.Done():
+			t.Fatal("executor factory never ran")
+		}
+	})
+
+	t.Run("rejected otherwise", func(t *testing.T) {
+		gotToken := make(chan string, 1)
+		env := newEnv(t, false, gotToken)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		conn := env.dial(t, ctx)
+		defer conn.Close(websocket.StatusNormalClosure, "")
+
+		auth := validAuth()
+		auth.Token = ""
+		sendAuth(t, ctx, conn, auth)
+		if frame := readControlFrame(t, ctx, conn); frame.Type != "error" {
+			t.Fatalf("expected an error frame for a tokenless frame, got %+v", frame)
+		}
+		select {
+		case token := <-gotToken:
+			t.Fatalf("executor factory ran with token %q", token)
+		default:
+		}
+	})
+}

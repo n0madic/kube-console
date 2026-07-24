@@ -36,6 +36,10 @@ type Registry struct {
 	names  []string
 	byName map[string]*Upstream
 	def    string
+	// useConfigCreds mirrors config.UseKubeconfigCredentials. It is global, not
+	// per-context: the carve-out is a property of how the process was started,
+	// and every context of that kubeconfig is treated the same way.
+	useConfigCreds bool
 }
 
 // NewRegistry enumerates every reachable upstream and builds the shared
@@ -62,12 +66,18 @@ func NewRegistry(cfg *config.Config) (*Registry, error) {
 			slog.Default().Warn("skipping unusable kubeconfig context", "context", nc.Name, "error", err)
 			continue
 		}
+		// From what RESTConfigs prepared, never from the flag: only the
+		// kubeconfig branch keeps credentials, and an anonymized upstream marked
+		// as credentialed would authenticate with nothing at all.
+		up.UseConfigCredentials = nc.UseCredentials
 		reg.names = append(reg.names, nc.Name)
 		reg.byName[nc.Name] = up
 	}
-	if _, ok := reg.byName[defaultName]; !ok {
+	def, ok := reg.byName[defaultName]
+	if !ok {
 		return nil, fmt.Errorf("default context %q has no usable upstream", defaultName)
 	}
+	reg.useConfigCreds = def.UseConfigCredentials
 	return reg, nil
 }
 
@@ -75,8 +85,16 @@ func NewRegistry(cfg *config.Config) (*Registry, error) {
 // upstreams (context name → upstream), with a stable, sorted name order. It is
 // used wherever upstreams are resolved outside NewRegistry — notably tests that
 // wire fake httptest upstreams. defaultName must be present in the map.
+//
+// The credential mode is read off the default upstream rather than taken as a
+// parameter: it is a process-wide property that NewRegistry stamps on every
+// upstream alike, and threading it through would only add an argument every
+// existing caller passes as false.
 func NewRegistryFromUpstreams(defaultName string, upstreams map[string]*Upstream) *Registry {
 	reg := &Registry{byName: make(map[string]*Upstream, len(upstreams)), def: defaultName}
+	if def, ok := upstreams[defaultName]; ok && def != nil {
+		reg.useConfigCreds = def.UseConfigCredentials
+	}
 	for name := range upstreams {
 		reg.names = append(reg.names, name)
 	}
@@ -86,6 +104,10 @@ func NewRegistryFromUpstreams(defaultName string, upstreams map[string]*Upstream
 	}
 	return reg
 }
+
+// UsesConfigCredentials reports whether upstream requests authenticate with the
+// kubeconfig's own credentials instead of a per-request user bearer token.
+func (r *Registry) UsesConfigCredentials() bool { return r.useConfigCreds }
 
 // Names returns the context names in stable order.
 func (r *Registry) Names() []string { return r.names }
@@ -128,4 +150,25 @@ func (r *Registry) ResolveRequest(w http.ResponseWriter, req *http.Request) (*Up
 		return nil, "", false
 	}
 	return up, name, true
+}
+
+// RequireToken returns the inbound bearer token, writing the canonical 401 when
+// it is missing. Like ResolveRequest it is a single chokepoint: the same three
+// lines used to be copied into every gated handler, and all of them have to
+// agree about what an absent token means.
+//
+// In use-kubeconfig-credentials mode there is no user token at all, so it
+// returns ("", true) and callers hand that empty string down to Do /
+// Upstream.RoundTripper, which then authenticate with the kubeconfig's own
+// credentials.
+func (r *Registry) RequireToken(w http.ResponseWriter, req *http.Request) (string, bool) {
+	if r.useConfigCreds {
+		return "", true
+	}
+	token := ExtractBearer(req)
+	if token == "" {
+		httpx.WriteError(w, http.StatusUnauthorized, "Unauthorized", "missing bearer token")
+		return "", false
+	}
+	return token, true
 }

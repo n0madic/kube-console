@@ -5,8 +5,11 @@ import vue from "@vitejs/plugin-vue"
 import { defineConfig } from "vite"
 
 // Dev proxy sends API traffic to the Go backend; ws:true is required for the
-// exec WebSocket bridge.
-const backend = "http://localhost:8080"
+// exec WebSocket bridge. The literal, not "localhost": `make run-dev-auth` must
+// bind 127.0.0.1 only (the credential mode's loopback fence), and Node resolves
+// localhost verbatim — ::1 first on most hosts — so a name here costs a refused
+// connect on every proxied request, or fails outright without Happy Eyeballs.
+const backend = "http://127.0.0.1:8080"
 
 export default defineConfig({
   plugins: [vue(), tailwindcss()],

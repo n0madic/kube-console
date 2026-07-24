@@ -60,11 +60,24 @@ var errInvalidAuth = errors.New("invalid auth frame")
 
 // validate checks the auth frame and applies the default command. Error
 // messages never echo the token or command contents.
-func (a *AuthFrame) validate() error {
+//
+// requireToken is false only in --use-kubeconfig-credentials mode, where the
+// browser has no token to send and the upstream config authenticates itself. An
+// empty token is then the expected shape — and a non-empty one is refused, for
+// the same reason the gateway deletes a client-supplied Authorization header on
+// the HTTP path: in that mode the backend picks the identity the apiserver
+// sees, and a client must not be able to propose another. session.go dropping
+// the field must not be the only thing standing in the way.
+func (a *AuthFrame) validate(requireToken bool) error {
 	if a.Type != "auth" {
 		return fmt.Errorf("%w: first frame must have type \"auth\"", errInvalidAuth)
 	}
-	if a.Token == "" || len(a.Token) > maxTokenBytes {
+	switch {
+	case requireToken && a.Token == "":
+		return fmt.Errorf("%w: missing or oversized token", errInvalidAuth)
+	case !requireToken && a.Token != "":
+		return fmt.Errorf("%w: unexpected token: this server authenticates with its own credentials", errInvalidAuth)
+	case len(a.Token) > maxTokenBytes:
 		return fmt.Errorf("%w: missing or oversized token", errInvalidAuth)
 	}
 	// An empty context selects the default. A non-empty one is checked against

@@ -53,11 +53,20 @@ func (c *readinessCache) isReady() bool {
 	return c.ready
 }
 
-// probe performs an anonymous GET /version. Any HTTP response — including
-// 401/403 — proves the apiserver is reachable; only transport-level failures
-// make the backend not ready. It deliberately runs on a background context,
-// not the caller's: the result is shared, so one client giving up must not
-// record a failure for everyone else.
+// probe performs a GET /version over the shared transport, attaching no user
+// token. Any HTTP response — including 401/403 — proves the apiserver is
+// reachable; only transport-level failures make the backend not ready. It
+// deliberately runs on a background context, not the caller's: the result is
+// shared, so one client giving up must not record a failure for everyone else.
+//
+// It goes straight to up.Transport rather than through Upstream.RoundTripper
+// because there is no request identity here to speak for. That makes it the one
+// caller not covered by that chokepoint, and the difference is visible under
+// --use-kubeconfig-credentials: the shared transport authenticates itself
+// there, so this unauthenticated endpoint drives a credentialed GET /version.
+// Bounded and acceptable — /version is public cluster metadata, the result is
+// cached for readinessTTL so probe traffic cannot be replayed one-for-one, and
+// that mode is loopback-only with a Host allowlist in front of it.
 func (c *readinessCache) probe() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), readinessProbeTimeout)
 	defer cancel()

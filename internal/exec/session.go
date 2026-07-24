@@ -61,7 +61,7 @@ func (h *Handler) session(ctx context.Context, conn *websocket.Conn, releaseHand
 	conn.SetReadLimit(maxAuthFrameBytes)
 
 	authCtx, cancelAuth := context.WithTimeout(ctx, h.authTimeout)
-	auth, err := readAuthFrame(authCtx, conn)
+	auth, err := readAuthFrame(authCtx, conn, !h.registry.UsesConfigCredentials())
 	cancelAuth()
 	if err != nil {
 		_ = writeControl(ctx, conn, &writeMu, ControlFrame{Type: "error", Message: err.Error()})
@@ -93,9 +93,14 @@ func (h *Handler) session(ctx context.Context, conn *websocket.Conn, releaseHand
 	}
 
 	// Transient per-connection config: a copy of the shared credential-free
-	// config plus the user token. Never stored, never logged.
+	// config plus the user token. Never stored, never logged. In
+	// use-kubeconfig-credentials mode the copy already carries the context's own
+	// credentials and the frame's token is empty, so leave it alone — assigning
+	// would blank out whatever the kubeconfig authenticates with.
 	cfg := rest.CopyConfig(up.RestConfig)
-	cfg.BearerToken = auth.Token
+	if !up.UseConfigCredentials {
+		cfg.BearerToken = auth.Token
+	}
 
 	execURL, err := buildExecURL(cfg, auth)
 	if err != nil {
@@ -214,7 +219,8 @@ func (h *Handler) awaitStream(streamDone <-chan error, clientGone <-chan struct{
 }
 
 // readAuthFrame reads and validates the mandatory first text frame.
-func readAuthFrame(ctx context.Context, conn *websocket.Conn) (*AuthFrame, error) {
+// requireToken is threaded into validate: see AuthFrame.validate.
+func readAuthFrame(ctx context.Context, conn *websocket.Conn, requireToken bool) (*AuthFrame, error) {
 	typ, data, err := conn.Read(ctx)
 	if err != nil {
 		return nil, errors.New("no auth frame received")
@@ -226,7 +232,7 @@ func readAuthFrame(ctx context.Context, conn *websocket.Conn) (*AuthFrame, error
 	if err := json.Unmarshal(data, &frame); err != nil {
 		return nil, errors.New("auth frame is not valid JSON")
 	}
-	if err := frame.validate(); err != nil {
+	if err := frame.validate(requireToken); err != nil {
 		return nil, err
 	}
 	return &frame, nil

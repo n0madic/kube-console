@@ -18,23 +18,24 @@ import (
 // Env variable names. KUBE_API_SERVER and KUBE_CA_FILE are fixed by the spec;
 // everything owned by kube-console itself uses the KUBE_CONSOLE_ prefix.
 const (
-	envAPIServer       = "KUBE_API_SERVER"
-	envCAFile          = "KUBE_CA_FILE"
-	envListenAddr      = "KUBE_CONSOLE_LISTEN_ADDR"
-	envKubeconfig      = "KUBE_CONSOLE_KUBECONFIG"
-	envKubeContext     = "KUBE_CONSOLE_KUBECONTEXT"
-	envClusterName     = "KUBE_CONSOLE_CLUSTER_NAME"
-	envMetricsDisable  = "KUBE_CONSOLE_METRICS_DISABLE"
-	envExecDisable     = "KUBE_CONSOLE_EXEC_DISABLE"
-	envMaxExecSessions = "KUBE_CONSOLE_MAX_EXEC_SESSIONS"
-	envMaxExecPerIP    = "KUBE_CONSOLE_MAX_EXEC_HANDSHAKES_PER_IP"
-	envAllowedOrigins  = "KUBE_CONSOLE_ALLOWED_ORIGINS"
-	envMaxBodyBytes    = "KUBE_CONSOLE_MAX_BODY_BYTES"
-	envRateLimit       = "KUBE_CONSOLE_RATE_LIMIT"
-	envMaxInFlight     = "KUBE_CONSOLE_MAX_IN_FLIGHT"
-	envTrustedProxies  = "KUBE_CONSOLE_TRUSTED_PROXIES"
-	envLogLevel        = "KUBE_CONSOLE_LOG_LEVEL"
-	envLogFormat       = "KUBE_CONSOLE_LOG_FORMAT"
+	envAPIServer          = "KUBE_API_SERVER"
+	envCAFile             = "KUBE_CA_FILE"
+	envListenAddr         = "KUBE_CONSOLE_LISTEN_ADDR"
+	envKubeconfig         = "KUBE_CONSOLE_KUBECONFIG"
+	envKubeContext        = "KUBE_CONSOLE_KUBECONTEXT"
+	envUseKubeconfigCreds = "KUBE_CONSOLE_USE_KUBECONFIG_CREDENTIALS"
+	envClusterName        = "KUBE_CONSOLE_CLUSTER_NAME"
+	envMetricsDisable     = "KUBE_CONSOLE_METRICS_DISABLE"
+	envExecDisable        = "KUBE_CONSOLE_EXEC_DISABLE"
+	envMaxExecSessions    = "KUBE_CONSOLE_MAX_EXEC_SESSIONS"
+	envMaxExecPerIP       = "KUBE_CONSOLE_MAX_EXEC_HANDSHAKES_PER_IP"
+	envAllowedOrigins     = "KUBE_CONSOLE_ALLOWED_ORIGINS"
+	envMaxBodyBytes       = "KUBE_CONSOLE_MAX_BODY_BYTES"
+	envRateLimit          = "KUBE_CONSOLE_RATE_LIMIT"
+	envMaxInFlight        = "KUBE_CONSOLE_MAX_IN_FLIGHT"
+	envTrustedProxies     = "KUBE_CONSOLE_TRUSTED_PROXIES"
+	envLogLevel           = "KUBE_CONSOLE_LOG_LEVEL"
+	envLogFormat          = "KUBE_CONSOLE_LOG_FORMAT"
 )
 
 // Standard in-cluster discovery inputs. When running inside a pod, kubelet
@@ -84,6 +85,20 @@ type Config struct {
 	// only to callers whose token the apiserver has accepted, like the context
 	// names themselves.
 	ClusterName string
+	// UseKubeconfigCredentials is the one deliberate carve-out from the
+	// zero-credential invariant, for local development only: upstream requests
+	// are made with the kubeconfig context's own credentials (token, client
+	// cert or exec plugin) and the SPA skips the login page entirely, instead of
+	// every cluster needing a bearer token pasted into the UI that the same
+	// kubeconfig already holds.
+	//
+	// Whoever reaches the listener then acts as the owner of that kubeconfig, so
+	// the fences around it are load-bearing and validate() enforces them:
+	// kubeconfig only (--api-server and in-cluster carry no credentials anyway,
+	// and the ServiceAccount token is never read), and a loopback listen address
+	// — like `kubectl proxy`, which binds 127.0.0.1 for exactly this reason. The
+	// Helm chart deliberately does not expose this at all.
+	UseKubeconfigCredentials bool
 
 	MetricsEnabled  bool
 	ExecEnabled     bool
@@ -178,6 +193,10 @@ func Load(args []string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	useKubeconfigCreds, err := envBoolOr(envUseKubeconfigCreds, false)
+	if err != nil {
+		return nil, err
+	}
 	maxExecSessions, err := envIntOr(envMaxExecSessions, 10)
 	if err != nil {
 		return nil, err
@@ -203,28 +222,29 @@ func Load(args []string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		ListenAddr:             envOr(envListenAddr, ":8080"),
-		KubeAPIServer:          os.Getenv(envAPIServer),
-		KubeCAFile:             os.Getenv(envCAFile),
-		Kubeconfig:             os.Getenv(envKubeconfig),
-		KubeContext:            os.Getenv(envKubeContext),
-		ClusterName:            os.Getenv(envClusterName),
-		MetricsEnabled:         !metricsDisableEnv,
-		ExecEnabled:            !execDisableEnv,
-		MaxExecSessions:        maxExecSessions,
-		MaxExecHandshakesPerIP: maxExecPerIP,
-		AllowedOrigins:         splitCSV(os.Getenv(envAllowedOrigins)),
-		MaxBodyBytes:           maxBodyBytes,
-		RateLimit:              rateLimit,
-		MaxInFlight:            maxInFlight,
-		TrustedProxies:         splitCSV(os.Getenv(envTrustedProxies)),
-		ReadHeaderTimeout:      10 * time.Second,
-		IdleTimeout:            2 * time.Minute,
-		BodyReadTimeout:        30 * time.Second,
-		ResponseWriteTimeout:   30 * time.Second,
-		ExecIdleTimeout:        15 * time.Minute,
-		LogLevel:               envOr(envLogLevel, "info"),
-		LogFormat:              envOr(envLogFormat, "text"),
+		ListenAddr:               envOr(envListenAddr, ":8080"),
+		KubeAPIServer:            os.Getenv(envAPIServer),
+		KubeCAFile:               os.Getenv(envCAFile),
+		Kubeconfig:               os.Getenv(envKubeconfig),
+		KubeContext:              os.Getenv(envKubeContext),
+		ClusterName:              os.Getenv(envClusterName),
+		UseKubeconfigCredentials: useKubeconfigCreds,
+		MetricsEnabled:           !metricsDisableEnv,
+		ExecEnabled:              !execDisableEnv,
+		MaxExecSessions:          maxExecSessions,
+		MaxExecHandshakesPerIP:   maxExecPerIP,
+		AllowedOrigins:           splitCSV(os.Getenv(envAllowedOrigins)),
+		MaxBodyBytes:             maxBodyBytes,
+		RateLimit:                rateLimit,
+		MaxInFlight:              maxInFlight,
+		TrustedProxies:           splitCSV(os.Getenv(envTrustedProxies)),
+		ReadHeaderTimeout:        10 * time.Second,
+		IdleTimeout:              2 * time.Minute,
+		BodyReadTimeout:          30 * time.Second,
+		ResponseWriteTimeout:     30 * time.Second,
+		ExecIdleTimeout:          15 * time.Minute,
+		LogLevel:                 envOr(envLogLevel, "info"),
+		LogFormat:                envOr(envLogFormat, "text"),
 	}
 
 	fs := flag.NewFlagSet("kube-console", flag.ContinueOnError)
@@ -234,6 +254,7 @@ func Load(args []string) (*Config, error) {
 	fs.StringVar(&cfg.Kubeconfig, "kubeconfig", cfg.Kubeconfig, "development only: kubeconfig for server URL/CA; credentials are stripped")
 	fs.StringVar(&cfg.KubeContext, "context", cfg.KubeContext, "default kubeconfig context (overrides current-context); every context stays switchable in the UI")
 	fs.StringVar(&cfg.ClusterName, "cluster-name", cfg.ClusterName, "display name of the cluster shown in the browser page title; overrides the context name for every context")
+	useKubeconfig := fs.Bool("use-kubeconfig-credentials", cfg.UseKubeconfigCredentials, "local development only: authenticate upstream with the kubeconfig's own credentials and skip the login page; requires a kubeconfig and a loopback --listen address")
 	metricsDisable := fs.Bool("metrics-disable", !cfg.MetricsEnabled, "disable the Metrics Server adapter")
 	execDisable := fs.Bool("exec-disable", !cfg.ExecEnabled, "disable the exec WebSocket bridge")
 	fs.IntVar(&cfg.MaxExecSessions, "max-exec-sessions", cfg.MaxExecSessions, "maximum concurrent exec sessions")
@@ -252,6 +273,7 @@ func Load(args []string) (*Config, error) {
 	cfg.TrustedProxies = splitCSV(*proxies)
 	cfg.MetricsEnabled = !*metricsDisable
 	cfg.ExecEnabled = !*execDisable
+	cfg.UseKubeconfigCredentials = *useKubeconfig
 	cfg.ClusterName = strings.TrimSpace(cfg.ClusterName)
 
 	cfg.applyInClusterDefaults()
@@ -319,7 +341,48 @@ func (c *Config) validate() error {
 			return fmt.Errorf("invalid trusted proxy CIDR %q: %w", p, err)
 		}
 	}
+	// The credential carve-out's fences.
+	if c.UseKubeconfigCredentials {
+		if c.KubeAPIServer != "" {
+			return fmt.Errorf("--use-kubeconfig-credentials requires a kubeconfig: " +
+				"--api-server and in-cluster mode carry no credentials " +
+				"(the ServiceAccount token is never read)")
+		}
+		// Running in a pod is checked directly, not inferred from the derived
+		// KubeAPIServer: applyInClusterDefaults returns early when a kubeconfig
+		// is set, so a pod that mounts one would otherwise sail past the check
+		// above. That combination is the one this mode must never be in — a
+		// pod's loopback is shared with every other container in it, so a
+		// sidecar or a `kubectl debug` ephemeral container would inherit the
+		// mounted kubeconfig's privileges with no token at all.
+		if os.Getenv(envServiceHost) != "" {
+			return fmt.Errorf("--use-kubeconfig-credentials is local-development only "+
+				"and must not run in-cluster (%s is set); loopback inside a pod is "+
+				"shared with every container in it", envServiceHost)
+		}
+		if !isLoopbackListen(c.ListenAddr) {
+			return fmt.Errorf("--use-kubeconfig-credentials requires a loopback "+
+				"listen address (127.0.0.1 / [::1] / localhost), got %q", c.ListenAddr)
+		}
+	}
 	return nil
+}
+
+// isLoopbackListen reports whether addr binds the loopback interface only.
+// Anything else — a wildcard ":8080", an explicit 0.0.0.0 or a routable address
+// — publishes the listener, and in use-kubeconfig-credentials mode reaching the
+// listener is enough to act as the kubeconfig's owner.
+func isLoopbackListen(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		// Not host:port, or a wildcard bind ("":8080 listens on every address).
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.IsLoopback()
 }
 
 func envOr(key, def string) string {

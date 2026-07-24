@@ -54,6 +54,10 @@ func newMultiContextHandlerNamed(t *testing.T, upstream http.HandlerFunc, cluste
 
 func getContexts(h http.Handler, bearer string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/api/ui/contexts", nil)
+	// httptest defaults to example.com; the credential mode's Host allowlist
+	// (RequireLoopbackHost) rejects that, as it should. A browser always sends
+	// the address it actually connected to.
+	req.Host = "127.0.0.1:8080"
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
@@ -186,5 +190,86 @@ func TestContextsClusterNameNeedsVerifiedToken(t *testing.T) {
 				t.Errorf("cluster name leaked to an unverified caller: %s", rec.Body.String())
 			}
 		})
+	}
+}
+
+// newConfigCredentialsHandler is newMultiContextHandler for the
+// --use-kubeconfig-credentials carve-out: both upstreams are marked as carrying
+// their own credentials, which is what the registry reads the mode off.
+func newConfigCredentialsHandler(t *testing.T, upstream http.HandlerFunc) http.Handler {
+	t.Helper()
+	ts := httptest.NewServer(upstream)
+	t.Cleanup(ts.Close)
+	base, _ := url.Parse(ts.URL)
+	cfg := &config.Config{MaxBodyBytes: 4 << 20, MaxExecSessions: 1, UseKubeconfigCredentials: true}
+	reg := kube.NewRegistryFromUpstreams("alpha", map[string]*kube.Upstream{
+		"alpha": {BaseURL: base, Transport: http.DefaultTransport, UseConfigCredentials: true},
+		"beta":  {BaseURL: base, Transport: http.DefaultTransport, UseConfigCredentials: true},
+	})
+	return NewHandler(Deps{
+		Cfg:      cfg,
+		Registry: reg,
+		Logger:   slog.New(slog.DiscardHandler),
+		Version:  "test",
+		DistFS:   testDist,
+	})
+}
+
+// There is no user token to send in this mode, so the token gate must not fire
+// — the endpoint is still verified, just with the kubeconfig's credentials.
+func TestContextsWithoutBearerInConfigCredentialsMode(t *testing.T) {
+	rec := getContexts(newConfigCredentialsHandler(t, acceptToken), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 without a bearer in this mode: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Contexts []struct {
+			Name string `json:"name"`
+		} `json:"contexts"`
+		Default string `json:"default"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Default != "alpha" || len(out.Contexts) != 2 {
+		t.Errorf("contexts = %+v (default %q), want both contexts", out.Contexts, out.Default)
+	}
+}
+
+// The SPA must learn the mode before its route guard runs, so /auth/mode is
+// unauthenticated and answers in both configurations without touching an
+// upstream.
+func TestAuthMode(t *testing.T) {
+	upstreamCalled := false
+	noUpstream := func(w http.ResponseWriter, r *http.Request) { upstreamCalled = true }
+	cases := map[string]struct {
+		handler http.Handler
+		want    string
+	}{
+		"token mode":      {newMultiContextHandler(t, noUpstream), "token"},
+		"kubeconfig mode": {newConfigCredentialsHandler(t, noUpstream), "kubeconfig"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/ui/auth/mode", nil)
+			req.Host = "127.0.0.1:8080"
+			rec := httptest.NewRecorder()
+			tc.handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (the endpoint is unauthenticated)", rec.Code)
+			}
+			var out struct {
+				Mode string `json:"mode"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+				t.Fatal(err)
+			}
+			if out.Mode != tc.want {
+				t.Errorf("mode = %q, want %q", out.Mode, tc.want)
+			}
+		})
+	}
+	if upstreamCalled {
+		t.Error("/api/ui/auth/mode must not contact the apiserver")
 	}
 }

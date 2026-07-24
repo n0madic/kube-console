@@ -2,6 +2,8 @@ package kube
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/n0madic/kube-console/internal/config"
@@ -139,5 +141,107 @@ func TestNewRegistryBrokenDefaultUpstreamFails(t *testing.T) {
 	_, err := NewRegistry(&config.Config{Kubeconfig: writeFile(t, brokenCAKubeconfig), KubeContext: "gamma"})
 	if err == nil {
 		t.Fatal("expected error when the default context's upstream cannot be built")
+	}
+}
+
+// RequireToken is the shared gate every adapter now uses, so both of its
+// answers are load-bearing: a 401 in the normal mode, and a free pass with an
+// empty token in the credential carve-out.
+func TestRegistryRequireToken(t *testing.T) {
+	reg, err := NewRegistry(&config.Config{Kubeconfig: writeKubeconfig(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	if _, ok := reg.RequireToken(rec, httptest.NewRequest(http.MethodGet, "/k8s/api", nil)); ok {
+		t.Error("a request with no Authorization header must be rejected")
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/k8s/api", nil)
+	req.Header.Set("Authorization", "Bearer user-token")
+	rec = httptest.NewRecorder()
+	token, ok := reg.RequireToken(rec, req)
+	if !ok || token != "user-token" {
+		t.Errorf("RequireToken = %q, %v; want the inbound bearer", token, ok)
+	}
+}
+
+func TestRegistryRequireTokenWithConfigCredentials(t *testing.T) {
+	reg, err := NewRegistry(&config.Config{
+		Kubeconfig:               writeKubeconfig(t),
+		UseKubeconfigCredentials: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reg.UsesConfigCredentials() {
+		t.Fatal("UsesConfigCredentials = false, want true")
+	}
+	for _, up := range []*Upstream{reg.Default(), mustGet(t, reg, "beta")} {
+		if !up.UseConfigCredentials {
+			t.Error("every upstream must be marked as carrying its own credentials")
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	token, ok := reg.RequireToken(rec, httptest.NewRequest(http.MethodGet, "/k8s/api", nil))
+	if !ok || token != "" {
+		t.Errorf("RequireToken = %q, %v; want (\"\", true) with no user token", token, ok)
+	}
+	if rec.Code != http.StatusOK || rec.Body.Len() != 0 {
+		t.Errorf("nothing must be written: status %d, body %q", rec.Code, rec.Body.String())
+	}
+}
+
+// RoundTripper is the chokepoint the two modes meet at.
+func TestUpstreamRoundTripper(t *testing.T) {
+	plain := &Upstream{Transport: http.DefaultTransport}
+	if plain.RoundTripper("user-token") == http.RoundTripper(http.DefaultTransport) {
+		t.Error("the default mode must wrap the shared transport with the bearer")
+	}
+	credentialed := &Upstream{Transport: http.DefaultTransport, UseConfigCredentials: true}
+	if credentialed.RoundTripper("") != http.RoundTripper(http.DefaultTransport) {
+		t.Error("the carve-out must use the credentialed transport as it is")
+	}
+}
+
+func mustGet(t *testing.T, reg *Registry, name string) *Upstream {
+	t.Helper()
+	up, ok := reg.Get(name)
+	if !ok {
+		t.Fatalf("context %q missing from the registry", name)
+	}
+	return up
+}
+
+// The mode is stamped from what RESTConfigs actually prepared, never re-read
+// from the flag: the carve-out applies to the kubeconfig branch only, so an
+// --api-server upstream (anonymized) marked as credentialed would authenticate
+// with nothing at all — RequireToken would wave the request through, the
+// gateway would delete the client's Authorization, and every call would 401
+// with nothing naming the cause. config.validate rejects this combination, so
+// this pins the behaviour for any caller that reaches NewRegistry directly.
+func TestNewRegistryDerivesCredentialModeFromPreparedConfig(t *testing.T) {
+	reg, err := NewRegistry(&config.Config{
+		KubeAPIServer:            "https://explicit.example:6443",
+		UseKubeconfigCredentials: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reg.UsesConfigCredentials() {
+		t.Error("an anonymized --api-server upstream must not be marked as credentialed")
+	}
+	if reg.Default().UseConfigCredentials {
+		t.Error("upstream marked as credentialed despite carrying no credentials")
+	}
+	// And the token gate must still demand one, since nothing else can supply it.
+	rec := httptest.NewRecorder()
+	if _, ok := reg.RequireToken(rec, httptest.NewRequest(http.MethodGet, "/k8s/api", nil)); ok {
+		t.Error("RequireToken must still require a bearer for an anonymized upstream")
 	}
 }

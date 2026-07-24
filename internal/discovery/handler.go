@@ -36,9 +36,8 @@ func NewHandler(reg *kube.Registry, logger *slog.Logger) *Handler {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	token := kube.ExtractBearer(r)
-	if token == "" {
-		httpx.WriteError(w, http.StatusUnauthorized, "Unauthorized", "missing bearer token")
+	token, ok := h.registry.RequireToken(w, r)
+	if !ok {
 		return
 	}
 	up, _, ok := h.registry.ResolveRequest(w, r)

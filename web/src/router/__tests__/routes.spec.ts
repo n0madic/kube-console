@@ -59,4 +59,17 @@ describe("resource routes", () => {
     await router.push("/r/core/v1/pods")
     expect(router.currentRoute.value.name).toBe("resource-list")
   })
+  // The local kubeconfig mode has no login page to send anyone to: the backend
+  // authenticates upstream itself, so a protected route must pass without a
+  // session and /login must bounce back to the app.
+  it("lets the local kubeconfig mode through without a session", async () => {
+    const auth = useAuthStore()
+    auth.setLocalAuth(true)
+    const router = createAppRouter()
+    await router.push("/r/core/v1/pods")
+    expect(router.currentRoute.value.name).toBe("resource-list")
+
+    await router.push("/login")
+    expect(router.currentRoute.value.name).toBe("overview")
+  })
 })

@@ -27,6 +27,7 @@ const (
 // X-Kube-Context header per request via the shared registry.
 func registerUI(ui chi.Router, d Deps) {
 	ui.Method("GET", "/contexts", handleContexts(d.Registry, d.Cfg.ClusterName, d.Logger))
+	ui.Method("GET", "/auth/mode", handleAuthMode(d.Registry))
 	ui.Method("POST", "/auth/verify", auth.NewHandler(d.Registry, d.Logger))
 	ui.Method("GET", "/discovery", discovery.NewHandler(d.Registry, d.Logger))
 
@@ -42,6 +43,29 @@ func registerUI(ui chi.Router, d Deps) {
 
 type contextEntry struct {
 	Name string `json:"name"`
+}
+
+// authModeResponse tells the SPA how it is expected to authenticate:
+// "kubeconfig" for the --use-kubeconfig-credentials carve-out (no login page,
+// no token to hold), "token" for every other configuration.
+type authModeResponse struct {
+	Mode string `json:"mode"`
+}
+
+// handleAuthMode serves GET /api/ui/auth/mode. Deliberately unauthenticated:
+// the SPA must know which mode it is in *before* the route guard runs, and
+// /api/ui/contexts cannot answer that — in token mode it needs the very token
+// the client does not have yet. Nothing is disclosed either way: in token mode
+// the answer is a constant, and in kubeconfig mode the listener is loopback-only
+// (config.validate). It never touches an upstream; it echoes configuration.
+func handleAuthMode(reg *kube.Registry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		mode := "token"
+		if reg.UsesConfigCredentials() {
+			mode = "kubeconfig"
+		}
+		httpx.WriteJSON(w, http.StatusOK, authModeResponse{Mode: mode})
+	}
 }
 
 type contextsResponse struct {
@@ -65,9 +89,8 @@ type contextsResponse struct {
 // once per session (staleTime 5m).
 func handleContexts(reg *kube.Registry, clusterName string, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := kube.ExtractBearer(r)
-		if token == "" {
-			httpx.WriteError(w, http.StatusUnauthorized, "Unauthorized", "missing bearer token")
+		token, ok := reg.RequireToken(w, r)
+		if !ok {
 			return
 		}
 		up, contextName, ok := reg.ResolveRequest(w, r)

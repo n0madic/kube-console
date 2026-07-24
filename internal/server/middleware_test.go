@@ -10,11 +10,15 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/n0madic/kube-console/internal/config"
+	"github.com/n0madic/kube-console/internal/kube"
 )
 
 func TestRequestLoggerNeverLogsTokenOrQuery(t *testing.T) {
@@ -429,4 +433,92 @@ func TestWriteDeadlineKeepsAnIdleStreamIntact(t *testing.T) {
 	if string(body) != "{\"type\":\"ADDED\"}\n" {
 		t.Fatalf("body = %q, want the single event written", body)
 	}
+}
+
+// The credential mode's Host allowlist. The loopback listen address stops other
+// machines from connecting; it does not stop the developer's own browser from
+// being aimed at the port by DNS rebinding, where the request arrives
+// same-origin (so CORS never applies) with an attacker-controlled Host.
+func TestRequireLoopbackHost(t *testing.T) {
+	reached := false
+	h := RequireLoopbackHost(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	allowed := []string{
+		"127.0.0.1:8080", "127.0.0.1", "localhost:8080", "localhost", "LocalHost:8080",
+		"[::1]:8080", "[::1]", "127.0.0.2:8080",
+	}
+	for _, host := range allowed {
+		reached = false
+		req := httptest.NewRequest(http.MethodGet, "/k8s/api/v1/pods", nil)
+		req.Host = host
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || !reached {
+			t.Errorf("Host %q = %d (reached=%v), want it through", host, rec.Code, reached)
+		}
+	}
+
+	// "localhost.evil.example" is the rebinding shape that a suffix match would
+	// wave through; 10.x is a plain non-loopback address.
+	blocked := []string{
+		"evil.example", "evil.example:8080", "localhost.evil.example:8080",
+		"127.0.0.1.evil.example:8080", "10.0.0.5:8080", "",
+	}
+	for _, host := range blocked {
+		reached = false
+		req := httptest.NewRequest(http.MethodGet, "/k8s/api/v1/pods", nil)
+		req.Host = host
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("Host %q = %d, want 403", host, rec.Code)
+		}
+		if reached {
+			t.Errorf("Host %q reached the handler", host)
+		}
+	}
+}
+
+// The allowlist is mounted only in the credential carve-out: in token mode a
+// request without the user's bearer gets nothing from the apiserver anyway, and
+// kube-console is deployed behind ingresses with real hostnames.
+func TestLoopbackHostGuardOnlyInCredentialMode(t *testing.T) {
+	for name, useCreds := range map[string]bool{"token mode": false, "kubeconfig mode": true} {
+		t.Run(name, func(t *testing.T) {
+			h := NewHandler(Deps{
+				Cfg: &config.Config{
+					MaxBodyBytes:             4 << 20,
+					MaxExecSessions:          1,
+					UseKubeconfigCredentials: useCreds,
+				},
+				Registry: kube.NewRegistryFromUpstreams("default", map[string]*kube.Upstream{
+					"default": {BaseURL: mustParseURL(t, "https://apiserver.example"), Transport: http.DefaultTransport},
+				}),
+				Logger:  slog.New(slog.DiscardHandler),
+				Version: "test",
+				DistFS:  testDist,
+			})
+			req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+			req.Host = "console.example.com"
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			blocked := rec.Code == http.StatusForbidden
+			if blocked != useCreds {
+				t.Errorf("non-loopback Host blocked = %v (status %d), want %v", blocked, rec.Code, useCreds)
+			}
+		})
+	}
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
 }

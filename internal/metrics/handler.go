@@ -79,9 +79,8 @@ func (h *Handler) Capabilities(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteJSON(w, http.StatusOK, Capabilities{State: StateDisabled})
 		return
 	}
-	token := kube.ExtractBearer(r)
-	if token == "" {
-		httpx.WriteError(w, http.StatusUnauthorized, "Unauthorized", "missing bearer token")
+	token, ok := h.registry.RequireToken(w, r)
+	if !ok {
 		return
 	}
 	up, contextName, ok := h.registry.ResolveRequest(w, r)
@@ -151,9 +150,8 @@ func (h *Handler) fetch(ctx context.Context, w http.ResponseWriter, r *http.Requ
 		httpx.WriteError(w, http.StatusNotFound, "NotFound", "metrics adapter is disabled")
 		return nil, false
 	}
-	token := kube.ExtractBearer(r)
-	if token == "" {
-		httpx.WriteError(w, http.StatusUnauthorized, "Unauthorized", "missing bearer token")
+	token, ok := h.registry.RequireToken(w, r)
+	if !ok {
 		return nil, false
 	}
 	up, contextName, ok := h.registry.ResolveRequest(w, r)

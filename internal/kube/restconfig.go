@@ -21,6 +21,13 @@ import (
 type NamedConfig struct {
 	Name   string
 	Config *rest.Config
+	// UseCredentials reports that this config kept its kubeconfig credentials
+	// (the --use-kubeconfig-credentials carve-out). It states what RESTConfigs
+	// actually did rather than what was asked for: the carve-out applies to the
+	// kubeconfig branch only, so a caller re-reading the flag instead would mark
+	// an anonymized --api-server upstream as credentialed and produce an
+	// upstream that authenticates with nothing at all.
+	UseCredentials bool
 }
 
 // RESTConfigs enumerates the credential-free rest.Configs for every reachable
@@ -30,7 +37,10 @@ type NamedConfig struct {
 //
 // In every case credentials are stripped via rest.AnonymousClientConfig plus
 // stripHostCredentials (which covers what AnonymousClientConfig copies
-// verbatim), so the zero-credential invariant holds regardless of source.
+// verbatim), so the zero-credential invariant holds regardless of source. The
+// single exception is cfg.UseKubeconfigCredentials, the local-development
+// carve-out, which swaps anonymize for keepUserCredentials on the kubeconfig
+// branch only — see keepUserCredentials.
 //
 // An explicit api-server always wins, even when a kubeconfig is also set: the
 // precedence must match config.applyInClusterDefaults and the README so the
@@ -51,8 +61,18 @@ func RESTConfigs(cfg *config.Config) (configs []NamedConfig, defaultName string,
 		}
 		// AnonymousClientConfig is a no-op here but guarantees the invariant even
 		// if config construction changes later. --api-server is operator input,
-		// so it can carry userinfo just like a kubeconfig server URL.
+		// so it can carry userinfo just like a kubeconfig server URL. This branch
+		// is unconditionally anonymized: it holds no credentials to keep, and
+		// config.validate has already rejected --use-kubeconfig-credentials here.
 		return []NamedConfig{{Name: name, Config: anonymize(rc, name)}}, name, nil
+	}
+
+	// The one place the carve-out changes what happens to a config. Chosen once
+	// so every context of this kubeconfig is treated identically, and reported
+	// on every NamedConfig so no caller has to re-derive it from the flag.
+	prepare, keptCredentials := anonymize, false
+	if cfg.UseKubeconfigCredentials {
+		prepare, keptCredentials = keepUserCredentials, true
 	}
 
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
@@ -108,7 +128,11 @@ func RESTConfigs(cfg *config.Config) (configs []NamedConfig, defaultName string,
 			slog.Default().Warn("skipping unusable kubeconfig context", "context", name, "error", cErr)
 			continue
 		}
-		configs = append(configs, NamedConfig{Name: name, Config: anonymize(rc, name)})
+		configs = append(configs, NamedConfig{
+			Name:           name,
+			Config:         prepare(rc, name),
+			UseCredentials: keptCredentials,
+		})
 	}
 	if len(configs) == 0 {
 		return nil, "", fmt.Errorf("no usable kubeconfig contexts")
@@ -125,6 +149,26 @@ func anonymize(rc *rest.Config, context string) *rest.Config {
 		slog.Default().Warn("stripped credentials embedded in the apiserver URL", "context", context)
 	}
 	return anon
+}
+
+// keepUserCredentials is the only preparator that lets an upstream config keep
+// its credentials — the --use-kubeconfig-credentials carve-out, reachable from
+// the kubeconfig branch alone. Whatever the context authenticates with (bearer
+// token, bearer token file, client certificate, an exec plugin such as `aws eks
+// get-token`) rides along untouched: rest.TransportFor already understands all
+// of them, so no per-mechanism code is needed here.
+//
+// Userinfo in the server URL is dropped even here, for reasons that are not
+// about the invariant: client-go turns it into an `Authorization: Basic` header
+// and its own bearer round tripper then refuses to overwrite that, so the URL's
+// credentials would go upstream *instead of* the context's own — and this same
+// URL is what gets printed at startup.
+func keepUserCredentials(rc *rest.Config, context string) *rest.Config {
+	kept := rest.CopyConfig(rc)
+	if stripHostCredentials(kept) {
+		slog.Default().Warn("stripped credentials embedded in the apiserver URL", "context", context)
+	}
+	return kept
 }
 
 // stripHostCredentials removes userinfo (user:password@) from a rest.Config

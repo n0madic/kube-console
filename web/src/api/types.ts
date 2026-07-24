@@ -110,6 +110,14 @@ export interface Identity {
   groups?: string[]
 }
 
+// Auth mode DTO from GET /api/ui/auth/mode (unauthenticated). "kubeconfig" is
+// the backend's --use-kubeconfig-credentials local mode: there is no login page
+// and no token to hold, because the backend authenticates upstream with the
+// kubeconfig's own credentials.
+export interface AuthModeResponse {
+  mode: "kubeconfig" | "token"
+}
+
 export interface VerifyResponse {
   authenticated: boolean
   identity?: Identity
