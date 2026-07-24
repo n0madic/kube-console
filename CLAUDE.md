@@ -961,6 +961,17 @@ default context — only while that context is still active.
 
 ### Charts and metrics
 
+`MetricsChart.vue`'s card root carries **`min-w-0`**, and that is what makes the
+chart follow a resize at all: uPlot sizes its own root in pixels, so as a grid
+item (`xl:grid-cols-2` on every page that shows charts) the card's automatic
+minimum is the canvas already drawn — it would never shrink, its
+`ResizeObserver` would never fire, and the chart kept the width it had before
+the window or the sidebar took it away, pushing the whole page into a horizontal
+scroll. Growing always worked; only shrinking needed the class. Measured in a
+browser: a 644px container left the card at 934px without it. The same shape as
+`BaseSelect` above — a pixel-sized child under a `min-width: auto` layout item —
+and worth checking first whenever something "does not fit after a resize".
+
 `MetricsChart.vue` overrides two uPlot axis defaults. The Y axis sizes itself
 from the measured width of the current tick labels (canvas `measureText` with
 uPlot's default axis font mirrored as a constant; falls back to a per-character

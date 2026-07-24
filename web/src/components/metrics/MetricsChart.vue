@@ -259,6 +259,12 @@ function buildChart(): void {
     el,
   )
 
+  // This only ever sees a *narrower* container because the card root carries
+  // `min-w-0`: uPlot sizes its own root in pixels, so as a grid/flex item the
+  // card's automatic minimum is the canvas already drawn — it would never
+  // shrink, the observer would never fire, and the chart would keep the width
+  // it had before the window (or the sidebar) took it away. Growing always
+  // worked; shrinking is what needs the class.
   resizeObserver = new ResizeObserver(() => {
     if (chart !== null && el.clientWidth > 0) {
       chart.setSize({ width: el.clientWidth, height: 220 })
@@ -301,7 +307,9 @@ watch(
 </script>
 
 <template>
-  <section class="rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
+  <section
+    class="min-w-0 rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900"
+  >
     <div class="mb-2 flex items-baseline justify-between">
       <h3 class="text-sm font-semibold">{{ title }}</h3>
       <span class="text-xs uppercase tracking-wide text-slate-400">Live session metrics</span>
