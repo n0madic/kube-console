@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   deleteObject,
+  eventsFor,
+  fetchNamespaces,
   listAsTable,
   logsUrl,
   resourcePath,
@@ -251,6 +253,79 @@ describe("walkTable", () => {
     const result = await walkTable(podsRef)
     expect(result.fallback).toBe(true)
     expect(result.rows).toHaveLength(1)
+  })
+})
+
+// Stub fetch to serve plain list pages keyed by the request's `continue`
+// token, so fetchNamespaces' pagination is exercised end to end.
+function stubListPages(pages: Record<string, { names: string[]; continue: string }>) {
+  const mock = vi.fn(async (input: RequestInfo | URL) => {
+    const cont = new URL(String(input), "http://x").searchParams.get("continue") ?? ""
+    const p = pages[cont]
+    if (p === undefined) throw new Error(`no stub page for continue=${JSON.stringify(cont)}`)
+    return jsonResponse(200, {
+      kind: "NamespaceList",
+      metadata: { continue: p.continue },
+      items: p.names.map((name) => ({ metadata: { name } })),
+    })
+  })
+  vi.stubGlobal("fetch", mock)
+  setCredentialProvider({
+    async getBearerToken() {
+      return "tok"
+    },
+    getContext() {
+      return null
+    },
+    async logout() {},
+  })
+  return mock
+}
+
+describe("fetchNamespaces", () => {
+  it("walks continue tokens until the collection ends", async () => {
+    const mock = stubListPages({
+      "": { names: ["a", "b"], continue: "n1" },
+      n1: { names: ["c"], continue: "" },
+    })
+    const result = await fetchNamespaces()
+    expect(mock).toHaveBeenCalledTimes(2)
+    expect(mock.mock.calls[0]?.[0]).toContain("/k8s/api/v1/namespaces?limit=500")
+    expect(result.items.map((i) => i.metadata?.name)).toEqual(["a", "b", "c"])
+    expect(result.metadata?.continue).toBe("")
+  })
+
+  it("stops at the page cap and keeps the continue token", async () => {
+    const mock = stubListPages({
+      "": { names: ["a"], continue: "more" },
+      more: { names: ["b"], continue: "more" },
+    })
+    const result = await fetchNamespaces({ maxPages: 2 })
+    expect(mock).toHaveBeenCalledTimes(2)
+    expect(result.items.map((i) => i.metadata?.name)).toEqual(["a", "b"])
+    // A non-empty token tells callers this list can prove nothing absent.
+    expect(result.metadata?.continue).toBe("more")
+  })
+})
+
+describe("eventsFor", () => {
+  it("filters by the object's uid and name", async () => {
+    const mock = stubFetch({ kind: "EventList", items: [] })
+    await eventsFor({ metadata: { name: "api-1", namespace: "prod", uid: "u1" } })
+    const url = mock.mock.calls[0]?.[0] as string
+    expect(url).toContain("/k8s/api/v1/namespaces/prod/events?")
+    expect(url).toContain(
+      encodeURIComponent("involvedObject.uid=u1,involvedObject.name=api-1"),
+    )
+  })
+
+  // An empty fieldSelector matches every event in the namespace — up to 200
+  // unrelated events presented as this object's — so no identity, no request.
+  it("skips the request when the object has neither uid nor name", async () => {
+    const mock = stubFetch({ kind: "EventList", items: [] })
+    const result = await eventsFor({ metadata: { namespace: "prod" } })
+    expect(mock).not.toHaveBeenCalled()
+    expect(result.items).toEqual([])
   })
 })
 

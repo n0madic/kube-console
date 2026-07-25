@@ -76,7 +76,10 @@ export function tokenizeJsonLine(line: string): LogToken[] | null {
 
   function whitespace(): void {
     const start = pos
-    while (pos < src.length && (src[pos] === " " || src[pos] === "\t")) pos++
+    // \r is JSON whitespace, and it matters: the log stream splits on "\n"
+    // only, so a CRLF-writing container leaves a trailing \r on every line —
+    // which must not fail the end-of-line check as trailing garbage.
+    while (pos < src.length && (src[pos] === " " || src[pos] === "\t" || src[pos] === "\r")) pos++
     if (pos > start) tokens.push({ kind: "punct", text: src.slice(start, pos) })
   }
 

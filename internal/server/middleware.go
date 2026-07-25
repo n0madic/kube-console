@@ -92,13 +92,19 @@ func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			sw := &statusWriter{ResponseWriter: w}
+			// Deferred so the line survives http.ErrAbortHandler, which
+			// Recoverer re-panics and net/http then swallows: logging on the
+			// return path would leave every stream the ReverseProxy aborts —
+			// a closed tab on a watch or log follow — with no trace at all.
+			defer func() {
+				logger.Info("request",
+					"method", r.Method,
+					"path", r.URL.Path,
+					"status", sw.Status(),
+					"duration_ms", time.Since(start).Milliseconds(),
+				)
+			}()
 			next.ServeHTTP(sw, r)
-			logger.Info("request",
-				"method", r.Method,
-				"path", r.URL.Path,
-				"status", sw.Status(),
-				"duration_ms", time.Since(start).Milliseconds(),
-			)
 		})
 	}
 }
@@ -134,6 +140,15 @@ func Recoverer(logger *slog.Logger) func(http.Handler) http.Handler {
 // indiscriminately — including unrelated short requests still in flight.
 // match == nil treats every request as long-lived (e.g. exec, which is
 // inherently a persistent session).
+//
+// The shutdown branch cancels with httpx.ErrShutdown as the cause: from
+// ctx.Err() a shutdown abort and a departed client are the same
+// context.Canceled, yet they need opposite responses — a client that is still
+// connected must be told the stream failed, or net/http completes the response
+// as an empty 200 that a watch client reads as a clean end of stream.
+// Consumers compare context.Cause(ctx); the deferred cleanup cancel keeps the
+// ordinary meaning (plain context.Canceled), so a normal completion never
+// reads as a shutdown.
 func AbortOnShutdown(shutdown context.Context, match func(*http.Request) bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -141,12 +156,12 @@ func AbortOnShutdown(shutdown context.Context, match func(*http.Request) bool) f
 				next.ServeHTTP(w, r)
 				return
 			}
-			ctx, cancel := context.WithCancel(r.Context())
-			defer cancel()
+			ctx, cancel := context.WithCancelCause(r.Context())
+			defer cancel(nil)
 			go func() {
 				select {
 				case <-shutdown.Done():
-					cancel()
+					cancel(httpx.ErrShutdown)
 				case <-ctx.Done():
 				}
 			}()
@@ -205,8 +220,8 @@ type deadlineWriter struct {
 }
 
 // arm makes sure a deadline covering this write is in force. It is best-effort,
-// as in maxBody: on a transport without deadline support SetWriteDeadline
-// errors out and the write simply stays unbounded.
+// as in bodyReadDeadline: on a transport without deadline support
+// SetWriteDeadline errors out and the write simply stays unbounded.
 //
 // Re-arming is skipped while more than half the budget is still ahead of the
 // armed deadline. Setting one costs a syscall that takes the fd lock and resets
@@ -254,17 +269,29 @@ func (w *deadlineWriter) reportTimeout() {
 	)
 }
 
-// Flush arms as well. A flush is where buffered bytes actually reach the
+// FlushError arms as well. A flush is where buffered bytes actually reach the
 // socket, and it is not always preceded by a write in the same breath: the
 // ReverseProxy flushes inline only because the gateway sets FlushInterval -1,
 // while any positive interval flushes from a timer goroutine instead. Without
 // arming here, such a flush would run under whatever deadline the last write
 // left behind — expired, after an idle stream.
-func (w *deadlineWriter) Flush() {
+//
+// It exists alongside Flush because http.ResponseController.Flush matches
+// interface{ FlushError() error } before http.Flusher: a wrapper exposing only
+// the bare Flush would swallow the flush's error, and when the upstream
+// produces nothing after a stalled flush that error is the only place the
+// write timeout ever surfaces — hence reportTimeout here too.
+func (w *deadlineWriter) FlushError() error {
 	w.arm()
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
+	err := flushError(w.ResponseWriter)
+	if err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
+		w.reportTimeout()
 	}
+	return err
+}
+
+func (w *deadlineWriter) Flush() {
+	_ = w.FlushError()
 }
 
 // Hijack disarms only *after* the hijack has happened. net/http's
@@ -311,6 +338,21 @@ func (w *deadlineWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
 
+// flushError flushes w, preferring its FlushError so the error is not lost,
+// falling back to Flusher, and reporting ErrNotSupported — as
+// ResponseController would — when w can do neither.
+func flushError(w http.ResponseWriter) error {
+	switch f := w.(type) {
+	case interface{ FlushError() error }:
+		return f.FlushError()
+	case http.Flusher:
+		f.Flush()
+		return nil
+	default:
+		return http.ErrNotSupported
+	}
+}
+
 // statusWriter records the response status while remaining compatible with
 // streaming (Flush) and WebSocket upgrades (Hijack/Unwrap).
 type statusWriter struct {
@@ -339,10 +381,15 @@ func (w *statusWriter) Status() int {
 	return w.status
 }
 
+// FlushError mirrors deadlineWriter's: ResponseController.Flush prefers it
+// over Flusher, so without it this layer would drop a flush error the writers
+// below can report.
+func (w *statusWriter) FlushError() error {
+	return flushError(w.ResponseWriter)
+}
+
 func (w *statusWriter) Flush() {
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
+	_ = w.FlushError()
 }
 
 func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {

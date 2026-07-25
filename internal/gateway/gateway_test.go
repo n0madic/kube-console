@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -15,6 +17,7 @@ import (
 
 	"k8s.io/client-go/rest"
 
+	"github.com/n0madic/kube-console/internal/httpx"
 	"github.com/n0madic/kube-console/internal/kube"
 )
 
@@ -151,11 +154,29 @@ func TestIsStreaming(t *testing.T) {
 		{"watch true", "/k8s/api/v1/pods?watch=true", true},
 		{"watch numeric bool", "/k8s/api/v1/pods?watch=1", true},
 		{"watch false", "/k8s/api/v1/pods?watch=false", false},
+		{"watch false uppercase", "/k8s/api/v1/pods?watch=FALSE", false},
+		{"watch zero", "/k8s/api/v1/pods?watch=0", false},
 		{"plain list", "/k8s/api/v1/pods", false},
+		// The apiserver decodes booleans via Convert_Slice_string_To_bool:
+		// any present value other than "0"/"false" streams — including a
+		// present-but-empty one, which strconv.ParseBool would call false.
+		{"watch yes", "/k8s/api/v1/pods?watch=yes", true},
+		{"watch on", "/k8s/api/v1/pods?watch=on", true},
+		{"watch two", "/k8s/api/v1/pods?watch=2", true},
+		{"watch arbitrary value", "/k8s/api/v1/pods?watch=maybe", true},
+		{"watch present but empty", "/k8s/api/v1/pods?watch=", true},
+		{"watch bare key", "/k8s/api/v1/pods?watch", true},
 		{"log follow", "/k8s/api/v1/namespaces/ns/pods/p/log?follow=true", true},
+		{"log follow non-canonical", "/k8s/api/v1/namespaces/ns/pods/p/log?follow=yes", true},
 		{"log without follow", "/k8s/api/v1/namespaces/ns/pods/p/log?tailLines=100", false},
 		{"follow on non-log path", "/k8s/api/v1/namespaces/ns/pods/p?follow=true", false},
-		{"malformed watch value", "/k8s/api/v1/pods?watch=maybe", false},
+		// The legacy watch prefix streams with no query parameter at all.
+		{"legacy core watch", "/k8s/api/v1/watch/pods", true},
+		{"legacy core namespaced watch", "/k8s/api/v1/watch/namespaces/ns/pods", true},
+		{"legacy group watch", "/k8s/apis/apps/v1/watch/namespaces/ns/deployments", true},
+		// "watch" outside the prefix position is an ordinary object name.
+		{"object named watch", "/k8s/api/v1/namespaces/default/configmaps/watch", false},
+		{"resource list under group", "/k8s/apis/apps/v1/deployments?limit=1", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -164,6 +185,100 @@ func TestIsStreaming(t *testing.T) {
 				t.Errorf("IsStreaming(%q) = %v, want %v", tc.target, got, tc.want)
 			}
 		})
+	}
+}
+
+// Regression for rewriteFor: ReverseProxy re-encodes the inbound query
+// (CVE-2022-2880) immediately before Rewrite runs, and the gateway used to
+// copy pr.In's RawQuery back over Out, restoring semicolon-separated
+// parameters and malformed percent-escapes verbatim.
+func TestGatewayQueryKeepsStdlibSanitization(t *testing.T) {
+	gw, recorded, _ := newTestGateway(t, nil)
+	rec := doGateway(gw, http.MethodGet, "/k8s/api/v1/pods?watch=true;evil=1&limit=500&bad=%zz", bearerHeader(), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if len(recorded.all()) != 1 {
+		t.Fatalf("upstream called %d times, want 1", len(recorded.all()))
+	}
+	got := recorded.all()[0].Query
+	if strings.Contains(got, ";") || strings.Contains(got, "evil") || strings.Contains(got, "%zz") {
+		t.Fatalf("upstream query = %q: unparsable parameters must not survive", got)
+	}
+	if !strings.Contains(got, "limit=500") {
+		t.Errorf("upstream query = %q, want the well-formed limit=500 kept", got)
+	}
+}
+
+func TestGatewayWellFormedQueryPassesUnchanged(t *testing.T) {
+	gw, recorded, _ := newTestGateway(t, nil)
+	const query = "watch=true&limit=500&continue=abc&labelSelector=app%3Ddemo"
+	rec := doGateway(gw, http.MethodGet, "/k8s/api/v1/pods?"+query, bearerHeader(), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if len(recorded.all()) != 1 {
+		t.Fatalf("upstream called %d times, want 1", len(recorded.all()))
+	}
+	if got := recorded.all()[0].Query; got != query {
+		t.Errorf("upstream query = %q, want %q unchanged", got, query)
+	}
+}
+
+// Regression: a shutdown abort used to fall into the silent client-gone
+// branch, and net/http then completed the response as an empty 200 — a clean
+// end of stream to a watch client. The cause is cancelled here directly, so
+// the test does not depend on how AbortOnShutdown wires it.
+func TestGatewayShutdownAbortAnswers503(t *testing.T) {
+	inUpstream := make(chan struct{})
+	gw, _, _ := newTestGateway(t, func(w http.ResponseWriter, r *http.Request) {
+		close(inUpstream)
+		<-r.Context().Done()
+	})
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	req := httptest.NewRequest(http.MethodGet, "/k8s/api/v1/pods?watch=true", nil).WithContext(ctx)
+	req.Header = bearerHeader()
+	go func() {
+		<-inUpstream
+		cancel(httpx.ErrShutdown)
+	}()
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	var status map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("503 body is not JSON: %v", err)
+	}
+	if status["kind"] != "Status" {
+		t.Errorf("body kind = %v, want Status", status["kind"])
+	}
+	if !strings.Contains(rec.Body.String(), "shutting down") {
+		t.Errorf("body = %q, want it to say the server is shutting down", rec.Body.String())
+	}
+}
+
+// The counterpart: a plain cancellation with no shutdown cause is a departed
+// client, and nothing must be written for one.
+func TestGatewayClientGoneStaysSilent(t *testing.T) {
+	inUpstream := make(chan struct{})
+	gw, _, _ := newTestGateway(t, func(w http.ResponseWriter, r *http.Request) {
+		close(inUpstream)
+		<-r.Context().Done()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/k8s/api/v1/pods?watch=true", nil).WithContext(ctx)
+	req.Header = bearerHeader()
+	go func() {
+		<-inUpstream
+		cancel()
+	}()
+	rec := httptest.NewRecorder()
+	gw.ServeHTTP(rec, req)
+	if rec.Body.Len() != 0 {
+		t.Fatalf("body = %q, want nothing written for a departed client", rec.Body.String())
 	}
 }
 
@@ -413,6 +528,37 @@ func TestGatewayAuthorizationNotEchoedInErrors(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), sentinel) {
 		t.Fatal("error response leaked the bearer token")
+	}
+}
+
+// The 502 log line must carry the transport error (an errorHandler that drops
+// err makes x509, DNS, refused-connection and timeout failures one identical
+// line) — but never anything from the request: not the query string, not a
+// header, not the bearer.
+func TestGatewayUpstreamErrorLoggedWithoutRequestContents(t *testing.T) {
+	base, _ := url.Parse("http://127.0.0.1:1") // guaranteed connection refused
+	up := &kube.Upstream{BaseURL: base, Transport: http.DefaultTransport}
+	reg := kube.NewRegistryFromUpstreams("default", map[string]*kube.Upstream{"default": up})
+	var logBuf bytes.Buffer
+	gw := New(reg, slog.New(slog.NewTextHandler(&logBuf, nil)))
+	const querySentinel = "SENTINEL-query-do-not-log"
+	const headerSentinel = "SENTINEL-header-do-not-log"
+	const tokenSentinel = "SENTINEL-token-do-not-log"
+	h := http.Header{}
+	h.Set("Authorization", "Bearer "+tokenSentinel)
+	h.Set("X-Sentinel", headerSentinel)
+	rec := doGateway(gw, http.MethodGet, "/k8s/api/v1/pods?labelSelector="+querySentinel, h, nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, "connection refused") {
+		t.Errorf("log %q does not carry the transport error; the 502 is undiagnosable without it", logs)
+	}
+	for _, sentinel := range []string{querySentinel, headerSentinel, tokenSentinel} {
+		if strings.Contains(logs, sentinel) {
+			t.Errorf("log leaked request contents %q: %q", sentinel, logs)
+		}
 	}
 }
 

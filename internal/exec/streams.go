@@ -78,29 +78,97 @@ func writeControl(ctx context.Context, conn *websocket.Conn, mu *sync.Mutex, fra
 	return conn.Write(ctx, websocket.MessageText, data)
 }
 
-// stdinQueueDepth bounds the frames buffered between readLoop and stdinPump.
-// Each frame is at most maxSessionFrameBytes, so the queue stays bounded; a
-// few frames are plenty to keep the reader inside conn.Read across an ordinary
-// paste burst, and a full queue simply blocks the reader again — backpressure,
-// never dropped input.
-const stdinQueueDepth = 8
+// stdinBufferLimitBytes is the default cap on stdin staged between readLoop
+// and stdinPump for one session (Handler.stdinBufferLimit). Generous for any
+// real paste — the read limit caps a single frame at maxSessionFrameBytes —
+// while bounding what one session whose command stopped reading input can pin.
+const stdinBufferLimitBytes = 8 << 20
+
+// stdinFrameOverheadBytes is charged against the cap per staged frame on top
+// of its payload: interactive input arrives as one tiny frame per keystroke,
+// and each staged frame costs a slice header and its own allocation, so a
+// payload-only account would admit millions of allocations under a byte cap
+// they barely dent.
+const stdinFrameOverheadBytes = 64
+
+// stdinQueue stages inbound stdin frames between readLoop and stdinPump. push
+// never blocks — see readLoop for why the reader must always return to
+// conn.Read. The queue is byte-bounded instead: exceeding the cap refuses the
+// frame and the caller ends the session with a stated reason, never a silent
+// drop, which would corrupt the byte stream the command eventually reads.
+type stdinQueue struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	frames [][]byte
+	staged int // payload bytes + per-frame overhead currently queued
+	limit  int
+	closed bool
+}
+
+func newStdinQueue(limit int) *stdinQueue {
+	q := &stdinQueue{limit: limit}
+	q.cond = sync.NewCond(&q.mu)
+	return q
+}
+
+// push stages one frame, reporting false — with nothing staged — when doing so
+// would exceed the byte cap.
+func (q *stdinQueue) push(data []byte) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.staged+len(data)+stdinFrameOverheadBytes > q.limit {
+		return false
+	}
+	q.frames = append(q.frames, data)
+	q.staged += len(data) + stdinFrameOverheadBytes
+	q.cond.Signal()
+	return true
+}
+
+// close marks the end of input; next drains what is staged, then reports done.
+func (q *stdinQueue) close() {
+	q.mu.Lock()
+	q.closed = true
+	q.mu.Unlock()
+	q.cond.Signal()
+}
+
+// next blocks until a frame is staged or the queue is closed and drained.
+func (q *stdinQueue) next() ([]byte, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for len(q.frames) == 0 && !q.closed {
+		q.cond.Wait()
+	}
+	if len(q.frames) == 0 {
+		return nil, false
+	}
+	data := q.frames[0]
+	q.frames[0] = nil
+	q.frames = q.frames[1:]
+	q.staged -= len(data) + stdinFrameOverheadBytes
+	return data, true
+}
 
 // readLoop pumps inbound frames: binary → stdin queue, text resize frames →
-// size queue. It exits when the connection or context ends.
+// size queue. It exits when the connection or context ends, or when the stdin
+// queue refuses a frame — overflow() then ends the session with the reason
+// stated.
 //
-// The blocking half — writing into the stdin pipe, which only completes once
-// the executor picks the data up — runs in stdinPump, never here. A reader
-// parked in that write would notice neither the browser leaving (the whole
-// teardown path keys off this loop returning) nor a pong, so coder/websocket's
-// Ping, which waits for a Reader call to read it, would time out and kill an
-// otherwise healthy session.
-func readLoop(ctx context.Context, conn *websocket.Conn, stdin *io.PipeWriter, sizes *sizeQueue, activity func()) {
-	frames := make(chan []byte, stdinQueueDepth)
-	go stdinPump(frames, stdin)
+// The loop must never block anywhere but conn.Read. The blocking half —
+// writing into the stdin pipe, which only completes once the executor picks
+// the data up — runs in stdinPump, and the handoff refuses rather than blocks
+// when full: a reader parked outside conn.Read would notice neither the
+// browser leaving (the whole teardown path keys off this loop returning) nor
+// a pong, so coder/websocket's Ping, which needs a concurrent Reader call to
+// see its pong, would time out and kill an otherwise healthy session.
+func readLoop(ctx context.Context, conn *websocket.Conn, stdin *io.PipeWriter, sizes *sizeQueue, activity func(), stdinLimit int, overflow func()) {
+	queue := newStdinQueue(stdinLimit)
+	go stdinPump(queue, stdin)
 	defer func() {
 		// Hand the pump its EOF: it closes stdin once the queue is drained, so
 		// input typed just before the disconnect still reaches the process.
-		close(frames)
+		queue.close()
 		sizes.close()
 	}()
 	for {
@@ -115,9 +183,8 @@ func readLoop(ctx context.Context, conn *websocket.Conn, stdin *io.PipeWriter, s
 		case websocket.MessageBinary:
 			// conn.Read allocates a fresh buffer per frame, so handing it over
 			// is safe.
-			select {
-			case frames <- data:
-			case <-ctx.Done():
+			if !queue.push(data) {
+				overflow()
 				return
 			}
 		case websocket.MessageText:
@@ -132,13 +199,17 @@ func readLoop(ctx context.Context, conn *websocket.Conn, stdin *io.PipeWriter, s
 	}
 }
 
-// stdinPump writes queued frames into the exec stdin pipe and closes it once
+// stdinPump writes staged frames into the exec stdin pipe and closes it once
 // the queue is closed and drained, so the executor observes EOF. A write blocks
 // until the executor reads, so this goroutine may outlive readLoop:
 // session()'s stdinReader.Close() is what unblocks it on teardown.
-func stdinPump(frames <-chan []byte, stdin *io.PipeWriter) {
+func stdinPump(queue *stdinQueue, stdin *io.PipeWriter) {
 	defer func() { _ = stdin.Close() }()
-	for data := range frames {
+	for {
+		data, ok := queue.next()
+		if !ok {
+			return
+		}
 		if _, err := stdin.Write(data); err != nil {
 			return
 		}

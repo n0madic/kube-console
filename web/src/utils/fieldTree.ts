@@ -213,7 +213,9 @@ function tableNode(key: string, items: Record<string, unknown>[]): TableNode {
   }
   const rows = items.map((item) =>
     columnKeys.map((col): TableCell => {
-      const raw = item[col]
+      // Own keys only: another item can name `constructor`/`toString`, and a
+      // bare item[col] would then render the Object.prototype member here.
+      const raw = Object.hasOwn(item, col) ? item[col] : undefined
       if (raw === undefined) return { text: "", statusClass: null, long: false }
       const scalar = raw as Scalar
       // Timestamps read better as a compact relative age inside table cells.

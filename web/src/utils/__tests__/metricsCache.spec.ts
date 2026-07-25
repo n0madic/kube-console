@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
-import { clearMetricsCacheContext, getMetricsBuffer } from "@/utils/metricsCache"
+import { clearMetricsCacheContext, getMetricsBuffer, getMetricsBuffers } from "@/utils/metricsCache"
 
 // Every scope key in production is context-prefixed (`<ctx>:pod:<uid>:cpu`), so
 // the tests use that shape too — and isolate the way the app does, by clearing
@@ -121,6 +121,25 @@ describe("metricsCache", () => {
     // creation triggers must pick a stale scope instead of the new key.
     const fresh = getMetricsBuffer(key("scope:64"))
     expect(getMetricsBuffer(key("scope:64"))).toBe(fresh)
+  })
+
+  // Regression: `protect` covered only the single key just created, and the
+  // capacity trim prefers empty buffers in insertion order — so of two
+  // back-to-back binds at the bound (every chart owner binds cpu then mem),
+  // the second bind's trim evicted the first bind's still-empty buffer. The
+  // component kept pushing into the orphaned handle, so the chart looked fine
+  // until navigating away and back lost the CPU history.
+  it("binding a cpu/mem pair at capacity keeps both buffers cached", () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(30 * 60 * 1000)
+    for (let i = 0; i < 64; i++) {
+      getMetricsBuffer(key(`scope:${i}`)).push(1000, { total: 1 })
+    }
+
+    const [cpu, mem] = getMetricsBuffers(key("pod:uid-9:cpu"), key("pod:uid-9:mem"))
+
+    expect(getMetricsBuffer(key("pod:uid-9:cpu"))).toBe(cpu)
+    expect(getMetricsBuffer(key("pod:uid-9:mem"))).toBe(mem)
   })
 
   // Ending one cluster's session must not touch another's: both keep their own

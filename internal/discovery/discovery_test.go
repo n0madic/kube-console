@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/n0madic/kube-console/internal/kube"
 )
@@ -279,6 +280,153 @@ func TestDiscoveryUnknownContext400(t *testing.T) {
 	rec := getDiscoveryContext(h, "tok", "ghost")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for unknown context", rec.Code)
+	}
+}
+
+// Regression: a legacy fan-out where the roots answer 200 but every single
+// group-version fails used to answer 200 with an empty catalog — a blank
+// sidebar the SPA cannot tell from an empty cluster. All-403 is an RBAC
+// denial and must forward as 403 (per-group skipping stays: see the
+// broken.example.io case in TestDiscoveryLegacyFallback for a partial
+// failure still answering 200).
+func TestDiscoveryLegacyAllGroupVersionsForbidden(t *testing.T) {
+	h := newDiscoveryHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/apis":
+			_, _ = w.Write([]byte(`{
+				"kind": "APIGroupList",
+				"groups": [
+					{"name":"apps","versions":[{"groupVersion":"apps/v1","version":"v1"}],
+					 "preferredVersion":{"groupVersion":"apps/v1","version":"v1"}}
+				]}`))
+		case "/api":
+			_, _ = w.Write([]byte(`{"kind":"APIVersions","versions":["v1"]}`))
+		default:
+			w.WriteHeader(http.StatusForbidden)
+		}
+	})
+	rec := getDiscovery(h, "tok")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A total failure with no auth status (every group-version 503) is still an
+// error response, not a 200 with an empty catalog.
+func TestDiscoveryLegacyAllGroupVersionsUnavailable(t *testing.T) {
+	h := newDiscoveryHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/apis":
+			_, _ = w.Write([]byte(`{
+				"kind": "APIGroupList",
+				"groups": [
+					{"name":"apps","versions":[{"groupVersion":"apps/v1","version":"v1"}],
+					 "preferredVersion":{"groupVersion":"apps/v1","version":"v1"}}
+				]}`))
+		case "/api":
+			_, _ = w.Write([]byte(`{"kind":"APIVersions","versions":["v1"]}`))
+		default:
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	})
+	rec := getDiscovery(h, "tok")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A genuinely empty catalog serializes as "resources": [], never null — the
+// same hazard nonNilVerbs guards for the per-resource verbs.
+func TestDiscoveryEmptyCatalogSerializesAsArray(t *testing.T) {
+	h := newDiscoveryHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/apis", "/api":
+			_, _ = w.Write([]byte(`{"kind":"APIGroupDiscoveryList","items":[]}`))
+		default:
+			t.Errorf("unexpected upstream path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	rec := getDiscovery(h, "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"resources":[]`) {
+		t.Fatalf(`empty catalog must serialize as "resources":[]; body: %s`, rec.Body.String())
+	}
+}
+
+// Regression: the aggregated attempt and the legacy fallback shared one
+// deadline, so an aggregated upstream that stalled handed legacy a dead
+// context and the handler answered 502 although legacy would have succeeded.
+func TestDiscoveryStalledAggregatedStillFallsBackToLegacy(t *testing.T) {
+	prev := discoveryTimeout
+	discoveryTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { discoveryTimeout = prev })
+
+	// Unblocked in cleanup (LIFO: runs before the server's Close) so the
+	// stalled upstream handler never wedges httptest.Server.Close.
+	stop := make(chan struct{})
+	h := newDiscoveryHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.Header.Get("Accept"), "apidiscovery.k8s.io") {
+			select { // stall the aggregated attempt past its share of the budget
+			case <-r.Context().Done():
+			case <-stop:
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/apis":
+			_, _ = w.Write([]byte(`{"kind":"APIGroupList","groups":[]}`))
+		case "/api":
+			_, _ = w.Write([]byte(`{"kind":"APIVersions","versions":["v1"]}`))
+		case "/api/v1":
+			_, _ = w.Write([]byte(`{
+				"kind":"APIResourceList","groupVersion":"v1",
+				"resources":[{"name":"pods","namespaced":true,"kind":"Pod","verbs":["get","list"]}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	t.Cleanup(func() { close(stop) })
+
+	rec := getDiscovery(h, "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, ok := decodeResources(t, rec)["core/v1/pods"]; !ok {
+		t.Fatal("core/v1/pods missing after legacy fallback")
+	}
+}
+
+// An aggregated 401 followed by a legacy attempt dying on its own deadline
+// must still answer 401 — the SPA's 401→logout path keys on the status, and a
+// deadline error from the fallback must not mask the auth failure as 502.
+func TestDiscoveryAggregated401NotMaskedByDeadLegacy(t *testing.T) {
+	prev := discoveryTimeout
+	discoveryTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { discoveryTimeout = prev })
+
+	stop := make(chan struct{})
+	h := newDiscoveryHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.Header.Get("Accept"), "apidiscovery.k8s.io") {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		select { // the legacy root stalls until its share of the budget expires
+		case <-r.Context().Done():
+		case <-stop:
+		}
+	})
+	t.Cleanup(func() { close(stop) })
+
+	rec := getDiscovery(h, "tok")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; body: %s", rec.Code, rec.Body.String())
 	}
 }
 

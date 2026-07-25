@@ -35,6 +35,37 @@ describe("podMetricsSeries", () => {
     expect(mem).toEqual({ total: 300, app: 200, sidecar: 100 })
   })
 
+  // Regression: the per-container loop wrote into the map already holding the
+  // reserved keys, so a container legally named `total` replaced the pod
+  // aggregate — a line still labelled "total" plotted one container's usage.
+  it("keeps the pod aggregate when a container is named 'total'", () => {
+    const { cpu, mem } = podMetricsSeries(
+      item(1000, 3000, [
+        { name: "total", cpuNanoCores: 7, memoryBytes: 10 },
+        { name: "app", cpuNanoCores: 5, memoryBytes: 20 },
+      ]),
+      5,
+    )
+    expect(cpu).toEqual({ total: 1000, "total (container)": 7, app: 5 })
+    expect(mem).toEqual({ total: 3000, app: 20, "total (container)": 10 })
+  })
+
+  // The other direction of the same collision: with the cap reached, the
+  // rollup sum replaced a top-N container's own line named `other`.
+  it("keeps a top-N container named 'other' separate from the rollup", () => {
+    const { cpu } = podMetricsSeries(
+      item(125, 40, [
+        { name: "other", cpuNanoCores: 60, memoryBytes: 10 },
+        { name: "app", cpuNanoCores: 50, memoryBytes: 10 },
+        { name: "c3", cpuNanoCores: 10, memoryBytes: 10 },
+        { name: "c4", cpuNanoCores: 5, memoryBytes: 10 },
+      ]),
+      2,
+    )
+    // top 2 by CPU keep their lines; the rollup is c3+c4, not the container.
+    expect(cpu).toEqual({ total: 125, "other (container)": 60, app: 50, other: 15 })
+  })
+
   it("keeps the heaviest 'cap' containers and collapses the rest into 'other'", () => {
     const containers = [
       { name: "c1", cpuNanoCores: 10, memoryBytes: 700 },

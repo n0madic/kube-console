@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/n0madic/kube-console/internal/config"
+	"github.com/n0madic/kube-console/internal/httpx"
 	"github.com/n0madic/kube-console/internal/kube"
 )
 
@@ -48,6 +49,43 @@ func TestRequestLoggerNeverLogsTokenOrQuery(t *testing.T) {
 	}
 	if !strings.Contains(logged, "/k8s/api/v1/secrets") {
 		t.Fatalf("log output should contain the request path: %s", logged)
+	}
+}
+
+// TestRequestLoggerLogsAbortedStreams is the regression for the silent abort
+// path: Recoverer re-panics http.ErrAbortHandler — how every stream the
+// ReverseProxy aborts ends — and net/http then swallows it, so a log call on
+// the return path never ran for exactly those requests. The line must come
+// from a defer.
+func TestRequestLoggerLogsAbortedStreams(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	handler := RequestLogger(logger)(Recoverer(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		panic(http.ErrAbortHandler)
+	})))
+
+	// The test plays net/http: the abort must still unwind out of the logger,
+	// where the server recognizes and swallows it.
+	func() {
+		defer func() {
+			if rec := recover(); rec != http.ErrAbortHandler {
+				t.Fatalf("recovered %v, want http.ErrAbortHandler to keep propagating", rec)
+			}
+		}()
+		handler.ServeHTTP(httptest.NewRecorder(),
+			httptest.NewRequest(http.MethodGet, "/k8s/api/v1/pods?watch=true", nil))
+	}()
+
+	logged := buf.String()
+	if !strings.Contains(logged, "msg=request") {
+		t.Fatalf("aborted request left no request log line: %q", logged)
+	}
+	if !strings.Contains(logged, "/k8s/api/v1/pods") {
+		t.Fatalf("request log line is missing the path: %q", logged)
+	}
+	if strings.Contains(logged, "watch=true") {
+		t.Fatalf("request log line leaked the query string: %q", logged)
 	}
 }
 
@@ -154,6 +192,64 @@ func TestAbortOnShutdownNilMatchTreatsEveryRequestAsLongLived(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("request was not aborted when shutdown fired")
+	}
+}
+
+// A shutdown abort and a departed client are both context.Canceled from
+// ctx.Err(); the cause is what lets downstream error paths answer a
+// still-connected client with an error instead of an empty 200.
+func TestAbortOnShutdownCancelsWithShutdownCause(t *testing.T) {
+	shutdown, fireShutdown := context.WithCancel(context.Background())
+	defer fireShutdown()
+
+	started := make(chan struct{})
+	cause := make(chan error, 1)
+	handler := AbortOnShutdown(shutdown, nil)(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			close(started)
+			<-r.Context().Done()
+			cause <- context.Cause(r.Context())
+		}))
+
+	go handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/k8s/api/v1/pods?watch=true", nil))
+
+	<-started
+	fireShutdown()
+
+	select {
+	case err := <-cause:
+		if !errors.Is(err, httpx.ErrShutdown) {
+			t.Fatalf("context.Cause = %v, want httpx.ErrShutdown", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("request was not aborted when shutdown fired")
+	}
+}
+
+// The deferred cleanup cancel must keep the ordinary meaning: a request that
+// completes normally (and only then has its context cancelled) must not read
+// as a shutdown to anything still holding the context.
+func TestAbortOnShutdownNormalCompletionIsNotAShutdown(t *testing.T) {
+	shutdown, fireShutdown := context.WithCancel(context.Background())
+	defer fireShutdown()
+
+	var ctx context.Context
+	handler := AbortOnShutdown(shutdown, nil)(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx = r.Context()
+			if cause := context.Cause(ctx); cause != nil {
+				t.Errorf("context cancelled mid-handler with no shutdown: %v", cause)
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/k8s/api/v1/pods?watch=true", nil))
+
+	cause := context.Cause(ctx)
+	if errors.Is(cause, httpx.ErrShutdown) {
+		t.Fatalf("normal completion carries the shutdown cause: %v", cause)
+	}
+	if !errors.Is(cause, context.Canceled) {
+		t.Fatalf("cleanup cancel cause = %v, want plain context.Canceled", cause)
 	}
 }
 
@@ -346,6 +442,45 @@ func TestWriteDeadlineZeroIsPassthrough(t *testing.T) {
 	})).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/k8s/api/v1/pods", nil))
 	if len(rec.deadlines) != 0 {
 		t.Fatalf("a zero timeout must arm no deadline, got %d", len(rec.deadlines))
+	}
+}
+
+// flushErrorWriter fakes the socket end of a flush: net/http's own response
+// implements FlushError, and its error is where a write deadline surfaces when
+// the flush is the last thing that touches the connection.
+type flushErrorWriter struct {
+	http.ResponseWriter
+	err error
+}
+
+func (w *flushErrorWriter) SetWriteDeadline(time.Time) error { return nil }
+func (w *flushErrorWriter) FlushError() error                { return w.err }
+
+// TestFlushErrorSurfacesThroughResponseController pins the interface shape:
+// http.ResponseController.Flush matches interface{ FlushError() error } before
+// http.Flusher and only then walks Unwrap, so a wrapper exposing only the bare
+// Flush() wins the match and discards the error. Both wrappers are in the
+// production order here — either one lacking FlushError swallows it.
+func TestFlushErrorSurfacesThroughResponseController(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	wantErr := os.ErrDeadlineExceeded
+
+	var got error
+	handler := RequestLogger(logger)(WriteDeadline(time.Second, logger)(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = http.NewResponseController(w).Flush()
+		})))
+	rec := &flushErrorWriter{ResponseWriter: httptest.NewRecorder(), err: wantErr}
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/k8s/api/v1/pods?watch=true", nil))
+
+	if !errors.Is(got, wantErr) {
+		t.Fatalf("ResponseController.Flush() = %v, want the deadline error", got)
+	}
+	// A stalled flush followed by nothing is otherwise the one timeout that
+	// never reaches the log: no later Write ever runs to report it.
+	if !strings.Contains(logs.String(), "client stopped reading") {
+		t.Fatalf("flush timeout was not reported: %q", logs.String())
 	}
 }
 

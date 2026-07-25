@@ -342,6 +342,123 @@ func TestNewUpstreamDropsHostCredentials(t *testing.T) {
 	if up.BaseURL.User != nil {
 		t.Errorf("BaseURL.User = %v, want nil", up.BaseURL.User)
 	}
+	// The stored config too: exec builds its URL from RestConfig.Host, and
+	// client-go turns URL userinfo into an Authorization: Basic header that its
+	// bearer round tripper then refuses to overwrite.
+	if up.RestConfig.Host != "https://leaky.example:6443" {
+		t.Errorf("RestConfig.Host = %q, want no userinfo", up.RestConfig.Host)
+	}
+}
+
+// A scheme-less apiserver host must come out https everywhere. Exec is the one
+// consumer that builds its URL from RestConfig.Host rather than BaseURL, and
+// client-go guesses the scheme it was not given: rest.DefaultServerUrlFor
+// defaults to TLS only when a CA/client cert or Insecure is set, so a CA-less
+// scheme-less host became http:// — the websocket transport dialed ws:// and
+// the bearer round tripper attached the user's token to that cleartext hop,
+// while BaseURL, the gateway and the startup log all said https.
+func TestNewUpstreamNormalizesSchemelessHost(t *testing.T) {
+	up, err := NewUpstream(&rest.Config{Host: "bare.example:6443"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if up.BaseURL.String() != "https://bare.example:6443" {
+		t.Errorf("BaseURL = %q, want https", up.BaseURL.String())
+	}
+	if up.RestConfig.Host != "https://bare.example:6443" {
+		t.Errorf("RestConfig.Host = %q, must match BaseURL", up.RestConfig.Host)
+	}
+	// client-go's own URL derivation — what exec's URL builder rides on — must
+	// agree with BaseURL about the scheme.
+	hostURL, _, err := rest.DefaultServerUrlFor(up.RestConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hostURL.Scheme != "https" {
+		t.Errorf("client-go derived scheme %q, want https", hostURL.Scheme)
+	}
+}
+
+// An explicit http:// scheme is an operator's deliberate choice (e.g. a local
+// `kubectl proxy`) and must survive normalization.
+func TestNewUpstreamKeepsExplicitHTTPScheme(t *testing.T) {
+	up, err := NewUpstream(&rest.Config{Host: "http://127.0.0.1:8001"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if up.BaseURL.String() != "http://127.0.0.1:8001" {
+		t.Errorf("BaseURL = %q, want the explicit http form", up.BaseURL.String())
+	}
+	if up.RestConfig.Host != "http://127.0.0.1:8001" {
+		t.Errorf("RestConfig.Host = %q, want the explicit http form", up.RestConfig.Host)
+	}
+}
+
+// An apiserver behind a path prefix (server: https://host/k8s-proxy) must keep
+// the prefix in both URLs: client-go appends /api/v1/... relative to the Host
+// path, so dropping it would point exec at the proxy root.
+func TestNewUpstreamKeepsHostPathPrefix(t *testing.T) {
+	up, err := NewUpstream(&rest.Config{Host: "https://apiserver.example/k8s-proxy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if up.BaseURL.String() != "https://apiserver.example/k8s-proxy" {
+		t.Errorf("BaseURL = %q, want the path prefix kept", up.BaseURL.String())
+	}
+	if up.RestConfig.Host != "https://apiserver.example/k8s-proxy" {
+		t.Errorf("RestConfig.Host = %q, want the path prefix kept", up.RestConfig.Host)
+	}
+	hostURL, _, err := rest.DefaultServerUrlFor(up.RestConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hostURL.Path != "/k8s-proxy" {
+		t.Errorf("client-go derived path %q, want /k8s-proxy", hostURL.Path)
+	}
+}
+
+// A kubeconfig whose server URL carries no scheme: clientcmd's validation only
+// requires the field to be non-empty, so this reaches RESTConfigs as-is.
+const schemelessKubeconfig = `apiVersion: v1
+kind: Config
+current-context: bare
+clusters:
+- name: bare-cluster
+  cluster:
+    server: bare.example:6443
+contexts:
+- name: bare
+  context:
+    cluster: bare-cluster
+    user: bare-user
+users:
+- name: bare-user
+  user:
+    token: bare-secret-token
+`
+
+// Both operator inputs can carry a scheme-less host; the registry must
+// normalize whichever path built the config.
+func TestNewRegistryNormalizesSchemelessHost(t *testing.T) {
+	cases := map[string]*config.Config{
+		"api-server": {KubeAPIServer: "bare.example:6443"},
+		"kubeconfig": {Kubeconfig: writeFile(t, schemelessKubeconfig)},
+	}
+	for name, cfg := range cases {
+		t.Run(name, func(t *testing.T) {
+			reg, err := NewRegistry(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			up := reg.Default()
+			if up.BaseURL.String() != "https://bare.example:6443" {
+				t.Errorf("BaseURL = %q, want https", up.BaseURL.String())
+			}
+			if up.RestConfig.Host != "https://bare.example:6443" {
+				t.Errorf("RestConfig.Host = %q, want https", up.RestConfig.Host)
+			}
+		})
+	}
 }
 
 func TestParseHostErrorKeepsCredentialsOut(t *testing.T) {

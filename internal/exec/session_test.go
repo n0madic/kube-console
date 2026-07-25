@@ -18,7 +18,9 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	runtimeapi "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/client-go/tools/remotecommand"
 	utilexec "k8s.io/client-go/util/exec"
 	"k8s.io/klog/v2"
@@ -977,7 +979,7 @@ func TestIdleTimeoutEndsTheSessionEvenWhileTheWriteLockIsHeld(t *testing.T) {
 	writeMu.Lock()
 
 	ended := make(chan struct{})
-	go h.reportIdleTimeout(context.Background(), nil, &writeMu, func() { close(ended) })
+	go h.reportAndEnd(context.Background(), nil, &writeMu, func() { close(ended) }, "idle timeout")
 
 	select {
 	case <-ended:
@@ -1011,5 +1013,208 @@ func TestIdleTimeoutIsSilentOnceTheTeardownIsClaimed(t *testing.T) {
 	case <-ended:
 		t.Fatal("the idle deadline ended a session whose teardown was already claimed")
 	default:
+	}
+}
+
+// Regression: readLoop used to hand stdin over on a bounded channel with a
+// blocking send, so once the queue filled it parked OUTSIDE conn.Read.
+// coder/websocket only matches a pong from inside a Reader call, so the ping
+// timed out and cancelled a session whose client was present and answering —
+// measured at 40s (one 30s tick plus the 10s pong deadline) with a live client.
+// The predecessor test sent a single frame, which parks stdinPump and leaves
+// readLoop in conn.Read, so it never covered the full-queue case.
+func TestSessionSurvivesStdinBackpressureBeyondQueueDepth(t *testing.T) {
+	streaming := make(chan struct{})
+	env := newTestEnv(t, 4,
+		func(cfg *rest.Config, method string, u *url.URL) (remotecommand.Executor, error) {
+			return &fakeExecutor{stream: func(ctx context.Context, opts remotecommand.StreamOptions) error {
+				close(streaming)
+				<-ctx.Done() // never reads opts.Stdin: the pty equivalent of a stalled process
+				return ctx.Err()
+			}}, nil
+		},
+		func(h *Handler) {
+			// A real terminal would take 40s to reach the verdict; drive the
+			// keepalive fast enough to cross several cycles inside the test.
+			h.pingInterval = 40 * time.Millisecond
+			h.pingTimeout = 20 * time.Millisecond
+			h.drainTimeout = 100 * time.Millisecond
+		},
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	conn := env.dial(t, ctx)
+	sendAuth(t, ctx, conn, validAuth())
+	if frame := readControlFrame(t, ctx, conn); frame.Type != "ready" {
+		t.Fatalf("expected ready, got %+v", frame)
+	}
+	<-streaming
+
+	// A real browser is always reading, which is also how coder/websocket
+	// answers the server's pings — the pong is sent from inside a Read call, so
+	// a client that stops reading would fail the keepalive for reasons of its
+	// own and prove nothing about the server.
+	serverFrames := make(chan string, 4)
+	go func() {
+		for {
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				serverFrames <- "closed: " + err.Error()
+				return
+			}
+			serverFrames <- string(data)
+		}
+	}()
+
+	// Far more frames than any internal queue depth, none of which the command
+	// will ever read.
+	for i := 0; i < 64; i++ {
+		if err := conn.Write(ctx, websocket.MessageBinary, []byte("unread input")); err != nil {
+			t.Fatalf("write %d failed while the command was not reading stdin: %v", i, err)
+		}
+	}
+
+	// Outlast several ping cycles: with the reader parked outside conn.Read the
+	// first missed pong ends the session.
+	select {
+	case frame := <-serverFrames:
+		t.Fatalf("session was torn down during stdin backpressure: %s", frame)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// Still usable: the connection accepts further input after the stall.
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"type":"resize","cols":100,"rows":40}`)); err != nil {
+		t.Fatalf("session was torn down during stdin backpressure: %v", err)
+	}
+}
+
+// The byte cap on staged stdin is an explicit decision, not backpressure onto
+// the socket reader: the session ends with the reason stated rather than
+// dropping input, which would corrupt the stream the command eventually reads.
+func TestStdinOverflowEndsSessionWithStatedReason(t *testing.T) {
+	env := newTestEnv(t, 4,
+		func(cfg *rest.Config, method string, u *url.URL) (remotecommand.Executor, error) {
+			return &fakeExecutor{stream: func(ctx context.Context, opts remotecommand.StreamOptions) error {
+				<-ctx.Done() // never reads opts.Stdin
+				return ctx.Err()
+			}}, nil
+		},
+		func(h *Handler) {
+			h.stdinBufferLimit = 256
+			h.drainTimeout = 100 * time.Millisecond
+		},
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn := env.dial(t, ctx)
+	sendAuth(t, ctx, conn, validAuth())
+	if frame := readControlFrame(t, ctx, conn); frame.Type != "ready" {
+		t.Fatalf("expected ready, got %+v", frame)
+	}
+	for i := 0; i < 32; i++ {
+		if err := conn.Write(ctx, websocket.MessageBinary, bytes.Repeat([]byte("x"), 64)); err != nil {
+			break // the server may already have closed after stating the reason
+		}
+	}
+
+	frame := readControlFrame(t, ctx, conn)
+	if frame.Type != "error" || !strings.Contains(frame.Message, "unread input") {
+		t.Fatalf("expected the overflow reason, got %+v", frame)
+	}
+}
+
+// rest.CopyConfig aliases ExecProvider and then writes through it, so copying
+// the shared config for a connection used to mutate the registry's own
+// Upstream.RestConfig — read concurrently by the readiness probe and every
+// adapter, and documented as never mutated after construction.
+func TestPerConnectionConfigDoesNotMutateSharedRestConfig(t *testing.T) {
+	base, _ := url.Parse("https://kubernetes.example")
+	provider := &clientcmdapi.ExecConfig{
+		Command:    "aws",
+		Args:       []string{"eks", "get-token"},
+		APIVersion: "client.authentication.k8s.io/v1beta1",
+		// Populated from the cluster's client.authentication.k8s.io/exec
+		// extension, and the only reason CopyConfig writes to its source.
+		Config: &runtimeapi.Unknown{Raw: []byte(`{"cluster":"a"}`)},
+	}
+	shared := &rest.Config{Host: "https://kubernetes.example", ExecProvider: provider}
+	up := &kube.Upstream{BaseURL: base, Transport: http.DefaultTransport, RestConfig: shared}
+	reg := kube.NewRegistryFromUpstreams("default", map[string]*kube.Upstream{"default": up})
+
+	streaming := make(chan struct{})
+	env := newTestEnvForRegistry(t, reg, 4,
+		func(cfg *rest.Config, method string, u *url.URL) (remotecommand.Executor, error) {
+			return &fakeExecutor{stream: func(ctx context.Context, opts remotecommand.StreamOptions) error {
+				close(streaming)
+				<-ctx.Done()
+				return ctx.Err()
+			}}, nil
+		},
+		func(h *Handler) { h.drainTimeout = 100 * time.Millisecond },
+	)
+
+	before := provider.Config
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn := env.dial(t, ctx)
+	sendAuth(t, ctx, conn, validAuth())
+	if frame := readControlFrame(t, ctx, conn); frame.Type != "ready" {
+		t.Fatalf("expected ready, got %+v", frame)
+	}
+	<-streaming
+
+	if provider.Config != before {
+		t.Fatal("building the per-connection config rewrote the shared Upstream.RestConfig's ExecProvider")
+	}
+	if up.RestConfig != shared || up.RestConfig.ExecProvider != provider {
+		t.Fatal("the shared config was replaced instead of copied")
+	}
+}
+
+// coder/websocket builds its Accept errors out of inbound header values, and
+// this endpoint is pre-auth and unmetered by default, so the error text must
+// never reach the log: "logs never contain headers, bodies or query strings".
+func TestAcceptFailureDoesNotLogHeaderValues(t *testing.T) {
+	buf := &bytes.Buffer{}
+	env := newTestEnv(t, 4,
+		func(cfg *rest.Config, method string, u *url.URL) (remotecommand.Executor, error) {
+			return &fakeExecutor{stream: func(ctx context.Context, opts remotecommand.StreamOptions) error {
+				return nil
+			}}, nil
+		},
+		func(h *Handler) {
+			h.logger = slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		},
+	)
+
+	req, err := http.NewRequest(http.MethodGet, env.server.URL+"/api/ui/exec/ws", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A handshake Accept rejects, carrying sentinels in the values it echoes.
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", "SENTINEL-WS-KEY")
+	req.Header.Set("Origin", "http://sentinel-origin.example")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		t.Fatal("expected the handshake to be rejected")
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "accept failed") {
+		t.Fatalf("the rejected handshake was not logged at all: %q", logged)
+	}
+	for _, sentinel := range []string{"SENTINEL-WS-KEY", "sentinel-origin.example"} {
+		if strings.Contains(logged, sentinel) {
+			t.Fatalf("client-supplied header value %q reached the log: %q", sentinel, logged)
+		}
 	}
 }

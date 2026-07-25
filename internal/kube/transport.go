@@ -41,6 +41,17 @@ func (u *Upstream) RoundTripper(token string) http.RoundTripper {
 }
 
 // NewUpstream builds the shared transport from a credential-free rest.Config.
+//
+// The config's Host is written back in BaseURL's normalized form (scheme made
+// explicit, userinfo dropped) so the two can never disagree: exec is the one
+// consumer that builds its URL from RestConfig.Host rather than BaseURL, and a
+// scheme-less Host left for client-go to complete defaults to http when no
+// CA/client cert is configured (rest.DefaultServerUrlFor) — its websocket
+// transport then dials ws:// and the bearer round tripper attaches the user's
+// token to that cleartext hop, while the gateway, the probe and the startup
+// log all show the https form. A scheme-less host is reachable from both
+// operator inputs: --api-server is free-form, and clientcmd only requires a
+// kubeconfig server to be non-empty.
 func NewUpstream(rc *rest.Config) (*Upstream, error) {
 	rt, err := rest.TransportFor(rc)
 	if err != nil {
@@ -50,6 +61,7 @@ func NewUpstream(rc *rest.Config) (*Upstream, error) {
 	if err != nil {
 		return nil, err
 	}
+	rc.Host = base.String()
 	return &Upstream{BaseURL: base, Transport: rt, RestConfig: rc}, nil
 }
 

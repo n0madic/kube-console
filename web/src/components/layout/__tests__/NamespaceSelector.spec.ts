@@ -123,4 +123,37 @@ describe("NamespaceSelector", () => {
     mount(NamespaceSelector)
     expect(ui.namespace).toBe("zzz-team")
   })
+
+  // Regression: a selection past the fetched pages had no <option>, so the
+  // select rendered blank — while every list on screen stayed filtered by it
+  // — and the value could not even be reselected from the dropdown.
+  it("always renders an option for the selected namespace on a truncated list", () => {
+    mockRoute = { name: "overview", params: {} }
+    mockDiscovery(undefined)
+    const ui = useUiStore()
+    ui.namespace = "zzz-team"
+    setNamespaces(["default", "kube-system"], false, "next-page-token")
+    const wrapper = mount(NamespaceSelector)
+    const values = wrapper.findAll("option").map((o) => o.attributes("value"))
+    expect(values).toContain("zzz-team")
+    expect(wrapper.get("select").element.value).toBe("zzz-team")
+  })
+
+  it("marks a truncated list instead of presenting it as complete", () => {
+    mockRoute = { name: "overview", params: {} }
+    mockDiscovery(undefined)
+    setNamespaces(["default"], false, "next-page-token")
+    const wrapper = mount(NamespaceSelector)
+    const marker = wrapper.findAll("option").find((o) => o.text().includes("not listed"))
+    expect(marker).toBeDefined()
+    expect(marker?.attributes("disabled")).toBeDefined()
+  })
+
+  it("shows no truncation marker for a complete list", () => {
+    mockRoute = { name: "overview", params: {} }
+    mockDiscovery(undefined)
+    setNamespaces(["default", "prod"])
+    const wrapper = mount(NamespaceSelector)
+    expect(wrapper.text()).not.toContain("not listed")
+  })
 })

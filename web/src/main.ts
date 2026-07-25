@@ -6,22 +6,31 @@ import { setCredentialProvider, setUnauthorizedHandler, setUnknownContextHandler
 import type { ContextsResponse } from "@/api/types"
 import { fetchAuthMode } from "@/api/ui"
 import { KubernetesTokenProvider } from "@/auth/KubernetesTokenProvider"
+import { recoverFromUnknownContext } from "@/composables/useContexts"
 import { createAppRouter } from "@/router"
 import { setQueryPruner, useAuthStore } from "@/stores/auth"
 
 import App from "./App.vue"
 import "./style.css"
 
+/** Bounds the auth-mode probe. A backend that accepts the connection and then
+ * stalls must not be able to hold the page blank forever. */
+const AUTH_MODE_TIMEOUT_MS = 5000
+
 const app = createApp(App)
 const pinia = createPinia()
-const router = createAppRouter()
+// Before the probe: it reads the store, and before the router: installing the
+// router starts the first navigation, whose guard waits on the probe.
+app.use(pinia)
+
+const authModeReady = resolveAuthMode()
+const router = createAppRouter(authModeReady)
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: { refetchOnWindowFocus: false, retry: 1 },
   },
 })
 
-app.use(pinia)
 app.use(router)
 app.use(VueQueryPlugin, { queryClient })
 
@@ -57,35 +66,38 @@ setUnauthorizedHandler((context) => {
   if (context === auth.activeContext) void router.push({ name: "login" })
 })
 setUnknownContextHandler((context) => {
-  // The context vanished upstream (kubeconfig changed): reset to the default
-  // context NAME (sessions are keyed by real names, so "" would orphan a
-  // still-valid default session) and let the context list refetch. Ignored when
-  // the rejected context is no longer active: the user has already moved on,
-  // and resetting would undo their switch.
+  // The context vanished upstream (kubeconfig changed). Ignored when it is no
+  // longer active: the user has already moved on, and resetting would undo
+  // their switch. The recovery itself is shared with the reconcile watch that
+  // handles the same event from the context list — see recoverFromUnknownContext
+  // for why the fallback is never "" and why the refetch is conditional.
   const auth = useAuthStore()
   if (context !== auth.activeContext) return
   const cached = queryClient.getQueryData<ContextsResponse>(["contexts"])
-  auth.setActiveContext(cached?.default ?? "")
-  void queryClient.invalidateQueries({ queryKey: ["contexts"] })
+  if (recoverFromUnknownContext(router, context, cached?.default)) {
+    void queryClient.invalidateQueries({ queryKey: ["contexts"] })
+  }
 })
 
-/** Bounds the pre-mount probe below. A backend that accepts the connection and
- * then stalls must not be able to hold the page blank forever. */
-const AUTH_MODE_TIMEOUT_MS = 5000
-
-// The auth mode decides whether there is a login page at all, and the route
-// guard runs on the very first navigation — so it has to be known before mount.
-// Any failure, including the timeout, resolves to token mode: fail closed onto
-// the login page rather than waving a broken backend through as locally
+// The auth mode decides whether there is a login page at all, so the route guard
+// cannot answer anything before it is known — and the first navigation starts
+// when the router is installed, not when the app mounts, which is why the guard
+// awaits this promise instead of the caller ordering mount around it. Any
+// failure, including the timeout, resolves to token mode: fail closed onto the
+// login page rather than waving a broken backend through as locally
 // authenticated, and mount regardless so the error is visible in the app instead
 // of as an empty document.
-async function bootstrap(): Promise<void> {
+async function resolveAuthMode(): Promise<void> {
   try {
     const { mode } = await fetchAuthMode(AbortSignal.timeout(AUTH_MODE_TIMEOUT_MS))
     if (mode === "kubeconfig") useAuthStore().setLocalAuth(true)
   } catch {
     // Unreachable, stalled or unrecognized backend: stay in token mode.
   }
+}
+
+async function bootstrap(): Promise<void> {
+  await authModeReady
   app.mount("#app")
 }
 

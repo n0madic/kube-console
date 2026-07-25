@@ -180,6 +180,49 @@ describe("usePollingLoop", () => {
     h.loop.stop()
   })
 
+  // Regression: lastTickMs is stamped when a poll *starts*, so a tick that
+  // outlasts the interval passes the catch-up throttle while still in flight;
+  // clearTimer() then no-ops (the armed timer id has already fired) and a
+  // second runTick started with the SAME generation — both `.finally` handlers
+  // scheduled, and the chain stayed doubled until stop(). Every other test here
+  // uses a synchronous tick, which can never be in flight when the flip lands.
+  it("does not start a second chain when a visibility flip lands during a long tick", async () => {
+    let slowOnce = true
+    const h = mountLoop(() => {
+      if (!slowOnce) return undefined
+      slowOnce = false
+      return new Promise<void>((resolve) => setTimeout(resolve, 2500))
+    }, 1000)
+
+    const started = h.loop.start() // tick #1 runs t=0..2500
+    await flush()
+    expect(h.ticks.length).toBe(1)
+
+    // t=1200: a full interval past the tick's start, so the throttle passes —
+    // but the tick itself is still in flight.
+    await vi.advanceTimersByTimeAsync(1200)
+    fireVisibilityChange(true)
+    fireVisibilityChange(false)
+    await flush()
+    expect(h.ticks.length).toBe(1)
+
+    // t=1800: a second flip during the same in-flight tick.
+    await vi.advanceTimersByTimeAsync(600)
+    fireVisibilityChange(true)
+    fireVisibilityChange(false)
+    await flush()
+    expect(h.ticks.length).toBe(1)
+
+    await vi.advanceTimersByTimeAsync(700) // t=2500: tick #1 completes, re-arms
+    await started
+    expect(h.ticks.length).toBe(1)
+
+    // Exactly one chain remains: one poll per interval from the completion.
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(h.ticks.length).toBe(11)
+    h.loop.stop()
+  })
+
   it("stops on unmount", async () => {
     const h = mountLoop()
     await h.loop.start()

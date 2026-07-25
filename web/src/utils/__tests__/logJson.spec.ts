@@ -85,6 +85,29 @@ describe("tokenizeJsonLine", () => {
     expect(severityOf(tokens, '"error"')).toBeUndefined()
   })
 
+  // useLogsStream splits on "\n" only, so a CRLF-writing container (Windows
+  // images, .NET/Java logging configs) leaves a trailing \r on every line — it
+  // must not read as trailing garbage and cost the whole stream its coloring.
+  it("tokenizes CRLF lines and reproduces the \\r in the output", () => {
+    const line = '{"level":"error","msg":"boom"}\r'
+    const tokens = tokenizeJsonLine(line)
+    expect(tokens).not.toBeNull()
+    expect((tokens as LogToken[]).map((t) => t.text).join("")).toBe(line)
+    expect(severityOf(tokens as LogToken[], '"error"')).toBe("error")
+  })
+
+  it("tokenizes a timestamp-prefixed CRLF line", () => {
+    const line = '2026-07-21T10:00:01.123456789Z {"level":"info","msg":"ok"}\r'
+    const tokens = tokenizeJsonLine(line)
+    expect(tokens).not.toBeNull()
+    expect((tokens as LogToken[]).map((t) => t.text).join("")).toBe(line)
+  })
+
+  it("still rejects genuine trailing garbage on CRLF lines", () => {
+    expect(tokenizeJsonLine('{"a":1} trailing\r')).toBeNull()
+    expect(tokenizeJsonLine('{"a":1}x\r')).toBeNull()
+  })
+
   it("keeps a kubelet timestamp prefix as its own token", () => {
     const line = '2026-07-21T10:00:01.123456789Z {"level":"info","msg":"ok"}'
     const tokens = tokenizeJsonLine(line) as LogToken[]

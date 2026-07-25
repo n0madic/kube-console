@@ -3,8 +3,7 @@ import { useQuery } from "@tanstack/vue-query"
 import { computed, watch } from "vue"
 import { useRoute } from "vue-router"
 
-import { apiJson } from "@/api/http"
-import type { K8sObjectList } from "@/api/types"
+import { fetchNamespaces } from "@/api/k8s"
 import BaseSelect from "@/components/ui/BaseSelect.vue"
 import { useDiscovery } from "@/composables/useDiscovery"
 import { useAuthStore } from "@/stores/auth"
@@ -35,10 +34,7 @@ const clusterScoped = computed(() => {
 // a switch to a not-yet-authorized context fires no tokenless request.
 const query = useQuery({
   queryKey: computed(() => ["namespaces", auth.activeContext]),
-  queryFn: () =>
-    apiJson<K8sObjectList>("/k8s/api/v1/namespaces?limit=500", {
-      headers: { Accept: "application/json" },
-    }),
+  queryFn: () => fetchNamespaces(),
   enabled: computed(() => auth.isAuthenticated),
   staleTime: 60 * 1000,
   retry: false,
@@ -49,6 +45,16 @@ const names = computed(() =>
     .map((item) => item.metadata?.name ?? "")
     .filter((n) => n !== ""),
 )
+
+// Past the walker's page cap the list is incomplete; the marker option below
+// says so, or a capped list would silently present itself as the whole cluster.
+const truncated = computed(() => (query.data.value?.metadata?.continue ?? "") !== "")
+
+// The selected namespace must always have an option: with a v-model value no
+// <option> matches (list still loading, or the namespace is past the cap) the
+// select renders blank while every list on screen stays filtered by it — and
+// the value could not even be reselected.
+const selectedMissing = computed(() => ui.namespace !== "" && !names.value.includes(ui.namespace))
 
 // Reconcile the selected namespace when a context's namespace list loads: keep
 // a same-named namespace across clusters, otherwise fall back to "all". Only
@@ -84,7 +90,11 @@ watch(
          positioned against), so nothing about it is passed from here. -->
     <BaseSelect v-if="!query.isError.value" id="ns-select" v-model="ui.namespace" class="text-sm">
       <option value="">All namespaces</option>
+      <option v-if="selectedMissing" :value="ui.namespace">{{ ui.namespace }}</option>
       <option v-for="name in names" :key="name" :value="name">{{ name }}</option>
+      <!-- Never selectable; the value only has to match no real namespace,
+           and DNS-1123 names cannot contain underscores. -->
+      <option v-if="truncated" disabled value="__truncated__">… more namespaces not listed</option>
     </BaseSelect>
     <input
       v-else

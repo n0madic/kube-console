@@ -47,6 +47,13 @@ type Handler struct {
 	// see reportIdleTimeout.
 	idleFrameTimeout time.Duration
 	drainTimeout     time.Duration
+	// stdinBufferLimit caps stdin staged between readLoop and stdinPump; see
+	// stdinQueue. pingInterval/pingTimeout drive the keepalive. All three are
+	// fields rather than constants so tests can drive them at speeds a real
+	// terminal never sees.
+	stdinBufferLimit int
+	pingInterval     time.Duration
+	pingTimeout      time.Duration
 	executorFactory  ExecutorFactory
 }
 
@@ -75,7 +82,14 @@ func NewHandler(reg *kube.Registry, cfg *config.Config, logger *slog.Logger) *Ha
 		// a command that ends on EOF does so in milliseconds, and an
 		// interactive shell on a TTY never does, so the wait is pure delay
 		// before the connection has to be dropped anyway.
-		drainTimeout:    2 * time.Second,
+		drainTimeout:     2 * time.Second,
+		stdinBufferLimit: stdinBufferLimitBytes,
+		// A ping every 30s with 10s to answer. Receiving the pong needs a
+		// concurrent Reader, so these bound how long readLoop may be away from
+		// conn.Read before a healthy session is torn down as unresponsive —
+		// which is why the stdin handoff must never block.
+		pingInterval:    30 * time.Second,
+		pingTimeout:     10 * time.Second,
 		executorFactory: defaultExecutorFactory,
 	}
 }
@@ -115,8 +129,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		OriginPatterns: h.originPatterns,
 	})
 	if err != nil {
-		// Accept has already written an HTTP error (e.g. 403 bad origin).
-		h.logger.Warn("exec websocket accept failed", "error", err)
+		// Accept has already written an HTTP error (e.g. 403 bad origin), and
+		// err is deliberately not logged: coder/websocket builds these messages
+		// out of inbound header values (Origin, Host, Connection, Upgrade,
+		// Sec-WebSocket-Version, Sec-WebSocket-Key), and this endpoint is
+		// pre-auth and unmetered by default, so logging it would put
+		// client-controlled text in the log at whatever volume a caller likes.
+		h.logger.Warn("exec websocket accept failed", "client", ip)
 		return
 	}
 	h.session(r.Context(), conn, releaseHandshake)

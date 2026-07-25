@@ -6,6 +6,17 @@ export interface PodMetricsSeries {
   mem: Record<string, number>
 }
 
+// Series labels the multi-container chart itself owns: `total` is the pod
+// aggregate and `other` the small-container rollup. Both are valid DNS-1123
+// container names, so a container so named must be relabelled — otherwise its
+// line silently replaces the aggregate (or is replaced by the rollup) while
+// still wearing the reserved label.
+const RESERVED_LABELS = new Set(["total", "other"])
+
+function containerLabel(name: string): string {
+  return RESERVED_LABELS.has(name) ? `${name} (container)` : name
+}
+
 /**
  * Fill `out` with the per-container lines for one metric: the top `cap`
  * containers by this metric's value get their own line, the rest collapse into
@@ -20,7 +31,7 @@ function addContainerLines(
 ): void {
   const sorted = [...containers].sort((a, b) => value(b) - value(a))
   sorted.slice(0, cap).forEach((c) => {
-    out[c.name] = value(c)
+    out[containerLabel(c.name)] = value(c)
   })
   const rest = sorted.slice(cap)
   if (rest.length > 0) {

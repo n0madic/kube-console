@@ -200,6 +200,34 @@ export async function listAllAsTable(
 }
 
 /**
+ * Namespace list for the selector, following continue tokens with the same
+ * bounds as walkTable. The last page's continue token is kept on the result:
+ * "" proves the list is complete — a truncated list can never prove a
+ * namespace absent, which is what callers key their reconciliation on.
+ */
+export async function fetchNamespaces(
+  opts: { limit?: number; maxPages?: number } = {},
+): Promise<K8sObjectList> {
+  const maxPages = opts.maxPages ?? 6
+  const limit = opts.limit ?? 500
+  const base = resourcePath({ group: "", version: "v1", resource: "namespaces" })
+  const items: K8sObject[] = []
+  let cont = ""
+  for (let page = 0; page < maxPages; page++) {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (cont !== "") params.set("continue", cont)
+    const resp = await apiFetch(`${base}?${params.toString()}`, {
+      headers: { Accept: "application/json" },
+    })
+    const list = (await resp.json()) as K8sObjectList
+    items.push(...(list.items ?? []))
+    cont = list.metadata?.continue ?? ""
+    if (cont === "") break
+  }
+  return { items, metadata: { continue: cont } }
+}
+
+/**
  * Raw node list for the cluster summary. Full objects (not Table) because we
  * need `status.allocatable` and `status.conditions`, which Table rows drop.
  */
@@ -334,6 +362,9 @@ export async function eventsFor(obj: K8sObject): Promise<K8sObjectList> {
   const selectors: string[] = []
   if (meta.uid !== undefined) selectors.push(`involvedObject.uid=${meta.uid}`)
   if (meta.name !== undefined) selectors.push(`involvedObject.name=${meta.name}`)
+  // An empty fieldSelector matches everything: with no identity to filter on,
+  // the request would present up to 200 unrelated events as this object's.
+  if (selectors.length === 0) return { items: [] }
   const params = new URLSearchParams()
   params.set("fieldSelector", selectors.join(","))
   params.set("limit", "200")

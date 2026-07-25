@@ -38,6 +38,9 @@ export function usePollingLoop(
   let live = false
   /** When the last poll *started* — the throttle for the visibility catch-up. */
   let lastTickMs = 0
+  /** Polls currently in flight (a counter: a restart can briefly overlap the
+   *  old generation's last tick with the new one's first). */
+  let inFlight = 0
 
   function isCurrent(g: number): boolean {
     return g === gen && live
@@ -65,12 +68,18 @@ export function usePollingLoop(
     // Stamped on entry, not on completion: the throttle below must bound how
     // often a poll is *started*, or a slow tick would still let a burst queue up.
     lastTickMs = Date.now()
-    return Promise.resolve(tick(g)).catch(() => undefined)
+    inFlight += 1
+    return Promise.resolve(tick(g))
+      .catch(() => undefined)
+      .finally(() => {
+        inFlight -= 1
+      })
   }
 
   function schedule(g: number): void {
     if (g !== gen || !live) return
     timer = window.setTimeout(() => {
+      timer = null // fired — clearTimer must only ever cancel a *pending* poll
       if (g !== gen || !live) return
       if (document.hidden) {
         schedule(g) // stay armed; skip the poll while the tab is hidden
@@ -89,6 +98,12 @@ export function usePollingLoop(
     // ProblemPodsCard walks every pod in the cluster and its 60s cadence is
     // deliberate, and the metrics charts of the page behind it fire alongside it.
     if (Date.now() - lastTickMs < intervalMs()) return
+    // A poll still in flight *is* this cycle's poll — its `.finally` re-arms
+    // the timer. The throttle alone cannot see it (lastTickMs marks the start,
+    // so a tick outlasting the interval passes), and running the catch-up
+    // beside it would leave two `.finally` handlers each scheduling the same
+    // live generation: a permanently doubled chain.
+    if (inFlight > 0) return
     // Re-arm from now, replacing the pending timer: the catch-up *is* this
     // cycle's poll, and leaving the old timer would fire another one right
     // behind it. The generation is captured, like every other tick path, so a

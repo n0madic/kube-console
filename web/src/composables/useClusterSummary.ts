@@ -131,15 +131,18 @@ export function useClusterSummary() {
   }
 
   // Follow the active cluster: the Overview stays mounted across a context
-  // switch, so drop the previous cluster's snapshot and refetch immediately
-  // (subsequent polls already carry the new context header). Skipped when the
+  // switch, so drop the previous cluster's snapshot and restart the loop —
+  // stop()+start(), like ProblemPodsCard, because only the loop can stamp its
+  // own cadence: a raw refresh() would poll beside the still-armed timer, two
+  // full cluster summaries inside one interval. Polling stays stopped when the
   // new context has no session — a tokenless request would only 401.
   watch(
     () => auth.activeContext,
     () => {
+      loop.stop()
       data.value = null
       if (!auth.isAuthenticated) return
-      void refresh()
+      void loop.start()
     },
   )
 

@@ -19,6 +19,8 @@ import (
 	utilexec "k8s.io/client-go/util/exec"
 	"k8s.io/klog/v2"
 	"k8s.io/streaming/pkg/httpstream"
+
+	"github.com/n0madic/kube-console/internal/kube"
 )
 
 // ExecutorFactory builds a remotecommand.Executor for the exec URL; replaced
@@ -73,7 +75,7 @@ func (h *Handler) session(ctx context.Context, conn *websocket.Conn, releaseHand
 	// context fails closed with an error frame; the executor factory never runs.
 	up, _, err := h.registry.Resolve(auth.Context)
 	if err != nil {
-		_ = writeControl(ctx, conn, &writeMu, ControlFrame{Type: "error", Message: "unknown cluster context"})
+		_ = writeControl(ctx, conn, &writeMu, ControlFrame{Type: "error", Message: kube.UnknownContextMessage})
 		conn.Close(websocket.StatusPolicyViolation, "unknown context")
 		return
 	}
@@ -97,7 +99,19 @@ func (h *Handler) session(ctx context.Context, conn *websocket.Conn, releaseHand
 	// use-kubeconfig-credentials mode the copy already carries the context's own
 	// credentials and the frame's token is empty, so leave it alone — assigning
 	// would blank out whatever the kubeconfig authenticates with.
-	cfg := rest.CopyConfig(up.RestConfig)
+	// rest.CopyConfig shares the ExecProvider pointer and then writes through it
+	// (c.ExecProvider.Config = ...DeepCopyObject()), so copying the shared config
+	// would mutate it — and up.RestConfig is read concurrently by the readiness
+	// probe and every adapter. Detach the provider first: one exec-plugin
+	// kubeconfig plus two concurrent handshakes is otherwise a data race on
+	// state documented as never mutated after construction.
+	shared := up.RestConfig
+	if shared.ExecProvider != nil {
+		detached := *shared
+		detached.ExecProvider = shared.ExecProvider.DeepCopy()
+		shared = &detached
+	}
+	cfg := rest.CopyConfig(shared)
 	if !up.UseConfigCredentials {
 		cfg.BearerToken = auth.Token
 	}
@@ -166,12 +180,24 @@ func (h *Handler) session(ctx context.Context, conn *websocket.Conn, releaseHand
 	// alone cannot interrupt a blocked pipe write.
 	defer stdinReader.Close()
 	sizes := newSizeQueue()
+	// Staging stdin is bounded by bytes, not by blocking: a frame that would
+	// overrun the cap ends the session with the reason stated, because dropping
+	// it silently would corrupt the byte stream the command eventually reads.
+	// The cap is only reachable when the process in the container has stopped
+	// reading its input.
+	overflow := func() {
+		if !ending.CompareAndSwap(false, true) {
+			return
+		}
+		h.reportAndEnd(ctx, conn, &writeMu, end,
+			"exec session closed: too much unread input buffered — the process in the container is not reading stdin")
+	}
 	clientGone := make(chan struct{})
 	go func() {
-		readLoop(sessionCtx, conn, stdinWriter, sizes, activity)
+		readLoop(sessionCtx, conn, stdinWriter, sizes, activity, h.stdinBufferLimit, overflow)
 		close(clientGone)
 	}()
-	go pingLoop(sessionCtx, conn, clientGone, end)
+	go h.pingLoop(sessionCtx, conn, clientGone, end)
 
 	if err := writeControl(sessionCtx, conn, &writeMu, ControlFrame{Type: "ready"}); err != nil {
 		conn.Close(websocket.StatusInternalError, "failed to send ready")
@@ -223,12 +249,13 @@ func (h *Handler) idleFired(ctx context.Context, conn *websocket.Conn, mu *sync.
 	if !ending.CompareAndSwap(false, true) {
 		return
 	}
-	h.reportIdleTimeout(ctx, conn, mu, end)
+	h.reportAndEnd(ctx, conn, mu, end,
+		"exec session closed: idle timeout after "+h.idleTimeout.String())
 }
 
-// reportIdleTimeout tells the browser why its terminal is about to close, then
-// ends the session — in that order, and with the second step not conditional on
-// the first.
+// reportAndEnd tells the browser why its terminal is about to close, then ends
+// the session — in that order, and with the second step not conditional on the
+// first. Callers must have claimed the teardown first.
 //
 // The ordering is the point of the frame at all: cancelling makes
 // coder/websocket close the socket from under readLoop, so nothing written
@@ -236,22 +263,19 @@ func (h *Handler) idleFired(ctx context.Context, conn *websocket.Conn, mu *sync.
 // write must not gate `end`. writeMu is held for the whole of a stdout write,
 // and coder/websocket's Write blocks until the socket accepts the bytes or the
 // session context is done — so a client that stopped reading pins the lock, and
-// waiting for it here would mean the idle timeout can never fire for exactly
-// the session it exists to reclaim (cancelling is what unblocks that writer,
-// and the session slot is held until it does).
+// waiting for it here would mean the deadline can never fire for exactly the
+// session it exists to reclaim (cancelling is what unblocks that writer, and
+// the session slot is held until it does).
 //
 // Hence the frame goes out beside this call, bounded by idleFrameTimeout, and
 // the session ends either way. The goroutine is not leaked: end() cancels the
 // session, the stalled writer it is queued behind returns, and the write then
 // fails on the closed connection.
-func (h *Handler) reportIdleTimeout(ctx context.Context, conn *websocket.Conn, mu *sync.Mutex, end func()) {
+func (h *Handler) reportAndEnd(ctx context.Context, conn *websocket.Conn, mu *sync.Mutex, end func(), message string) {
 	sent := make(chan struct{})
 	go func() {
 		defer close(sent)
-		_ = writeControl(ctx, conn, mu, ControlFrame{
-			Type:    "error",
-			Message: "exec session closed: idle timeout after " + h.idleTimeout.String(),
-		})
+		_ = writeControl(ctx, conn, mu, ControlFrame{Type: "error", Message: message})
 	}()
 	timer := time.NewTimer(h.idleFrameTimeout)
 	defer timer.Stop()
@@ -343,8 +367,8 @@ func buildExecURL(cfg *rest.Config, auth *AuthFrame) (*url.URL, error) {
 // stops answering. Once clientGone is closed the peer is known to be gone and
 // awaitStream owns the teardown, so a failing ping must not cancel: it would
 // land inside the grace period and force the abrupt path.
-func pingLoop(ctx context.Context, conn *websocket.Conn, clientGone <-chan struct{}, cancel context.CancelFunc) {
-	ticker := time.NewTicker(30 * time.Second)
+func (h *Handler) pingLoop(ctx context.Context, conn *websocket.Conn, clientGone <-chan struct{}, cancel context.CancelFunc) {
+	ticker := time.NewTicker(h.pingInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -353,7 +377,7 @@ func pingLoop(ctx context.Context, conn *websocket.Conn, clientGone <-chan struc
 		case <-clientGone:
 			return
 		case <-ticker.C:
-			pingCtx, done := context.WithTimeout(ctx, 10*time.Second)
+			pingCtx, done := context.WithTimeout(ctx, h.pingTimeout)
 			err := conn.Ping(pingCtx)
 			done()
 			if err != nil {

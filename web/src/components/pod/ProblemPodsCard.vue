@@ -67,12 +67,14 @@ function reset(): void {
   errorText.value = null
 }
 
-// Monotonic id per scan, on top of the loop's generation: the loop's
-// visibilitychange catch-up starts a scan without knowing one is already
-// walking, and both carry the *same* live generation, so a slower earlier scan
-// would overwrite the newer rows and clear `loading` under it. Bumped by the
-// loop's onStop hook too, which is how a scan outstanding across a stop() is
-// dropped (useClusterSummary guards the same overlap the same way).
+// Monotonic id per scan, on top of the loop's generation, so that exactly one
+// scan owns the state writes. The loop now refuses to start a poll while one is
+// in flight, so two scans of the same generation cannot overlap — this is the
+// belt-and-braces half of that guarantee, and it is what the loop's onStop hook
+// is offered for: in-flight work its generation cannot see. A walk that outlives
+// a stop() is dropped either way (stop bumps the generation), which is why the
+// cheap check stays rather than being relied upon (useClusterSummary guards the
+// same way).
 let scanSeq = 0
 
 async function tick(gen: number): Promise<void> {

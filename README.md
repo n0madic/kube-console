@@ -127,6 +127,18 @@ Consequences worth planning for:
   name in `--trusted-proxies`. `X-Forwarded-For` is honored only for
   connections that actually arrive from one of those CIDRs — a request that
   reaches the pod some other way cannot pick its own bucket.
+- `--trusted-proxies` assumes two things about the CIDRs you name, and getting
+  either wrong silently costs you the limits it enables. **They must contain
+  proxies only.** The header is walked right to left and an address inside a
+  trusted CIDR is treated as a hop to skip, so a range that also covers your
+  clients (`10.0.0.0/8` when the pod network lives there) makes the walk skip
+  the real client and adopt the entry to its left — which the client wrote, so
+  it can mint a fresh bucket per request. **And those proxies must append a
+  per-client entry.** A proxy that forwards only `X-Real-IP`, or none at all,
+  leaves nothing to resolve, and every request through it keys on the proxy's
+  own address: one shared bucket for the whole team, which one busy tab can
+  spend. That is the safe direction of the two, but it is not the per-client
+  keying you enabled the CIDRs for.
 - A client that stops accepting its response is dropped after 30 seconds of no
   progress, so in-flight slots cannot be held hostage by simply not reading.
   The deadline is per write, not per response: a large download over a slow
@@ -228,9 +240,13 @@ switcher right below it, which is hidden when there is only one.
 
 Source resolution when `--api-server` is unset: an explicit `--kubeconfig`
 wins; otherwise, running in-cluster, the apiserver URL is derived from
-`KUBERNETES_SERVICE_HOST`/`PORT` and the CA from the mounted
-`serviceaccount/ca.crt` (when present); otherwise the standard kubeconfig is
+`KUBERNETES_SERVICE_HOST`/`PORT`; otherwise the standard kubeconfig is
 loaded — `$KUBECONFIG` (colon-separated list), then `~/.kube/config`.
+The mounted `serviceaccount/ca.crt` fills an empty `--ca-file` whenever the
+process runs in a pod, independently of where the apiserver URL came from —
+the two are separate settings, and coupling them meant `--api-server` in a pod
+silently fell back to the system roots and failed every request on TLS
+verification.
 `--context` selects the default context from whichever kubeconfig is used.
 Credentials are always stripped regardless of the source — except in the one
 local-development mode below.

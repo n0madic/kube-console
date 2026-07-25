@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -103,6 +104,40 @@ func TestLoadRejectsNegativeLimits(t *testing.T) {
 				t.Fatalf("expected an error for %s=-1", env)
 			}
 		})
+	}
+}
+
+// The concurrency knobs each size a channel-backed pool at a fixed multiple of
+// their value (8x MaxInFlight for the stream pool, 2x MaxExecSessions for the
+// exec pending pool), so a huge value must fail at startup like any other bad
+// config: past overflow the product makes make(chan) panic on a negative
+// capacity, and a product wrapping to exactly zero builds an unbuffered pool
+// that silently sheds every stream with a 429.
+func TestLoadRejectsHugeConcurrencyLimits(t *testing.T) {
+	for _, env := range []string{"KUBE_CONSOLE_MAX_IN_FLIGHT", "KUBE_CONSOLE_MAX_EXEC_SESSIONS"} {
+		// Just past the ceiling, then the overflow shapes: 8*2^60 goes negative,
+		// 8*2^61 and 2*2^62 wrap to zero on 64-bit int.
+		for _, val := range []string{
+			strconv.Itoa(maxConcurrencyLimit + 1),
+			"1152921504606846976", // 1<<60
+			"2305843009213693952", // 1<<61
+			"4611686018427387904", // 1<<62
+		} {
+			t.Run(env+"="+val, func(t *testing.T) {
+				t.Setenv("KUBE_API_SERVER", "https://kubernetes.default.svc")
+				t.Setenv(env, val)
+				if _, err := Load(nil); err == nil {
+					t.Fatalf("expected an error for %s=%s", env, val)
+				}
+			})
+		}
+	}
+	// The bound itself must not reject generous real values.
+	t.Setenv("KUBE_API_SERVER", "https://kubernetes.default.svc")
+	t.Setenv("KUBE_CONSOLE_MAX_IN_FLIGHT", strconv.Itoa(maxConcurrencyLimit))
+	t.Setenv("KUBE_CONSOLE_MAX_EXEC_SESSIONS", strconv.Itoa(maxConcurrencyLimit))
+	if _, err := Load(nil); err != nil {
+		t.Fatalf("a value at the ceiling must pass: %v", err)
 	}
 }
 
@@ -273,7 +308,8 @@ func TestLoadExplicitConfigOverridesInCluster(t *testing.T) {
 	t.Setenv(envServicePort, "443")
 	withCAFile(t, true)
 
-	// Explicit --api-server wins and no CA is auto-filled.
+	// Explicit --api-server wins for the URL; the mounted CA still fills in as
+	// the trust anchor (see TestLoadInClusterCAWithExplicitAPIServer).
 	t.Setenv("KUBE_API_SERVER", "")
 	t.Setenv("KUBE_CA_FILE", "")
 	cfg, err := Load([]string{"--api-server=https://explicit:6443"})
@@ -283,17 +319,47 @@ func TestLoadExplicitConfigOverridesInCluster(t *testing.T) {
 	if cfg.KubeAPIServer != "https://explicit:6443" {
 		t.Errorf("KubeAPIServer = %q, explicit flag must win over in-cluster", cfg.KubeAPIServer)
 	}
-	if cfg.KubeCAFile != "" {
-		t.Errorf("KubeCAFile = %q, in-cluster CA must not override explicit config", cfg.KubeCAFile)
+
+	// An explicit --ca-file is never overridden by the mounted one.
+	cfg, err = Load([]string{"--api-server=https://explicit:6443", "--ca-file=/etc/ca/ca.crt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KubeCAFile != "/etc/ca/ca.crt" {
+		t.Errorf("KubeCAFile = %q, explicit --ca-file must win over the mounted CA", cfg.KubeCAFile)
 	}
 
-	// Explicit --kubeconfig also suppresses in-cluster derivation.
+	// Explicit --kubeconfig also suppresses in-cluster URL derivation.
 	cfg, err = Load([]string{"--kubeconfig=/tmp/kc"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.KubeAPIServer != "" {
 		t.Errorf("KubeAPIServer = %q, --kubeconfig must suppress in-cluster derivation", cfg.KubeAPIServer)
+	}
+}
+
+// A pod that pins the apiserver URL via KUBE_API_SERVER still needs the
+// mounted cluster CA: the host source and the trust anchor are independent
+// settings, and without the CA every upstream round trip fails on the
+// apiserver's self-signed certificate with nothing naming the cause — the
+// readiness probe just stays unready.
+func TestLoadInClusterCAWithExplicitAPIServer(t *testing.T) {
+	t.Setenv("KUBE_API_SERVER", "https://explicit:6443")
+	t.Setenv("KUBE_CA_FILE", "")
+	t.Setenv(envServiceHost, "10.96.0.1")
+	t.Setenv(envServicePort, "443")
+	withCAFile(t, true)
+
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KubeAPIServer != "https://explicit:6443" {
+		t.Errorf("KubeAPIServer = %q, explicit env must win over in-cluster", cfg.KubeAPIServer)
+	}
+	if cfg.KubeCAFile != inClusterCAPath {
+		t.Errorf("KubeCAFile = %q, want the mounted in-cluster CA", cfg.KubeCAFile)
 	}
 }
 

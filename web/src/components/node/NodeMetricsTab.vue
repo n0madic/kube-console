@@ -9,7 +9,7 @@ import BaseSelect from "@/components/ui/BaseSelect.vue"
 import { useMetricsPolling } from "@/composables/useMetricsPolling"
 import { useAuthStore } from "@/stores/auth"
 import { usePreferencesStore } from "@/stores/preferences"
-import { getMetricsBuffer } from "@/utils/metricsCache"
+import { getMetricsBuffers } from "@/utils/metricsCache"
 import { METRICS_RANGE_OPTIONS, METRICS_RANGE_SECONDS } from "@/utils/metricsRanges"
 
 const props = defineProps<{ object: K8sObject }>()
@@ -22,8 +22,9 @@ const range = ref(prefs.prefs.metrics.defaultRange)
 // active context to keep each cluster's series separate.
 const cpuKey = () => `${auth.activeContext}:node:${props.object.metadata?.name ?? ""}:cpu`
 const memKey = () => `${auth.activeContext}:node:${props.object.metadata?.name ?? ""}:mem`
-const cpuBuffer = shallowRef(getMetricsBuffer(cpuKey()))
-const memBuffer = shallowRef(getMetricsBuffer(memKey()))
+const [initialCpu, initialMem] = getMetricsBuffers(cpuKey(), memKey())
+const cpuBuffer = shallowRef(initialCpu)
+const memBuffer = shallowRef(initialMem)
 
 function onSample(resp: MetricsResponse): void {
   const item = resp.items[0]
@@ -46,14 +47,22 @@ onMounted(() => void polling.start())
 // The detail page reuses this component across node navigations, so an in-place
 // node change must rebind to that node's cached buffers and restart polling —
 // otherwise the charts blend both nodes' series. Rebinding (vs. clearing) keeps
-// each node's history alive in the shared cache.
+// each node's history alive in the shared cache. Polling stays stopped when the
+// new context has no session — the switcher is already routing to /login, and
+// a tokenless capabilities probe would only 401 through the global handler,
+// replacing that redirect.
 watch(
   () => [props.object.metadata?.name, auth.activeContext],
   () => {
-    cpuBuffer.value = getMetricsBuffer(cpuKey())
-    memBuffer.value = getMetricsBuffer(memKey())
+    const [cpu, mem] = getMetricsBuffers(cpuKey(), memKey())
+    cpuBuffer.value = cpu
+    memBuffer.value = mem
     triggerRef(cpuBuffer)
     triggerRef(memBuffer)
+    if (!auth.isAuthenticated) {
+      polling.stop()
+      return
+    }
     void polling.start()
   },
 )

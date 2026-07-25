@@ -41,13 +41,26 @@ export const routes: RouteRecordRaw[] = [
   },
 ]
 
-export function createAppRouter() {
+/**
+ * `authModeReady` must settle before any route can be decided: in the local
+ * kubeconfig mode there is no session for `isAuthenticated` to fall back on, so
+ * a guard that runs before the mode is known reads "not authenticated" and sends
+ * the user to a login page that mode says does not exist — with no second
+ * navigation to correct it once the mode arrives.
+ *
+ * The guard awaits it rather than the caller ordering things, because installing
+ * the router — not `app.mount` — is what starts the first navigation, so there is
+ * no mount-time window to fill. Defaults to resolved for callers that construct
+ * a router without an auth probe (tests, route helpers).
+ */
+export function createAppRouter(authModeReady: Promise<void> = Promise.resolve()) {
   const router = createRouter({
     history: createWebHistory(),
     routes,
   })
 
-  router.beforeEach((to) => {
+  router.beforeEach(async (to) => {
+    await authModeReady
     const auth = useAuthStore()
     // TTL guard: drop every session past its lifetime, so no expired token is
     // left sitting in sessionStorage. Still-valid sessions for other clusters

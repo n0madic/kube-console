@@ -77,6 +77,19 @@ A kubeconfig `proxy-url` **keeps** its userinfo: it authenticates kube-console
 to the operator's egress proxy, goes only into `Proxy-Authorization` on the
 CONNECT hop, never reaches the apiserver or a client, and is never logged.
 
+`NewUpstream` therefore writes the parsed base **back** onto `RestConfig.Host`,
+so `Host` and `BaseURL` cannot disagree. exec is the one path that builds its URL
+from `Host` rather than `BaseURL`, and letting the two drift cost more than
+tidiness: a scheme-less host (`--api-server apiserver:6443`, or the same in a
+kubeconfig `server:` — neither requires a scheme) left `Host` scheme-less, and
+with no `--ca-file` client-go's `DefaultServerUrlFor` computes `defaultTLS =
+hasCA || hasCert || Insecure` = false and falls back to **`http://`**, which its
+websocket round tripper maps to `ws://` and then attaches the user's bearer to.
+So exec sent the token in cleartext while the gateway, `kube.Do` and `/readyz`
+all used TLS and startup logged the https form — invisible to the operator.
+Normalizing once also drops userinfo from `Host`, which `stripHostCredentials`
+only did when userinfo was present in the first place.
+
 **The one carve-out: `--use-kubeconfig-credentials`** (`Config.
 UseKubeconfigCredentials`). The invariant above stays the default and every
 deployed configuration; this flag is opt-in local development, where the
@@ -199,10 +212,26 @@ Kubernetes `Status` bodies.
   `StreamWithContext`.
 - `pingLoop` stops cancelling once `clientGone` is closed, so a ping failure
   cannot land inside the grace period and force the abrupt path. `readLoop` only
-  reads the socket; the blocking stdin-pipe write lives in `stdinPump` behind a
-  bounded queue (`stdinQueueDepth`) — a reader parked in that write sees neither
-  the client leaving nor a pong, and coder/websocket's `Ping` needs a concurrent
-  `Reader` to receive its pong, so healthy sessions were being killed.
+  reads the socket; the blocking stdin-pipe write lives in `stdinPump`.
+  `readLoop` must **never block anywhere but `conn.Read`**, and a bounded channel
+  was not enough: with the queue full its send parked the reader just as the pipe
+  write once did, coder/websocket's `Ping` needs a concurrent `Reader` to see its
+  pong, and a healthy session was killed 40s later (one 30s tick plus the 10s
+  pong deadline — measured). So the handoff is `stdinQueue`, a **byte**-bounded
+  staging buffer (`Handler.stdinBufferLimit`) whose `push` refuses instead of
+  blocking; exceeding it ends the session with the reason stated, never a silent
+  drop, which would corrupt the byte stream the command eventually reads. Each
+  frame is charged an overhead allowance on top of its payload, since interactive
+  input is one tiny frame per keystroke. `pingInterval`/`pingTimeout` are
+  `Handler` fields for the same reason `drainTimeout` is: the regression test has
+  to cross several keepalive cycles, and the case no earlier test covered is
+  **more** frames than the queue holds (the predecessor sent one, which parks
+  `stdinPump` and leaves `readLoop` in `conn.Read`).
+- The `websocket.Accept` failure is logged **without** `err`: coder/websocket
+  builds those messages out of inbound header values (Origin, Host, Connection,
+  Upgrade, Sec-WebSocket-Version, Sec-WebSocket-Key), and this endpoint is
+  pre-auth and rate-limited only if the operator opted in, so the error text is
+  client-controlled log volume. The client address is logged instead.
 
 **Tokens are never validated before forwarding** — the apiserver judges. That
 keeps the backend stateless, and it means whoever can reach kube-console can
@@ -226,13 +255,43 @@ hop is theirs). Hence the abuse limits:
   against those CIDRs before the header is read at all (`peerIn`), because chi's
   `ClientIPFromXFF` looks only at the header: traffic arriving off-ingress
   (Service, NodePort, port-forward, any pod) could otherwise name its own
-  limiter key per request. Off-proxy peers key by RemoteAddr.
+  limiter key per request. Off-proxy peers key by RemoteAddr — and that is the
+  *only* thing the `RemoteAddr` fallback in `ClientIP` does **not** cover, which
+  its comment used to claim it did: `ClientIPFromRemoteAddr` always stores the
+  peer, so with the resolver mounted the fallback is reached only by a request
+  *from* a trusted proxy whose XFF named no usable client (absent — a proxy
+  forwarding only `X-Real-IP` — unparsable, or entirely trusted hops), and it
+  then keys everyone behind that proxy on one shared bucket. Fail-closed, but the
+  opposite of what naming the CIDRs was for. Two assumptions therefore ride on
+  `--trusted-proxies`, both now documented in README/values.yaml: the CIDRs
+  contain **proxies only** (chi walks XFF right to left and skips trusted
+  entries, so a range covering your own pods makes the walk adopt the
+  client-written entry to the left — a fresh bucket per request), and those
+  proxies **append** a per-client entry.
 - `internal/server/limits.go` spends the resolved IP on one shared `httprate`
   budget (`--rate-limit`, per client per minute) alongside the
   address-independent concurrency cap (`--max-in-flight`). Both are mounted on
   `/k8s/*` **and** `/api/ui/*` — one limiter instance each, so the prefixes
   cannot be alternated to spend a budget twice — and outermost, ahead of body
   limits and dispatch, so a shed request costs only the check.
+- The **body read deadline** (`bodyReadTimeout`) is mounted on the **root**
+  router beside `WriteDeadline`, while the size cap (`maxBody`) stays
+  gateway-scoped. They were one gateway-only wrapper, which left every other
+  route with no bound on how slowly a body may arrive: `http.Server` sets
+  `ReadHeaderTimeout` and `IdleTimeout` but deliberately no `ReadTimeout`, and
+  net/http clears the header deadline once headers are read, so the post-handler
+  drain reads from the client unbounded — measured holding a connection open for
+  hours at a few bytes per second, unauthenticated, on `POST
+  /api/ui/auth/verify`'s own 401 path, the `/api` 404 and the SPA fallback
+  alike. It keeps the `methodHasBody` guard, so GET watch/log streams arm
+  nothing. The size cap can stay narrow because the one body-bearing
+  `/api/ui/*` route never reads its body.
+- `--max-in-flight` and `--max-exec-sessions` are bounded **above** in
+  `config.validate` as well as below: both are multiplied by a pool factor into
+  a `make(chan)`, so an absurd value overflowed `int` and either panicked at
+  startup (`makechan: size out of range`, an uncaught stack trace instead of the
+  clean config error every other bad value gets) or — worse, at `2^61`/`2^62` —
+  wrapped to exactly **0**, silently shedding every streaming request with a 429.
 - The in-flight cap routes what is long-lived by design (`gateway.IsStreaming`,
   exec WS via the `execWSPath` const shared with the route registration) into a
   **separate** pool of `streamPoolFactor`×`MaxInFlight`: counting watches
@@ -267,6 +326,21 @@ path (`api/http.ts`) never fires and the sidebar just breaks — and 403 stays
 403, because a cluster that unbinds `system:discovery` from
 `system:authenticated` is an RBAC denial, not an unreachable apiserver, and a
 502 sends the operator chasing network problems. Everything else is the 502.
+Three things keep that promise honest. The aggregated attempt and the legacy
+fallback get **half the budget each** rather than sharing one deadline: the
+aggregated path can spend four upstream calls (two Accept variants × `/apis` +
+`/api`), and burning the whole budget handed legacy a dead context — a 502 where
+legacy would have answered. When legacy then fails with an error carrying no
+status, the **aggregated** status is preferred, so a 401/403 is not masked by a
+fallback that died on the network. And `fetchLegacy` **errors when every**
+group-version failed (`len(groupVersions) > 0 && failed == len(...)`, surfacing a
+status-bearing error when one was seen, else `ctx.Err()`): per-group skipping is
+deliberate, so one broken aggregated API cannot break the sidebar, but returning
+`(nil, nil)` answered `200` with an empty catalog, and the SPA cannot tell that
+from an empty cluster — `useDiscovery` coerces with `?? []` and `Sidebar.vue`
+renders its error line only on `isError`, so a total failure painted a blank
+sidebar with no message. `Response.Resources` also serializes as `[]`, never
+`null`, the normalization `nonNilVerbs` already applies one level down.
 
 **Logs never contain headers, bodies or query strings** (RequestLogger).
 
@@ -313,9 +387,18 @@ as authorized. A restore that drops expired/tampered entries rewrites
 sessionStorage immediately; tests assert all of this with sentinel tokens.
 
 In the `--use-kubeconfig-credentials` mode none of this runs: `stores/auth.ts`
-holds a plain `localAuth` flag (set once in `main.ts` from `fetchAuthMode()`,
-awaited **before** `app.mount` because the route guard needs it on the first
-navigation; a fetch failure falls back to token mode, i.e. onto the login page).
+holds a plain `localAuth` flag (set once in `main.ts` from `fetchAuthMode()`; a
+fetch failure falls back to token mode, i.e. onto the login page). The **route
+guard awaits that probe** — `createAppRouter(authModeReady)`, `await
+authModeReady` as the guard's first line — and awaiting it before `app.mount`
+is *not* a substitute, which is what the code used to do: installing the router
+starts the first navigation, so the guard ran with `localAuth` still false, and
+in this mode there is no session for `isAuthenticated` to fall back on. It
+therefore redirected to a login page this mode says does not exist, with no
+later navigation to correct it — a login form on every page load, from which
+picking any context walked straight back into the app. Because an
+immediately-resolved probe can win the race, the bug was intermittent, so its
+regression test answers the probe a macrotask late.
 `isAuthenticated`/`hasSession` then answer true for every context and `token`
 reads `null` — **explicitly** so, not merely because no session exists: a record
 left over from a previous run in token mode would otherwise attach a stale
@@ -475,19 +558,41 @@ test:
 Re-arming is skipped while more than half the budget is still ahead of the armed
 deadline (no syscall per 32KiB chunk), so the effective bound on a stalled write
 is `[timeout/2, timeout]`. A drop is logged (`client stopped reading`,
-method/path only, once per response) because the abort path is otherwise silent:
-the ReverseProxy panics with `http.ErrAbortHandler`, `Recoverer` re-panics it
-and `RequestLogger` logs only after `ServeHTTP` returns.
+method/path only, once per response) because the ReverseProxy's abort path is
+otherwise quiet: it panics with `http.ErrAbortHandler`, which `Recoverer`
+deliberately re-panics. `RequestLogger` logs from a **defer** so its line
+survives that unwind — undeferred, every aborted stream (a closed tab on a watch
+or log follow) left no trace in the request log at all, and `reportTimeout` is
+no substitute since it fires only on `os.ErrDeadlineExceeded` and an ordinary
+disconnect is `EPIPE`/`ECONNRESET`. Both wrappers also implement
+`FlushError() error`, not just `Flush()`: `http.ResponseController` matches
+`FlushError` **first** and only then walks `Unwrap`, so a bare `Flush` swallowed
+the very deadline error this middleware exists to raise.
 
 Shutdown (`server.Run`, SIGINT/SIGTERM) grants a fixed 15s `srv.Shutdown()`
 before an unconditional `srv.Close()`, but streams need not ride it out:
 `Deps.ShutdownCtx` is threaded through `AbortOnShutdown` (same file), which
-wraps the `/k8s/*` gateway handler (matched via `gateway.IsStreaming` —
-`watch=true` or `.../log?follow=true`, parsed with the apiserver's own boolean
-semantics) and unconditionally wraps `/api/ui/exec/ws`. It cancels those
-contexts the instant shutdown starts — the ReverseProxy's `errorHandler` already
-treats `context.Canceled` as a silent client-gone case — so `srv.Shutdown()`
-only waits for ordinary short requests.
+wraps the `/k8s/*` gateway handler (matched via `gateway.IsStreaming`) and
+unconditionally wraps `/api/ui/exec/ws`. It cancels those contexts the instant
+shutdown starts, **with cause `httpx.ErrShutdown`** — the sentinel is what lets
+the ReverseProxy's `errorHandler` tell the two cancels apart, since a departed
+client and a shutdown abort are the same `context.Canceled` there: staying
+silent for the latter let net/http complete the response as an empty **200**,
+which a watch client reads as a clean end of stream, so a still-connected client
+now gets a 503 while a gone one is still answered with nothing. `srv.Shutdown()`
+then only waits for ordinary short requests.
+
+`IsStreaming` must agree with the apiserver about what streams, because a stream
+misread as unary pins a slot in the small unary pool for its whole lifetime and
+rides out the entire grace period. Two shapes were missed and are now covered:
+booleans go through `apiBoolValue`, an exact mirror of apimachinery's
+`Convert_Slice_string_To_bool` (absent → false; **present → true unless `0`/
+`false`**, so `?watch=yes|2|` all stream), because `strconv.ParseBool` rejects
+every one of those while the apiserver accepts them; and `isLegacyWatchPath`
+matches the deprecated watch prefix the apiserver still registers with watch
+forced on, keyed to the **segment position** (`/api/<v>/watch/…`,
+`/apis/<g>/<v>/watch/…`) so an object literally named `watch` deeper in the path
+does not match.
 
 ### Frontend: following the active cluster
 
@@ -510,8 +615,15 @@ Switching to an authorized context keeps the place (`resource-list`/Overview
 stay; `resource-detail` collapses to its list so the object-may-not-exist case
 cannot 404 and the detail watch/logs/terminal tear down cleanly); the namespace
 is kept if the new cluster has a same-named one, else reset to "all" (reconciled
-in `NamespaceSelector` when the new **complete** list loads — a truncated
-`limit=500` page with a continue token cannot prove absence and never resets).
+in `NamespaceSelector` when the new **complete** list loads — a truncated list
+with a continue token cannot prove absence and never resets). That list comes
+from `fetchNamespaces` (`api/k8s.ts`), a bounded continue walk (6×500, like
+`walkTable`) through `resourcePath` rather than a hardcoded `/k8s` URL, and it
+returns the final continue token so "complete" stays knowable. The select also
+renders an option for the **selected** namespace whenever it is missing from the
+loaded names, plus a disabled marker for a truncated list: a `v-model` value no
+`<option>` matches leaves the control blank while every list on screen is still
+filtered by it, and the value could not even be picked again.
 Switching to an unauthorized one redirects to `/login` bound to that context
 (with a `redirect` back to the current view, collapsed to the list for a detail
 page); context-scoped fetchers are gated on `isAuthenticated` (query `enabled`
@@ -529,11 +641,25 @@ in-flight verify ends by activating the context it was started for and would
 undo the switch. Picking a signed-in context switches `activeContext` and
 follows the `redirect` (same-origin paths only; `//host` would reach
 `history.pushState` as an off-site URL); picking another unauthorized one
-rebinds the form and clears the previous rejection message. A backend `400`
-"unknown cluster context" (removed upstream) resets `activeContext` to the
-default's **name** (from cached `["contexts"]` data — `""` would orphan a valid
-default session) and refetches; `useContexts`' reconcile likewise drops a
-vanished context to the default and routes to `/login` when it has no session.
+rebinds the form and clears the previous rejection message.
+
+A context removed upstream is noticed two ways — a backend `400` "unknown
+cluster context" on any request (`api/http.ts`) and the reconcile watch seeing
+it leave the list — and both go through **one** function,
+`recoverFromUnknownContext` (`useContexts.ts`), because they are one decision
+and drifted while they were two copies. It (1) ends that context's session via
+`clearSession`, the same single end-of-session path, since every request would
+carry the name the backend rejects, so nothing can spend the token and leaving
+it would keep the login page offering a dead cluster badged "signed in"; (2)
+falls back to the default's **name**, and to the *current* name when no list is
+known — never `""`, which resolves to no session and orphans every still-valid
+one, and the no-list case is the common one rather than a corner: fetching
+`["contexts"]` carries the rejected name too, so after a reload it has already
+failed exactly as the request did; (3) routes to `/login` when the fallback has
+no session, instead of leaving a protected view firing tokenless requests until
+one 401s; and (4) reports whether the caller should refetch the list — **not**
+when the fallback is the rejected name itself, since re-issuing the request that
+just failed re-enters the handler, which was a request loop with no backoff.
 
 ### Resource layer (fully generic)
 
@@ -569,6 +695,14 @@ cells and values are unchanged). What row identity does not cover is invalidated
 by hand: the column set, which decides which cells are visible, and `cellLink`
 itself. Without the memo every scroll frame allocated an array per rendered row
 and a wrapper per cell for a route that is `null` on every list but events.
+
+That invalidation is keyed on `columnDefs`, so the defs must be **content-keyed**
+and keep their previous array when nothing a def is built from changed. Their
+computed reaches `props.rows` (via `emptyColumnNames` and `defaultWidths`), so it
+re-ran on every watch event: the memo was dropped per event rather than per
+column-set change, and — since the defs are also what `useVueTable`'s `columns`
+getter returns — TanStack rebuilt every Column and the derived row model once per
+event on a table capped at 5000 rows.
 
 Cell text is one shared pair in `utils/tableCells.ts`, not a copy per util:
 `cellText` (objects → JSON, since a blank cell reads as "the server sent
@@ -606,7 +740,10 @@ pattern for the same reason `ContextListbox` is: the popup must not be at the
 browser's discretion. The list never filters — it exists to *show* what is on
 offer. An **unfocused** field shows the label of the option it currently holds
 and reveals the real command line on focus (caret sent to the start after a
-pick): the auto shell is a `sh -c` one-liner that otherwise fills the toolbar,
+pick — **after `nextTick`**, since Vue patches `:value` by assigning `el.value`
+and that setter drops a focused input's caret at the end, overriding a caret set
+synchronously): the auto shell is a `sh -c` one-liner that otherwise fills the
+toolbar,
 but editing must always start from what actually runs, so the alias never
 outlives the moment someone touches it — and `title` carries the command in
 either state. Every other preset's label *is* its command line, so only Auto is
@@ -722,7 +859,12 @@ garbage), rendered as interpolated `<span>`s so log text stays escaped — still
 no `v-html`. The scanner emits **original substrings**, never a `JSON.parse`
 round-trip, keeping int64 ids past 2^53, `1.0` and key order as written. A
 `level`/`severity`/`lvl` value (string or pino/bunyan number) is colored by
-severity, and an RFC3339 prefix from `timestamps=true` is kept as its own dimmed
+severity. `\r` counts as whitespace, which is not pedantry: the stream splits on
+`"\n"` alone, so a CRLF-writing container (a Windows image, some .NET/Java
+logging configs) leaves a trailing `\r` on **every** line, and treating it as
+trailing garbage silently dropped coloring — severity included — for the whole
+log with nothing saying why. An RFC3339 prefix from `timestamps=true` is kept as
+its own dimmed
 token so stamped lines still parse. `logTokenClass` returns the whole class in
 one expression (Tailwind order gotcha), and `LogViewer` memoizes tokens per line
 in a bounded per-instance cache, since visible rows are re-derived every scroll
@@ -778,7 +920,11 @@ Overview renders `spec`/`status` as a heuristic field tree, not JSON:
 scalar-array→chips / label-map→chips / flat homogeneous array→mini-table /
 object-array→titled items / object→collapsible group), so it covers CRDs too;
 `ObjectFieldTree.vue` renders it (long values, big subtrees and deep levels
-collapse). A per-section `compact` toggle (default on) cuts noise via
+collapse). Mini-table cells are read with **`Object.hasOwn`**, like `podEnv.ts`
+and `fieldFilter.ts`: the homogeneity check validates own keys only, so an item
+naming `constructor`/`toString`/`__proto__` (`JSON.parse` makes the last an own
+key) made a bare `item[col]` print an `Object.prototype` member into the cell of
+every *other* row. A per-section `compact` toggle (default on) cuts noise via
 `utils/fieldFilter.ts`: `pruneEmpty` drops `null`/`""`/`{}`/`[]`, and for `spec`
 `compactSpec` narrows to **user-declared** fields to hide apiserver defaults,
 best signal first: (1) the `last-applied-configuration` annotation (client-side
@@ -1024,6 +1170,10 @@ it is the one upstream-supplied string that ends up **in a path**
 `nameRe`-checked in `handler.go`. An advertised `preferredVersion` failing that
 check falls through to the first *usable* entry in `group.Versions` rather than
 failing the probe, so one unusable entry cannot hide a valid version behind it.
+The resolved version is cached per context for 5m, and a **404/503 from a data
+request drops that entry** so the next one re-probes: `cacheGroupVersion` had no
+counterpart, so a version the server stopped serving was replayed — and its 404
+forwarded, reporting a live metrics-server as absent — for the rest of the TTL.
 The frontend polls ≥15s only while the tab is visible, into in-memory ring
 buffers (240 samples, deduped by source timestamp). The floor is one constant
 for every metrics caller (`METRICS_MIN_INTERVAL_SECONDS`/`metricsIntervalMs` in
@@ -1033,7 +1183,21 @@ their own copy of it. `usePollingLoop` owns the cadence itself: **no** path
 starts a poll sooner than `intervalMs` after the last one, the catch-up when a
 hidden tab returns included (it used to fire per visibility flip, so ten
 alt-tabs meant ten cluster-wide pod walks; it now replaces the pending timer
-rather than running beside it). The buffers live in a shared
+rather than running beside it). Holding that guarantee needs an **`inFlight`
+counter**, because `lastTickMs` is stamped on *entry*: a tick outlasting the
+interval let the catch-up through, `clearTimer()` could not recall a timer that
+had already fired, and the loop split into two self-sustaining chains with the
+same generation — permanently, one more per flip, invisible because the callers'
+own seq guards discard the duplicate *data* but not the duplicate walk. So the
+catch-up returns while a poll is in flight (that poll *is* this cycle's, and its
+own `.finally` re-arms), and the timeout callback nulls `timer` as it fires so
+`clearTimer` only ever cancels something genuinely pending. It is a counter, not
+a flag: a restart briefly overlaps the old generation's last tick with the new
+one's first. A caller must therefore **restart the loop** rather than call its
+own refresh directly — `stop()` then `start()`, as `ProblemPodsCard` and now
+`useClusterSummary`'s context watch both do; a bare `refresh()` stamps nothing
+and leaves the armed timer to fire behind it (measured: two cluster-wide
+summaries 200ms apart on a switch). The buffers live in a shared
 cache (`utils/metricsCache.ts`) keyed per axis by context-prefixed scope
 (`<ctx>:pod:<uid>:cpu`, `<ctx>:node:<name>:cpu`, `<ctx>:ns:<namespace>:cpu`,
 `:mem`), so history survives screen/tab switches and a late response from the
@@ -1041,11 +1205,29 @@ previous cluster never lands in the new cluster's buffer (node/namespace names
 collide across clusters, hence the prefix). The three chart owners
 (`PodMetricsTab`, `NodeMetricsTab`, `NamespaceOverviewPage`) rebind their
 `shallowRef` to the cached buffer on scope **or** context change rather than
-clearing it (a per-scope key also stops node→node series from blending). The
-cache is memory-only (a refresh clears it), bounded (TTL 1h — the widest chart
-range — plus a 64-scope cap evicting the scope with the oldest newest-sample, so
-an actively updating chart never goes before a stale one) and adds **no** new
-browser storage. Ending a session wipes its series so a re-login never shows the
+clearing it (a per-scope key also stops node→node series from blending), and they
+bind **both axes in one `getMetricsBuffers(cpuKey(), memKey())` call**, which
+protects the whole set from eviction. Per-key protection was not enough: at the
+capacity bound the second bind evicted the first, since a just-created buffer has
+no samples yet and the empty-buffer rule picks it first — so the cpu series was
+dropped from the cache deterministically while mem survived, the chart on screen
+looked fine (the component still holds the handle) and the history vanished on
+the next remount. `getMetricsBuffer` is the single-scope form of the same call.
+The cache is memory-only (a refresh clears it), bounded (TTL 1h — the widest
+chart range — plus a 64-scope cap evicting the scope with the oldest
+newest-sample, so an actively updating chart never goes before a stale one) and
+adds **no** new browser storage.
+
+Those three watches are also gated on `auth.isAuthenticated` (and `stop()` the
+loop when it is false), like every sibling context watch: `start()` probes
+`/api/ui/metrics/capabilities` immediately, and after a switch to a cluster with
+no session that request carries no bearer, so its 401 ran the global handler and
+replaced the switcher's `/login?redirect=<view>` with a bare `/login`.
+
+`utils/podMetricsSeries.ts` reserves the `total` and `other` series labels: both
+are valid DNS-1123 names, so a container called either one silently replaced the
+pod aggregate (a line still labelled "total" plotting one container) or was
+swallowed by the rollup. Such a container is rendered as `<name> (container)`. Ending a session wipes its series so a re-login never shows the
 previous session's charts: Sign out, the 401 handler and TTL expiry all reach
 `evictContextCaches(context)` and evict only the ended context's `<ctx>:` scopes
 (`clearMetricsCacheContext`); the vue-query cache is pruned in the same call
@@ -1148,7 +1330,13 @@ only ever ages pods *out*, so no answer must not mean "hide".
   sessionStorage (Node ≥22 shadows jsdom's), ResizeObserver (needed by
   @tanstack/vue-virtual) and matchMedia (uPlot calls it at import time, so any
   test whose import graph reaches a chart needs it); component tests stub
-  `getBoundingClientRect` so the virtualizer renders rows.
+  `getBoundingClientRect` **and `offsetWidth`/`offsetHeight`** so the virtualizer
+  renders rows. The offsets matter as much as the rect: this @tanstack/virtual-core
+  measures the scroll element through them, they are always 0 in jsdom, and
+  without the stub the virtualizer rendered **zero** rows after mount — so every
+  post-`setProps` row assertion in `ResourceTable.spec` was passing against an
+  empty DOM. A row assertion that cannot fail is worse than no test; check that
+  new ones actually see rows.
 
 ## Gotchas
 
@@ -1157,9 +1345,18 @@ only ever ages pods *out*, so no answer must not mean "hide".
   once made red `Failed` statuses render neutral). Pick the full class in one
   expression.
 - `vite build` empties `web/dist`; `web/dist/.gitkeep` must exist for
-  backend-only builds (the Makefile re-touches it).
+  backend-only builds (the Makefile re-touches it). `web/dist` is in
+  `.dockerignore` and must stay there: the Docker build's `COPY . .` would
+  otherwise bring the host's previous bundle into the stage, the following
+  `COPY --from=web` **merges** without deleting, and `go:embed all:dist` would
+  bake another branch's content-hashed assets into the binary. CI never sees it
+  (only `.gitkeep` is tracked), which is exactly why it stayed invisible.
 - Status color-coding applies only to status-bearing columns (`isStatusColumn`),
-  otherwise names like "error-page" light up red.
+  otherwise names like "error-page" light up red. `statusTextClass` classifies a
+  cell **by its comma-separated parts**, worst severity winning: the Node printer
+  emits STATUS as a joined condition list, so matching the whole cell left every
+  cordoned node neutral — including `NotReady,SchedulingDisabled`, which rendered
+  exactly like a healthy one, while a bare `NotReady` was red.
 - The gateway blocklist makes objects literally named
   `exec`/`attach`/`portforward`/`proxy` unreachable — known limitation,
   documented in README.

@@ -36,13 +36,21 @@ export function isStatusColumn(columnName: string): boolean {
 /**
  * Returns a text color class for a cell value when it looks like an error or
  * warning status, or null for neutral values.
+ *
+ * kubectl's Node printer emits STATUS as a comma-joined condition list
+ * ("NotReady,SchedulingDisabled"), so the value is classified by its parts and
+ * the worst severity wins — matching only the whole cell would render a
+ * cordoned NotReady node exactly like a healthy one.
  */
 export function statusTextClass(value: string): string | null {
-  const v = value.trim().toLowerCase()
-  if (v === "") return null
-  if (ERROR_STATUSES.has(v) || ERROR_SUBSTRINGS.some((s) => v.includes(s))) {
-    return "text-red-600 dark:text-red-400 font-medium"
+  let warning = false
+  for (const part of value.split(",")) {
+    const v = part.trim().toLowerCase()
+    if (v === "") continue
+    if (ERROR_STATUSES.has(v) || ERROR_SUBSTRINGS.some((s) => v.includes(s))) {
+      return "text-red-600 dark:text-red-400 font-medium"
+    }
+    if (WARNING_STATUSES.has(v)) warning = true
   }
-  if (WARNING_STATUSES.has(v)) return "text-amber-600 dark:text-amber-400"
-  return null
+  return warning ? "text-amber-600 dark:text-amber-400" : null
 }

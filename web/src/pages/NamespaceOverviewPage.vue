@@ -14,7 +14,7 @@ import { useMetricsPolling } from "@/composables/useMetricsPolling"
 import { useAuthStore } from "@/stores/auth"
 import { usePreferencesStore } from "@/stores/preferences"
 import { useUiStore } from "@/stores/ui"
-import { getMetricsBuffer } from "@/utils/metricsCache"
+import { getMetricsBuffers } from "@/utils/metricsCache"
 import { METRICS_RANGE_OPTIONS, METRICS_RANGE_SECONDS } from "@/utils/metricsRanges"
 
 const ui = useUiStore()
@@ -26,8 +26,9 @@ const range = ref(prefs.prefs.metrics.defaultRange)
 // prefixed with the active context.
 const cpuKey = () => `${auth.activeContext}:ns:${ui.namespace}:cpu`
 const memKey = () => `${auth.activeContext}:ns:${ui.namespace}:mem`
-const cpuBuffer = shallowRef(getMetricsBuffer(cpuKey()))
-const memBuffer = shallowRef(getMetricsBuffer(memKey()))
+const [initialCpu, initialMem] = getMetricsBuffers(cpuKey(), memKey())
+const cpuBuffer = shallowRef(initialCpu)
+const memBuffer = shallowRef(initialMem)
 const latestItems = shallowRef<MetricsItem[]>([])
 /** Problem-pod count from the card below, relayed to the Pods gauge above it
  *  (with the scan's truncation, so the gauge can mark it as a floor). */
@@ -64,15 +65,23 @@ onMounted(() => void polling.start())
 
 // Namespace switch: rebind to that namespace's cached series (keeping each
 // namespace's history alive in the shared cache) and restart polling. The
-// TopPods snapshot has no cache, so it still resets.
+// TopPods snapshot has no cache, so it still resets. Polling stays stopped
+// when the new context has no session — the switcher is already routing to
+// /login, and a tokenless capabilities probe would only 401 through the
+// global handler, replacing that redirect.
 watch(
   () => [ui.namespace, auth.activeContext],
   () => {
-    cpuBuffer.value = getMetricsBuffer(cpuKey())
-    memBuffer.value = getMetricsBuffer(memKey())
+    const [cpu, mem] = getMetricsBuffers(cpuKey(), memKey())
+    cpuBuffer.value = cpu
+    memBuffer.value = mem
     latestItems.value = []
     triggerRef(cpuBuffer)
     triggerRef(memBuffer)
+    if (!auth.isAuthenticated) {
+      polling.stop()
+      return
+    }
     void polling.start()
   },
 )

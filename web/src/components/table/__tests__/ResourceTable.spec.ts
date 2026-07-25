@@ -1,12 +1,30 @@
 import { mount } from "@vue/test-utils"
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 
 import type { K8sTableColumn, K8sTableRow } from "@/api/types"
 import ResourceTable from "@/components/table/ResourceTable.vue"
 import { listToTable } from "@/utils/tableFallback"
 
-// Give the virtualizer a real viewport in jsdom.
+// Captures the options object handed to useVueTable so the `columns` getter's
+// identity can be observed from a test; the real implementation still runs.
+const captured = vi.hoisted(() => ({ options: undefined as { columns: unknown } | undefined }))
+vi.mock("@tanstack/vue-table", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tanstack/vue-table")>()
+  const useVueTable: typeof actual.useVueTable = (options) => {
+    captured.options = options as unknown as { columns: unknown }
+    return actual.useVueTable(options)
+  }
+  return { ...actual, useVueTable }
+})
+
+// Give the virtualizer a real viewport in jsdom. getBoundingClientRect covers
+// the initial mount; virtual-core measures the attached scroll element with
+// offsetWidth/offsetHeight (always 0 in jsdom, which has no layout), so those
+// need stubbing too or every re-render after mount collapses to zero rows —
+// and any post-update row assertion passes vacuously.
 const originalGetRect = Element.prototype.getBoundingClientRect
+const originalOffsetWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetWidth")!
+const originalOffsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight")!
 beforeAll(() => {
   Element.prototype.getBoundingClientRect = function () {
     return {
@@ -21,9 +39,19 @@ beforeAll(() => {
       toJSON: () => ({}),
     } as DOMRect
   }
+  Object.defineProperty(HTMLElement.prototype, "offsetWidth", {
+    configurable: true,
+    get: () => 1024,
+  })
+  Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+    configurable: true,
+    get: () => 640,
+  })
 })
 afterAll(() => {
   Element.prototype.getBoundingClientRect = originalGetRect
+  Object.defineProperty(HTMLElement.prototype, "offsetWidth", originalOffsetWidth)
+  Object.defineProperty(HTMLElement.prototype, "offsetHeight", originalOffsetHeight)
 })
 
 // RouterLink is resolved by the render function even when no cell links, so
@@ -358,6 +386,66 @@ describe("ResourceTable", () => {
     await wrapper.setProps({ columns: [{ name: "Reason", type: "string" }] })
     expect(wrapper.findAll("a")).toHaveLength(0)
     expect(wrapper.text()).not.toContain("pod/nginx-abc")
+  })
+
+  // The defs feed useVueTable's `columns` getter, and every watch event
+  // replaces props.rows — a fresh defs identity per event made TanStack
+  // rebuild every column and the derived row model once per event, and reset
+  // the cell-view memo with it.
+  it("keeps the column defs identity across a rows-only update", async () => {
+    const wrapper = mountTable(
+      [
+        { name: "Name", type: "string" },
+        { name: "Status", type: "string" },
+      ],
+      [
+        { cells: ["a", "Running"], object: { metadata: { name: "a", uid: "u1" } } },
+        { cells: ["b", "Running"], object: { metadata: { name: "b", uid: "u2" } } },
+      ],
+    )
+    const before = captured.options?.columns
+    expect(before).toBeDefined()
+
+    // A watch event: same column set, new rows array.
+    await wrapper.setProps({
+      rows: [
+        { cells: ["a", "Running"], object: { metadata: { name: "a", uid: "u1" } } },
+        { cells: ["c", "Pending"], object: { metadata: { name: "c", uid: "u3" } } },
+      ],
+    })
+    expect(captured.options?.columns).toBe(before)
+
+    // A column-set change must still yield new defs (and drop the memo).
+    await wrapper.setProps({ columns: [{ name: "Name", type: "string" }] })
+    expect(captured.options?.columns).not.toBe(before)
+  })
+
+  it("serves cell routes from the memo on re-renders, re-resolving on a column-set change", async () => {
+    const cellLink = vi.fn(() => null)
+    const wrapper = mount(ResourceTable, {
+      props: {
+        columns: [
+          { name: "Reason", type: "string" },
+          { name: "Object", type: "string" },
+        ],
+        rows: [
+          { cells: ["Killing", "pod/nginx-abc"], object: { metadata: { name: "e1", uid: "u1" } } },
+        ],
+        globalFilter: "",
+        cellLink,
+      },
+      global: { stubs },
+    })
+    const initialCalls = cellLink.mock.calls.length
+    expect(initialCalls).toBeGreaterThan(0)
+
+    // A re-render with unchanged rows and columns is served from the memo.
+    await wrapper.setProps({ loading: true })
+    expect(cellLink.mock.calls.length).toBe(initialCalls)
+
+    // A changed column set drops it: the remaining cells re-resolve.
+    await wrapper.setProps({ columns: [{ name: "Reason", type: "string" }] })
+    expect(cellLink.mock.calls.length).toBeGreaterThan(initialCalls)
   })
 
   it("renders plain cells when no cellLink is given", () => {

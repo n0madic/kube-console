@@ -52,6 +52,16 @@ const (
 // a browser tab shows a couple of dozen characters at best.
 const maxClusterNameRunes = 64
 
+// maxConcurrencyLimit bounds the concurrency knobs (MaxInFlight,
+// MaxExecSessions) from above. Each sizes a channel-backed pool at a small
+// fixed multiple of the value (the stream pool at 8x MaxInFlight, the exec
+// pending pool at 2x MaxExecSessions), so an absurd value overflows the
+// multiplied capacity: make(chan) panics on a negative product, and a product
+// that wraps to exactly zero builds an unbuffered pool that silently sheds
+// every stream. 2^20 concurrent requests is already far past what one process
+// can serve, so the ceiling costs nothing real.
+const maxConcurrencyLimit = 1 << 20
+
 // RateLimitWindow is the fixed window Config.RateLimit is counted over. It is
 // not configurable: one knob (requests per minute) is enough to tune, and a
 // second one only makes the two easy to set inconsistently.
@@ -285,22 +295,27 @@ func Load(args []string) (*Config, error) {
 }
 
 // applyInClusterDefaults fills the apiserver URL and CA from standard
-// in-cluster inputs when nothing more specific was configured. It only runs
-// when neither an explicit --api-server nor a --kubeconfig is set, so it never
-// overrides an operator's choice, and it reads only the public cluster CA —
-// never any ServiceAccount token.
+// in-cluster inputs, reading only the public cluster CA — never any
+// ServiceAccount token. The two are independent settings: the URL is a host
+// source and yields to anything more specific (--api-server, --kubeconfig),
+// so an operator's choice is never overridden, while the CA is a trust anchor
+// that an explicit --api-server still needs inside a pod — without it every
+// upstream round trip fails on the apiserver's self-signed certificate,
+// surfacing only as a permanently unready probe with nothing naming the
+// cause. An explicit --ca-file still wins: the CA fill is a no-op when
+// KubeCAFile is already set.
 func (c *Config) applyInClusterDefaults() {
-	if c.KubeAPIServer != "" || c.Kubeconfig != "" {
-		return
-	}
 	host, port := os.Getenv(envServiceHost), os.Getenv(envServicePort)
 	if host == "" || port == "" {
 		return
 	}
-	c.KubeAPIServer = "https://" + net.JoinHostPort(host, port)
 	if c.KubeCAFile == "" && caFileExists(inClusterCAPath) {
 		c.KubeCAFile = inClusterCAPath
 	}
+	if c.KubeAPIServer != "" || c.Kubeconfig != "" {
+		return
+	}
+	c.KubeAPIServer = "https://" + net.JoinHostPort(host, port)
 }
 
 func (c *Config) validate() error {
@@ -309,6 +324,9 @@ func (c *Config) validate() error {
 	// kube.RESTConfigs, which reports a clear error if nothing resolves.
 	if c.MaxExecSessions < 1 {
 		return fmt.Errorf("max exec sessions must be >= 1, got %d", c.MaxExecSessions)
+	}
+	if c.MaxExecSessions > maxConcurrencyLimit {
+		return fmt.Errorf("max exec sessions must be <= %d, got %d", maxConcurrencyLimit, c.MaxExecSessions)
 	}
 	if c.MaxBodyBytes < 1 {
 		return fmt.Errorf("max body bytes must be >= 1, got %d", c.MaxBodyBytes)
@@ -321,6 +339,9 @@ func (c *Config) validate() error {
 	}
 	if c.MaxInFlight < 0 {
 		return fmt.Errorf("max in-flight must be >= 0, got %d", c.MaxInFlight)
+	}
+	if c.MaxInFlight > maxConcurrencyLimit {
+		return fmt.Errorf("max in-flight must be <= %d, got %d", maxConcurrencyLimit, c.MaxInFlight)
 	}
 	// The cluster name is rendered into document.title. The SPA assigns it as
 	// text (no markup path), so this is not an escaping guard — it keeps a

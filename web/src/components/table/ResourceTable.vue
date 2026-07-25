@@ -109,8 +109,30 @@ const defaultWidths = computed(() => {
   return byId
 })
 
-const columnDefs = computed<ColumnDef<K8sTableRow, string>[]>(() =>
-  visibleColumns.value.map(({ col, index }) => ({
+// The defs feed useVueTable's `columns` getter, so their identity is what
+// TanStack rebuilds every Column — and each row's cells — on. This computed's
+// deps reach props.rows (through emptyColumnNames and defaultWidths), so it
+// re-runs per watch event; the previous array is kept whenever nothing a def is
+// built from changed, or a live table would rebuild the whole column model once
+// per event. The key covers every def input: visible column identity, default
+// size and description. The cell-view memo below keys its invalidation on this
+// identity too, so it is dropped exactly when the Cell objects it holds are
+// rebuilt.
+let cachedDefs: ColumnDef<K8sTableRow, string>[] = []
+let cachedDefsKey = ""
+const columnDefs = computed<ColumnDef<K8sTableRow, string>[]>(() => {
+  const widths = defaultWidths.value
+  const key = JSON.stringify(
+    visibleColumns.value.map(({ col, index }) => [
+      index,
+      col.name,
+      widths.get(`${index}-${col.name}`),
+      col.description ?? "",
+    ]),
+  )
+  if (key === cachedDefsKey) return cachedDefs
+  cachedDefsKey = key
+  cachedDefs = visibleColumns.value.map(({ col, index }) => ({
     id: `${index}-${col.name}`,
     header: col.name,
     accessorFn: (row: K8sTableRow) => cellText(row.cells[index]),
@@ -118,12 +140,13 @@ const columnDefs = computed<ColumnDef<K8sTableRow, string>[]>(() =>
     // Ages ("5m", "44d") and numbers must sort numerically, not as strings.
     sortingFn: (rowA, rowB, columnId) =>
       compareTableValues(rowA.getValue<string>(columnId), rowB.getValue<string>(columnId)),
-    size: defaultWidths.value.get(`${index}-${col.name}`) ?? 150,
+    size: widths.get(`${index}-${col.name}`) ?? 150,
     minSize: 50,
     maxSize: 900,
     meta: { description: col.description ?? "" },
-  })),
-)
+  }))
+  return cachedDefs
+})
 
 function defaultSorting(): SortingState {
   const wanted = props.defaultSort
@@ -207,9 +230,11 @@ interface CellView {
  * every list but events. Keyed on the Row object, which TanStack rebuilds
  * exactly when `data` changes (sorting and filtering reuse the instances) — so
  * a row in the cache is a row whose cells and values are unchanged. What is not
- * covered by row identity is invalidated by hand below: the column set decides
- * which cells are visible, and `cellLink` is rebuilt by its owner whenever it
- * would resolve differently (discovery loading, a namespace or cluster switch).
+ * covered by row identity is invalidated by hand below: columnDefs identity
+ * (content-keyed above), which changes exactly when TanStack rebuilds the Cell
+ * objects the cache holds — a rows-only update no longer resets it — and
+ * `cellLink`, rebuilt by its owner whenever it would resolve differently
+ * (discovery loading, a namespace or cluster switch).
  */
 let cellViewCache = new WeakMap<Row<K8sTableRow>, CellView[]>()
 watch([() => props.cellLink, columnDefs], () => {

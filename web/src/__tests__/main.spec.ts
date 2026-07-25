@@ -148,3 +148,160 @@ describe("main.ts unauthorized handling", () => {
     removeQueries.mockRestore()
   })
 })
+
+// The unknown-context recovery, driven the way a failing request drives it.
+//
+// Regression: the handler reset the active context to `""` whenever the cached
+// ["contexts"] entry was missing — three lines under a comment forbidding that
+// value, because sessions are keyed by resolved names, so `""` resolves to no
+// session and orphans every still-valid one. The cache miss is guaranteed in
+// exactly this state: fetching the context list carries the rejected
+// X-Kube-Context too, so on a reload it has failed just like this request. And
+// nothing routed anywhere, leaving the app on a protected view with every
+// context-scoped query gated off.
+describe("main.ts unknown-context handling", () => {
+  const UNKNOWN_CONTEXT_MESSAGE = "unknown cluster context"
+  const OTHER_SENTINEL = "SENTINEL-other-cluster-token"
+
+  /** Boots token mode where every /k8s request is rejected as an unknown context. */
+  async function bootUnknownContext(): Promise<() => number> {
+    let rejections = 0
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url === "/api/ui/auth/mode") return jsonResponse(200, { mode: "token" })
+        rejections++
+        return jsonResponse(400, {
+          kind: "Status",
+          status: "Failure",
+          message: UNKNOWN_CONTEXT_MESSAGE,
+          code: 400,
+        })
+      }),
+    )
+    await import("@/main")
+    await vi.waitFor(async () => {
+      const { useAuthStore } = await import("@/stores/auth")
+      expect(useAuthStore().localAuth).toBe(false)
+    })
+    return () => rejections
+  }
+
+  beforeEach(() => {
+    vi.resetModules()
+    vi.unstubAllGlobals()
+    window.sessionStorage.clear()
+    window.localStorage.clear()
+    document.body.innerHTML = '<div id="app"></div>'
+    window.history.replaceState({}, "", "/overview")
+    // Signed into the removed cluster AND into another one that must survive.
+    window.sessionStorage.setItem(
+      SESSION_KEY,
+      JSON.stringify({
+        activeContext: "prod-old",
+        sessions: {
+          "prod-old": {
+            token: SENTINEL,
+            identity: null,
+            identityUnavailable: false,
+            expiresAt: Date.now() + 60 * 60 * 1000,
+          },
+          staging: {
+            token: OTHER_SENTINEL,
+            identity: null,
+            identityUnavailable: false,
+            expiresAt: Date.now() + 60 * 60 * 1000,
+          },
+        },
+      }),
+    )
+  })
+
+  it("keeps a valid session for another cluster reachable and lands on login", async () => {
+    await bootUnknownContext()
+    const { apiFetch } = await import("@/api/http")
+    const { useAuthStore } = await import("@/stores/auth")
+
+    await expect(apiFetch("/k8s/api/v1/pods")).rejects.toMatchObject({ status: 400 })
+    await vi.waitFor(() => expect(window.location.pathname).toBe("/login"))
+
+    const auth = useAuthStore()
+    // Never "": that is what orphaned the other cluster's session.
+    expect(auth.activeContext).not.toBe("")
+    // The still-valid cluster is offered as a way back in.
+    expect(auth.signedInContexts()).toContain("staging")
+    expect(window.sessionStorage.getItem(SESSION_KEY)).toContain(OTHER_SENTINEL)
+    // The rejected cluster's token is gone: no request can spend it any more.
+    expect(window.sessionStorage.getItem(SESSION_KEY) ?? "").not.toContain(SENTINEL)
+  })
+
+  // Regression: with the fallback default itself rejected, the handler wrote the
+  // same name back (no state change), invalidated ["contexts"], and that refetch
+  // 400'd straight back into the handler — a request loop with no backoff,
+  // bounded only by the user navigating away.
+  it("does not loop when the fallback default is rejected too", async () => {
+    const rejections = await bootUnknownContext()
+    const { apiFetch } = await import("@/api/http")
+    const { QueryClient } = await import("@tanstack/vue-query")
+    const { useAuthStore } = await import("@/stores/auth")
+
+    // A cached list naming the active context as the default: the recovery has
+    // nowhere else to go.
+    useAuthStore().setActiveContext("prod-old")
+    QueryClient.prototype.getQueryData = function () {
+      return { contexts: [{ name: "prod-old" }], default: "prod-old" }
+    } as typeof QueryClient.prototype.getQueryData
+
+    await expect(apiFetch("/k8s/api/v1/pods")).rejects.toMatchObject({ status: 400 })
+    const afterFirst = rejections()
+    // Long enough for a refetch-driven loop to show itself.
+    await new Promise((resolve) => setTimeout(resolve, 400))
+
+    expect(rejections()).toBe(afterFirst)
+    expect(window.location.pathname).toBe("/login")
+  })
+})
+
+// Regression: installing the router — not app.mount — is what starts the first
+// navigation, so awaiting the auth-mode probe before mounting left the guard
+// deciding with localAuth still false. In the kubeconfig mode there is no
+// session for isAuthenticated to fall back on, so the guard redirected to a
+// login page that mode says does not exist, and no later navigation corrected
+// it: the user landed on a login form on every page load, and picking any
+// context walked straight back into the app. The race made it intermittent —
+// an immediately-resolved probe could win — so the probe here answers a
+// macrotask later, the way a real round trip does.
+describe("main.ts auth mode before the first navigation", () => {
+  beforeEach(() => {
+    vi.resetModules()
+    vi.unstubAllGlobals()
+    window.sessionStorage.clear()
+    window.localStorage.clear()
+    document.body.innerHTML = '<div id="app"></div>'
+    window.history.replaceState({}, "", "/overview")
+  })
+
+  it("does not send a kubeconfig-mode user to login while the mode is unknown", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input) === "/api/ui/auth/mode") {
+          await new Promise((resolve) => setTimeout(resolve, 20))
+          return jsonResponse(200, { mode: "kubeconfig" })
+        }
+        return jsonResponse(200, { kind: "Status", items: [] })
+      }),
+    )
+
+    await import("@/main")
+    await vi.waitFor(async () => {
+      const { useAuthStore } = await import("@/stores/auth")
+      expect(useAuthStore().localAuth).toBe(true)
+    })
+    // Long enough for a redirect (a lazily imported route chunk) to land.
+    await new Promise((resolve) => setTimeout(resolve, 200))
+
+    expect(window.location.pathname).toBe("/overview")
+  })
+})

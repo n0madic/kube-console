@@ -1,3 +1,9 @@
 .git
 bin/
 node_modules
+# The SPA is built in its own stage and copied in afterwards. A host-built
+# web/dist must never enter the context: COPY merges into an existing
+# directory without deleting, so a previous branch's content-hashed assets
+# would survive alongside the fresh ones and go:embed would bake both in.
+web/dist
+web/node_modules

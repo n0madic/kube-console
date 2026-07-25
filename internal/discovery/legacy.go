@@ -3,6 +3,7 @@ package discovery
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -44,8 +45,10 @@ func fetchLegacy(ctx context.Context, up *kube.Upstream, token string, logger *s
 	}
 
 	var (
-		mu  sync.Mutex
-		out []Resource
+		mu      sync.Mutex
+		out     []Resource
+		failed  int
+		lastErr error
 	)
 	eg, egCtx := errgroup.WithContext(ctx)
 	eg.SetLimit(8)
@@ -54,6 +57,15 @@ func fetchLegacy(ctx context.Context, up *kube.Upstream, token string, logger *s
 			var list metav1.APIResourceList
 			if err := getJSON(egCtx, up, token, gv.path, &list); err != nil {
 				logger.Warn("skipping unavailable API group version", "path", gv.path, "error", err)
+				mu.Lock()
+				failed++
+				// A status-bearing error wins the slot: it is what the handler
+				// can map back to 401/403.
+				var se *statusError
+				if lastErr == nil || (errors.As(err, &se) && !errors.As(lastErr, &se)) {
+					lastErr = err
+				}
+				mu.Unlock()
 				return nil
 			}
 			mu.Lock()
@@ -79,6 +91,20 @@ func fetchLegacy(ctx context.Context, up *kube.Upstream, token string, logger *s
 	}
 	if err := eg.Wait(); err != nil {
 		return nil, err
+	}
+	// Skipping is per group-version, so one broken aggregated API cannot break
+	// the sidebar — but when every single one failed there is no catalog to
+	// serve, and a 200 with an empty list is indistinguishable from an empty
+	// cluster. Surface a status-bearing error when one was seen (an all-403
+	// fan-out is an RBAC denial and must forward as 403, not 502), else the
+	// context error (an expired budget fails the whole fan-out at once).
+	if len(groupVersions) > 0 && failed == len(groupVersions) {
+		err := lastErr
+		var se *statusError
+		if !errors.As(lastErr, &se) && ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		return nil, fmt.Errorf("legacy discovery: every group version failed: %w", err)
 	}
 	return out, nil
 }

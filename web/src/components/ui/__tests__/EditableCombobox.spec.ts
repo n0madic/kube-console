@@ -1,5 +1,6 @@
 import { mount } from "@vue/test-utils"
 import { describe, expect, it } from "vitest"
+import { nextTick } from "vue"
 
 import EditableCombobox from "@/components/ui/EditableCombobox.vue"
 
@@ -62,6 +63,28 @@ describe("EditableCombobox", () => {
 
     expect(wrapper.emitted("update:modelValue")).toEqual([["/bin/bash"]])
     expect(wrapper.findAll("[role='option']")).toHaveLength(0)
+  })
+
+  // Vue flushes `:value="display"` by assigning el.value, which moves a
+  // focused input's caret to the end — so a caret placed before the flush ends
+  // up at the tail of the long `sh -c` one-liner, exactly where a pick was
+  // meant not to leave the user.
+  it("puts the caret at the start of the picked command", async () => {
+    const wrapper = mount(EditableCombobox, {
+      props: { options, modelValue: "/bin/bash", label: "Command" },
+      attachTo: document.body,
+    })
+    const input = wrapper.get("input")
+    await wrapper.get("button").trigger("click")
+    await wrapper.findAll("[role='option']")[0]!.trigger("click")
+    await nextTick()
+
+    // The field holds the picked one-liner (focused, so no label alias) and
+    // the caret sits on its head, not past its tail.
+    expect(input.element.value).toBe(options[0]!.value)
+    expect(input.element.selectionStart).toBe(0)
+    expect(input.element.selectionEnd).toBe(0)
+    wrapper.unmount()
   })
 
   it("opens with ArrowDown and picks with Enter, starting from the current value", async () => {

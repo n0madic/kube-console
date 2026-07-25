@@ -68,6 +68,16 @@ func (h *Handler) cacheGroupVersion(context, version string) {
 	h.versions[context] = cacheEntry{version: version, at: time.Now()}
 }
 
+// dropGroupVersion invalidates the cached version for a context so the next
+// request re-probes: a version the server no longer serves (metrics-server
+// upgraded mid-TTL) would otherwise be replayed — and its 404 forwarded — for
+// the rest of the TTL.
+func (h *Handler) dropGroupVersion(context string) {
+	h.versionMu.Lock()
+	defer h.versionMu.Unlock()
+	delete(h.versions, context)
+}
+
 // NewHandler builds the metrics adapter.
 func NewHandler(reg *kube.Registry, enabled bool) *Handler {
 	return &Handler{registry: reg, enabled: enabled, versions: map[string]cacheEntry{}}
@@ -197,6 +207,11 @@ func (h *Handler) fetch(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	}
 	if resp.StatusCode != http.StatusOK {
 		// Pass 403/404/503 (and anything else) through with the upstream body.
+		// A 404/503 may also mean the cached version went stale under us, so it
+		// stops being replayed: the next request re-probes.
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusServiceUnavailable {
+			h.dropGroupVersion(contextName)
+		}
 		httpx.CopyUpstreamError(w, resp)
 		return nil, false
 	}

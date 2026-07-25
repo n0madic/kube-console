@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"strconv"
 	"strings"
 
 	"github.com/n0madic/kube-console/internal/httpx"
@@ -132,14 +131,25 @@ func (g *Gateway) rewriteFor(up *kube.Upstream) func(*httputil.ProxyRequest) {
 		out.URL.Host = base.Host
 		out.URL.Path = unescaped
 		out.URL.RawPath = escaped
-		// Query string (watch, limit, continue, selectors, ...) passes through.
-		out.URL.RawQuery = pr.In.URL.RawQuery
+		// The query (watch, limit, continue, selectors, ...) passes through on
+		// Out as net/http sanitized it: ReverseProxy re-encodes the inbound
+		// query right before Rewrite runs, dropping semicolon-separated and
+		// unparsable parameters (CVE-2022-2880). Copying pr.In's RawQuery over
+		// it would restore exactly what that cleaning removed.
 		// Upstream Host comes strictly from backend config, never from the client.
 		out.Host = base.Host
 	}
 }
 
 func (g *Gateway) errorHandler(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(context.Cause(r.Context()), httpx.ErrShutdown) {
+		// AbortOnShutdown cancelled the request while the client is still
+		// connected. Staying silent — as for a departed client below — would
+		// let net/http complete the response as an empty 200, which a watch
+		// client reads as a clean end of stream.
+		httpx.WriteError(w, http.StatusServiceUnavailable, "ServiceUnavailable", "server is shutting down")
+		return
+	}
 	if errors.Is(err, context.Canceled) {
 		// Client went away; nothing to report.
 		return
@@ -149,29 +159,70 @@ func (g *Gateway) errorHandler(w http.ResponseWriter, r *http.Request, err error
 		httpx.WriteError(w, http.StatusRequestEntityTooLarge, "RequestEntityTooLarge", "request body too large")
 		return
 	}
-	// Never include err details that could echo request contents; log only
-	// the method and path (no query, no headers).
-	g.logger.Warn("gateway upstream error", "method", r.Method, "path", r.URL.Path)
+	// err is safe to log here: ErrorHandler receives the transport's own error
+	// (*net.OpError, x509/TLS verification, DNS, timeouts), never the
+	// *url.Error wrapper http.Client adds — the one type that stringifies the
+	// request URL, query included — and the sole stdlib message that echoes
+	// client input (invalid upgrade protocol) is unreachable because Upgrade
+	// requests are rejected before proxying. Headers and bodies never enter
+	// transport errors, so only method and path may name the request.
+	g.logger.Warn("gateway upstream error", "method", r.Method, "path", r.URL.Path, "error", err)
 	httpx.WriteError(w, http.StatusBadGateway, "ServiceUnavailable", "upstream kube-apiserver is unreachable")
 }
 
-// IsStreaming reports whether r is a Kubernetes watch (?watch=true) or a pod
-// log follow (.../log?follow=true) request — the two /k8s/* request shapes
-// that can run indefinitely instead of returning promptly. The server uses
-// this to abort exactly these requests on shutdown rather than waiting out
-// srv.Shutdown()'s grace period, which would otherwise also delay unrelated
-// short requests still in flight. Boolean parsing matches how the apiserver
-// itself decodes these query params (ParseBool, not a strict "true" match).
+// IsStreaming reports whether r is a Kubernetes watch or a pod log follow
+// request — the /k8s/* request shapes that can run indefinitely instead of
+// returning promptly. The server uses this to abort exactly these requests on
+// shutdown rather than waiting out srv.Shutdown()'s grace period, and to
+// route them into the streaming in-flight pool instead of the unary one. A
+// watch is either ?watch on a collection or the legacy watch prefix the
+// apiserver still registers (watch forced on regardless of query), so both
+// shapes must count: a stream misread as unary pins a unary slot for its
+// whole lifetime and rides out the entire shutdown grace.
 func IsStreaming(r *http.Request) bool {
 	q := r.URL.Query()
-	if watch, _ := strconv.ParseBool(q.Get("watch")); watch {
+	if apiBoolValue(q, "watch") {
 		return true
 	}
-	if !strings.HasSuffix(r.URL.Path, "/log") {
+	if isLegacyWatchPath(strings.TrimPrefix(r.URL.Path, Prefix)) {
+		return true
+	}
+	return strings.HasSuffix(r.URL.Path, "/log") && apiBoolValue(q, "follow")
+}
+
+// apiBoolValue decodes a boolean query parameter the way the apiserver does
+// (apimachinery's Convert_Slice_string_To_bool): absent → false; present →
+// true unless the first value is "0" or "false" (case-insensitive). So
+// "?watch=yes", "?watch=2" and even "?watch=" — present with an empty value —
+// all turn the stream on upstream, which is why presence is read off the
+// values slice and never via q.Get, and why strconv.ParseBool (which rejects
+// all of those) must not stand in for it.
+func apiBoolValue(q url.Values, key string) bool {
+	vals := q[key]
+	if len(vals) == 0 {
 		return false
 	}
-	follow, _ := strconv.ParseBool(q.Get("follow"))
-	return follow
+	return vals[0] != "0" && !strings.EqualFold(vals[0], "false")
+}
+
+// isLegacyWatchPath reports whether the (Prefix-stripped) path uses the
+// deprecated watch prefix, which the apiserver registers with watch forced
+// on: "watch" must sit exactly where that prefix puts it — segment 2 of
+// /api/<version>/watch/... or segment 3 of /apis/<group>/<version>/watch/...
+// — so an object literally named "watch" deeper in the path (e.g.
+// /api/v1/namespaces/ns/configmaps/watch) never matches.
+func isLegacyWatchPath(path string) bool {
+	if path == "" || path[0] != '/' {
+		return false
+	}
+	segments := strings.Split(path[1:], "/")
+	switch segments[0] {
+	case "api":
+		return len(segments) > 2 && segments[2] == "watch"
+	case "apis":
+		return len(segments) > 3 && segments[3] == "watch"
+	}
+	return false
 }
 
 func headerContainsToken(h http.Header, name, token string) bool {

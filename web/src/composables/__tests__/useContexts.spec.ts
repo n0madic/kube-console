@@ -21,6 +21,8 @@ vi.mock("@tanstack/vue-query", () => ({
 const push = vi.fn()
 vi.mock("vue-router", () => ({ useRouter: () => ({ push }) }))
 
+const SESSION_KEY = "kube-console.session.v1"
+
 import { useContexts } from "@/composables/useContexts"
 import { useAuthStore } from "@/stores/auth"
 
@@ -76,6 +78,11 @@ describe("useContexts", () => {
     expect(auth.activeContext).toBe("alpha")
     // The default still has a valid session: stay on the current view.
     expect(push).not.toHaveBeenCalled()
+    // The vanished cluster's token goes with it: nothing can spend it (every
+    // request would carry the name the backend rejects), and leaving it would
+    // keep the login page offering that cluster badged "signed in".
+    expect(auth.signedInContexts()).toEqual(["alpha"])
+    expect(window.sessionStorage.getItem(SESSION_KEY) ?? "").not.toContain("tok-g")
   })
 
   // Regression: landing on a sessionless default must go to login immediately

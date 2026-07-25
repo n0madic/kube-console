@@ -260,6 +260,50 @@ func TestVersionCachedAcrossDataRequests(t *testing.T) {
 	}
 }
 
+// Regression: a cached metrics API version had no invalidation, so a version
+// the server stopped serving (metrics-server upgraded mid-TTL) had its 404
+// forwarded verbatim for the rest of the TTL — every chart read a live
+// metrics-server as absent. A 404/503 data response drops the entry and the
+// next request re-probes.
+func TestStaleCachedVersionReprobedAfter404(t *testing.T) {
+	var served atomic.Value
+	served.Store("v1beta1")
+	var probes atomic.Int32
+	h := newMetricsRouter(t, true, func(w http.ResponseWriter, r *http.Request) {
+		version := served.Load().(string)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/apis/metrics.k8s.io":
+			probes.Add(1)
+			_, _ = w.Write([]byte(`{"kind":"APIGroup","name":"metrics.k8s.io",
+				"preferredVersion":{"groupVersion":"metrics.k8s.io/` + version + `","version":"` + version + `"}}`))
+		case "/apis/metrics.k8s.io/" + version + "/nodes":
+			_, _ = w.Write([]byte(`{"items":[]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"kind":"Status","status":"Failure","reason":"NotFound","code":404}`))
+		}
+	})
+
+	// Prime the cache with v1beta1.
+	if rec := getMetrics(h, "/api/ui/metrics/nodes"); rec.Code != http.StatusOK {
+		t.Fatalf("prime: status = %d: %s", rec.Code, rec.Body.String())
+	}
+	// The upstream now serves v1 only; the cached v1beta1 path 404s, forwarded
+	// with the upstream body as before...
+	served.Store("v1")
+	if rec := getMetrics(h, "/api/ui/metrics/nodes"); rec.Code != http.StatusNotFound {
+		t.Fatalf("stale version: status = %d, want the upstream 404: %s", rec.Code, rec.Body.String())
+	}
+	// ...but is not replayed: the next request re-probes and succeeds.
+	if rec := getMetrics(h, "/api/ui/metrics/nodes"); rec.Code != http.StatusOK {
+		t.Fatalf("after re-probe: status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := probes.Load(); got != 2 {
+		t.Fatalf("capability probe hit %d times, want 2 (prime + re-probe after the stale 404)", got)
+	}
+}
+
 // The version cache is keyed per context: two clusters running different
 // metrics.k8s.io versions must not bleed into one another.
 func TestVersionCacheIsolatedPerContext(t *testing.T) {

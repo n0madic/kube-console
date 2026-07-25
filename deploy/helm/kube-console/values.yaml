@@ -70,6 +70,15 @@ limits:
   # X-Forwarded-For is ignored while this is empty, and ignored anyway for
   # connections that do not arrive from one of these CIDRs, because the header
   # is client-supplied and would otherwise be a free bucket per request.
+  #
+  # List proxies ONLY, as narrowly as you can. The header is walked right to
+  # left and an address inside a trusted CIDR counts as a hop to skip, so a
+  # range that also covers your pods or clients (10.0.0.0/8 with the pod
+  # network in it) makes the walk skip the real client and trust the entry to
+  # its left — which the client wrote, so it can pick a fresh bucket per
+  # request. The proxies must also append a per-client entry: one forwarding
+  # only X-Real-IP leaves nothing to resolve, and every request through it
+  # keys on the proxy's own address, i.e. one shared bucket for everyone.
   trustedProxies: []
 
 logLevel: info

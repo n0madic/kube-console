@@ -6,7 +6,7 @@
 // So it is built by hand, following ARIA's editable-combobox pattern: the
 // input owns the focus and the popup is pointed at with aria-activedescendant.
 
-import { computed, onBeforeUnmount, onMounted, ref, useId } from "vue"
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId } from "vue"
 
 import AppIcon from "@/components/ui/AppIcon.vue"
 
@@ -89,7 +89,7 @@ function move(delta: number): void {
   activeIndex.value = Math.min(Math.max(highlighted.value + delta, 0), props.options.length - 1)
 }
 
-function pick(index: number): void {
+async function pick(index: number): Promise<void> {
   const option = props.options[index]
   close()
   if (option === undefined) return
@@ -97,8 +97,12 @@ function pick(index: number): void {
   // Focus returns to the combobox (it is the only tab stop), which means the
   // field shows the picked command line rather than its label — so put the
   // caret at the start, where the command itself is, not at the end of a long
-  // script the pick was meant to spare the user from reading.
+  // script the pick was meant to spare the user from reading. Only after the
+  // DOM flush: Vue patches `:value="display"` by assigning el.value, and the
+  // value setter moves a focused input's caret to the end, so a caret placed
+  // synchronously would be overridden by the very update that needs it.
   input.value?.focus()
+  await nextTick()
   input.value?.setSelectionRange(0, 0)
 }
 

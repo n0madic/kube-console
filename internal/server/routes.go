@@ -35,10 +35,11 @@ func NewHandler(d Deps) http.Handler {
 		d.ShutdownCtx = context.Background()
 	}
 	r := chi.NewRouter()
-	// RequestLogger is outermost so it logs even panicked requests: Recoverer,
-	// nested inside, converts the panic into a 500 on the same statusWriter
-	// before control returns to the logger. (RequestLogger records the status
-	// after next.ServeHTTP returns, so a panic escaping it would be unlogged.)
+	// RequestLogger is outermost and logs from a defer, so the line survives
+	// even http.ErrAbortHandler — the one panic Recoverer deliberately
+	// re-panics, and how every stream the ReverseProxy aborts ends. For
+	// ordinary panics Recoverer, nested inside, converts them into a 500 on the
+	// same statusWriter before the deferred log records the status.
 	r.Use(RequestLogger(d.Logger))
 	r.Use(Recoverer(d.Logger))
 	// The credential carve-out's second fence, and the one the listen address
@@ -64,6 +65,11 @@ func NewHandler(d Deps) http.Handler {
 	// in-flight slot and its upstream connection open forever. Per-write, not
 	// per-response: an idle watch performs no write and is never affected.
 	r.Use(WriteDeadline(d.Cfg.ResponseWriteTimeout, d.Logger))
+	// The read-side counterpart, root-mounted for the same reason: net/http
+	// drains up to 256KiB of unread body after ANY handler returns, before the
+	// response headers go out, so a slow-dripped POST to an /api adapter or the
+	// SPA fallback holds a connection just as well as one to the gateway.
+	r.Use(bodyReadDeadline(d.Cfg.BodyReadTimeout))
 	// Resolves the client IP once for every limiter downstream (rate limit,
 	// exec handshakes).
 	r.Use(httpx.ClientIPResolver(d.Cfg.TrustedProxies))
@@ -81,7 +87,7 @@ func NewHandler(d Deps) http.Handler {
 	limiter := newRateLimiter(d.Cfg)
 	inFlight := newInFlightLimiter(d.Cfg.MaxInFlight)
 
-	gw := maxBody(d.Cfg.MaxBodyBytes, d.Cfg.BodyReadTimeout, gateway.New(d.Registry, d.Logger))
+	gw := maxBody(d.Cfg.MaxBodyBytes, gateway.New(d.Registry, d.Logger))
 	gw = AbortOnShutdown(d.ShutdownCtx, gateway.IsStreaming)(gw)
 	gw = inFlight.middleware(gateway.IsStreaming)(gw)
 	gw = rateLimit(limiter)(gw)
@@ -110,23 +116,45 @@ func handleHealthz(version string) http.HandlerFunc {
 }
 
 // maxBody caps request bodies; exceeding it surfaces as a JSON 413 via the
-// gateway error handler. It also bounds how long a slow client may take to
-// send the body: for body-bearing methods it sets a per-request read deadline
-// via ResponseController. GET/watch/log requests carry no body and stream
-// their response for a long time, so they are deliberately left untouched —
-// SetReadDeadline only affects reading from the client, never the response.
-func maxBody(limit int64, bodyTimeout time.Duration, next http.Handler) http.Handler {
+// gateway error handler. Gateway-scoped deliberately, unlike bodyReadDeadline
+// on the root router: /k8s/* is the only place a client body is read and
+// forwarded upstream, the one body-bearing /api/ui route (auth verify) never
+// reads its body at all, and net/http's post-handler drain reads the raw
+// connection underneath MaxBytesReader — so a wider mount would bound nothing.
+func maxBody(limit int64, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
 			r.Body = http.MaxBytesReader(w, r.Body, limit)
 		}
-		if bodyTimeout > 0 && methodHasBody(r.Method) {
-			// Best-effort: on transports without deadline support this errors
-			// out and MaxBytesReader remains the only body guard.
-			_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(bodyTimeout))
-		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// bodyReadDeadline bounds how long a slow client may take to send a request
+// body, via a per-request read deadline (ResponseController). It must cover
+// every route, not just the gateway: net/http drains an unread body after the
+// handler returns and before the response headers go out, with no ReadTimeout
+// behind it — so without the deadline a body dripped at a few bytes per second
+// holds the connection and its goroutine for hours on any POST path,
+// authenticated or not. GET/watch/log requests carry no body and stream their
+// response for a long time, so they are deliberately left untouched —
+// SetReadDeadline only affects reading from the client, never the response.
+//
+// A zero (or negative) timeout disables the middleware entirely.
+func bodyReadDeadline(timeout time.Duration) func(http.Handler) http.Handler {
+	if timeout <= 0 {
+		return func(next http.Handler) http.Handler { return next }
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if methodHasBody(r.Method) {
+				// Best-effort: on transports without deadline support this
+				// errors out and MaxBytesReader remains the only body guard.
+				_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(timeout))
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // methodHasBody reports whether the HTTP method typically carries a request

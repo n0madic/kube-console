@@ -73,10 +73,17 @@ func peerIn(remoteAddr string, prefixes []netip.Prefix) bool {
 // ClientIP returns the resolved client IP for r, canonicalized for use as a
 // limiter key: IPv6 is bucketed by /64, since a single client typically
 // controls a whole /64 and could otherwise rotate within it for a fresh bucket
-// per request. It falls back to RemoteAddr when the resolver stored nothing —
-// with trusted proxies configured that means a request which did not come
-// through the proxy, and it must still be keyed by something narrower than one
-// bucket for the whole internet.
+// per request.
+//
+// The RemoteAddr fallback runs when the resolver stored nothing. Off-proxy
+// connections never land here — ClientIPFromRemoteAddr always stores the TCP
+// peer — so with the resolver mounted this is a connection *from* a trusted
+// proxy whose X-Forwarded-For named no usable client: header absent (a proxy
+// sending only X-Real-IP), unparseable, or every entry inside the trusted
+// CIDRs (chi stores only a valid resolution). Keying on the proxy's own
+// address then collapses everyone behind it onto one shared bucket, which is
+// the fail-closed choice: a shared budget can be exhausted, but never steered
+// by a client-supplied header.
 func ClientIP(r *http.Request) string {
 	ip := middleware.GetClientIP(r.Context())
 	if ip == "" {

@@ -165,6 +165,31 @@ describe("buildFieldTree", () => {
   })
 })
 
+describe("table cells and the prototype chain", () => {
+  // JSON.parse makes `constructor`/`toString`/`__proto__` plain own keys, so
+  // a row missing such a column must render an empty cell — bare bracket
+  // access would find the Object.prototype member instead.
+  it("renders an empty cell for a row missing a `constructor` column", () => {
+    const [node] = buildFieldTree({
+      entries: [{ constructor: "a", x: 1 }, { x: 2 }],
+    }) as TableNode[]
+    expect(node?.type).toBe("table")
+    expect(node?.rows[0]?.map((c) => c.text)).toEqual(["a", "1"])
+    expect(node?.rows[1]?.map((c) => c.text)).toEqual(["", "2"])
+  })
+
+  it("renders an empty cell for a row missing a `__proto__` column", () => {
+    const value = JSON.parse('{"entries":[{"__proto__":"a","x":1},{"x":2}]}') as Record<
+      string,
+      unknown
+    >
+    const [node] = buildFieldTree(value) as TableNode[]
+    expect(node?.type).toBe("table")
+    expect(node?.rows[0]?.map((c) => c.text)).toEqual(["a", "1"])
+    expect(node?.rows[1]?.map((c) => c.text)).toEqual(["", "2"])
+  })
+})
+
 describe("itemTitle", () => {
   it("prefers well-known title keys and falls back to index", () => {
     expect(itemTitle({ name: "app", image: "nginx" }, 0)).toBe("app")

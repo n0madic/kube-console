@@ -22,6 +22,11 @@ type statusError struct{ code int }
 
 func (e *statusError) Error() string { return fmt.Sprintf("status %d", e.code) }
 
+// discoveryTimeout bounds the whole discovery request; the aggregated attempt
+// and the legacy fallback each get half of it. A variable so tests can
+// shorten it; see kube.DefaultUnaryTimeout for the rationale.
+var discoveryTimeout = kube.DefaultUnaryTimeout
+
 // Handler serves GET /api/ui/discovery. It queries the apiserver on behalf of
 // the user token, prefers aggregated discovery and falls back to legacy. No
 // RBAC-based filtering is applied: resources are never hidden on assumptions.
@@ -45,13 +50,34 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), kube.DefaultUnaryTimeout)
-	defer cancel()
+	// Each attempt gets its own half of the budget: aggregated discovery can
+	// spend up to four upstream calls (two Accept variants × /apis + /api), and
+	// a shared deadline handed legacy a dead context after a slow aggregated
+	// probe — a 502 where legacy would have succeeded. Halving keeps the
+	// combined worst case at discoveryTimeout.
+	attemptTimeout := discoveryTimeout / 2
 
-	resources, err := fetchAggregated(ctx, up, token)
+	aggCtx, aggCancel := context.WithTimeout(r.Context(), attemptTimeout)
+	resources, err := fetchAggregated(aggCtx, up, token)
+	aggCancel()
 	if err != nil {
-		h.logger.Debug("aggregated discovery unavailable, falling back to legacy", "error", err)
-		resources, err = fetchLegacy(ctx, up, token, h.logger)
+		aggErr := err
+		h.logger.Debug("aggregated discovery unavailable, falling back to legacy", "error", aggErr)
+		legCtx, legCancel := context.WithTimeout(r.Context(), attemptTimeout)
+		defer legCancel()
+		resources, err = fetchLegacy(legCtx, up, token, h.logger)
+		if err != nil {
+			// The request is about to answer an error, and the Debug line above
+			// is otherwise the only record of why aggregated discovery failed.
+			h.logger.Warn("discovery failed on both paths", "aggregated_error", aggErr, "legacy_error", err)
+			// Prefer the aggregated status when legacy's own error carries
+			// none: a 401/403 must not be masked as 502 by a fallback that
+			// died on the network or its deadline.
+			var se *statusError
+			if !errors.As(err, &se) && errors.As(aggErr, &se) {
+				err = aggErr
+			}
+		}
 	}
 	if err != nil {
 		var se *statusError
@@ -69,5 +95,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sortResources(resources)
+	if resources == nil {
+		// An empty catalog serializes as "resources": [], never null — the
+		// same normalization nonNilVerbs applies one level down.
+		resources = []Resource{}
+	}
 	httpx.WriteJSON(w, http.StatusOK, Response{Resources: resources})
 }
