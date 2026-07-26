@@ -1,7 +1,7 @@
 import { mount } from "@vue/test-utils"
 import { createPinia, setActivePinia } from "pinia"
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { defineComponent, h } from "vue"
+import { defineComponent, h, nextTick } from "vue"
 
 import type { TableWalkOptions, WalkResult } from "@/api/k8s"
 import type { K8sObjectMeta, K8sTable, K8sTableRow, ResourceRef, WatchEvent } from "@/api/types"
@@ -17,11 +17,19 @@ vi.mock("@/api/k8s", async (importOriginal) => {
 // in this file from opening a real stream in the background.
 const watchFake = vi.hoisted(() => ({
   onEvent: undefined as ((event: WatchEvent) => void) | undefined,
+  buildUrl: undefined as (() => string | null) | undefined,
+  stops: 0,
 }))
 vi.mock("@/composables/useWatch", () => ({
-  useWatch: (opts: { onEvent: (event: WatchEvent) => void }) => {
+  useWatch: (opts: { onEvent: (event: WatchEvent) => void; buildUrl: () => string | null }) => {
     watchFake.onEvent = opts.onEvent
-    return { start: () => {}, stop: () => {} }
+    watchFake.buildUrl = opts.buildUrl
+    return {
+      start: () => {},
+      stop: () => {
+        watchFake.stops += 1
+      },
+    }
   },
 }))
 
@@ -97,6 +105,8 @@ describe("useResourceList.refresh", () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     mockedWalk.mockReset()
+    watchFake.stops = 0
+    watchFake.buildUrl = undefined
   })
 
   it("surfaces the walked collection so sorting covers everything", async () => {
@@ -425,5 +435,59 @@ describe("useResourceList watch upserts", () => {
     expect(list.rows.value).not.toBe(before)
     emitEvent("DELETED", [row("b")])
     expect(list.rows.value).not.toBe(before)
+  })
+})
+
+describe("useResourceList watch URL", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockedWalk.mockReset()
+    watchFake.stops = 0
+    watchFake.buildUrl = undefined
+  })
+
+  // Regression: buildUrl() read the *live* options on every reconnect, while
+  // resourceVersion still belonged to the collection loaded under the previous
+  // selection. The toolbar binds labelSelector with a plain v-model and only
+  // applies it on Enter, so between a keystroke and Enter the two disagree — and
+  // the apiserver closes watches routinely, so the reconnect resumed the
+  // unfiltered collection's resourceVersion under a half-typed selector: every
+  // row outside it silently stopped updating and its DELETED events never
+  // arrived, with watchDegraded still false.
+  it("reconnects with the selector the rows were listed under", async () => {
+    mockedWalk.mockImplementation(walkOf(["a", "b"]))
+    const options: ResourceListOptions = { pageSize: 50, labelSelector: "app=web" }
+    const list = setupList(() => podsRef, () => options)
+    await list.refresh()
+
+    const loaded = watchFake.buildUrl?.()
+    expect(loaded).toContain("labelSelector=app%3Dweb")
+
+    // Typed but not applied: no refresh(), so the rows on screen are still the
+    // app=web ones and resourceVersion is theirs.
+    options.labelSelector = "app=web,tier"
+    expect(watchFake.buildUrl?.()).toBe(loaded)
+
+    // Applying it is what moves the watch.
+    await list.refresh()
+    expect(watchFake.buildUrl?.()).toContain("labelSelector=app%3Dweb%2Ctier")
+  })
+
+  // Regression: the context watch returned before stopping the stream when the
+  // new cluster has no session, so the previous cluster's watch kept upserting
+  // rows into a list the UI now labels as the new one. The sibling context
+  // watches (useClusterSummary, ProblemPodsCard) stop first.
+  it("stops the previous cluster's watch when the new context has no session", async () => {
+    mockedWalk.mockImplementation(walkOf(["a"]))
+    const auth = useAuthStore()
+    auth.setSession("alpha", "tok-a", null, false)
+    const list = setupList()
+    await list.refresh()
+
+    const before = watchFake.stops
+    auth.setActiveContext("beta") // no session for beta
+    await nextTick()
+    expect(auth.isAuthenticated).toBe(false)
+    expect(watchFake.stops).toBeGreaterThan(before)
   })
 })

@@ -56,10 +56,16 @@ export function podMetricsSeries(item: MetricsItem, maxContainerSeries: number):
     return { cpu: { total: item.cpuNanoCores }, mem: { total: item.memoryBytes } }
   }
 
-  // Single container: name the line after it — no redundant "total".
+  // Single container: name the line after it — no redundant "total". Still
+  // through containerLabel: the reserved labels are reserved for the buffer, not
+  // for this branch. A lone container called "total" would otherwise write the
+  // aggregate's series, and attaching an ephemeral debug container later (same
+  // pod uid, so the same cached buffer stays bound) switches to the branch below
+  // — splicing the pod aggregate onto that container's history under one label.
   if (containers.length === 1) {
     const c = containers[0] as ContainerUsage
-    return { cpu: { [c.name]: c.cpuNanoCores }, mem: { [c.name]: c.memoryBytes } }
+    const label = containerLabel(c.name)
+    return { cpu: { [label]: c.cpuNanoCores }, mem: { [label]: c.memoryBytes } }
   }
 
   // Multiple containers: aggregate "total" plus the heaviest per-container lines.

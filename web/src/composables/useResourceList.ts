@@ -46,6 +46,19 @@ export function useResourceList(
   // response overwrite the newer collection.
   let loadGen = 0
 
+  // The selector the rows on screen were actually listed with. The watch must
+  // reconnect against *that*, not against whatever the toolbar holds right now:
+  // the label selector is bound with a plain v-model and only applied on Enter,
+  // so between a keystroke and Enter the live option and `resourceVersion`
+  // describe different collections. useWatch calls buildUrl() again on every
+  // reconnect (the apiserver closes watches routinely), which would resume the
+  // unfiltered collection's resourceVersion under a half-typed selector: every
+  // row outside it silently stops updating and its DELETED events never arrive,
+  // with watchDegraded still false. Namespace rides along for the same reason,
+  // even though a namespace change already forces a refresh.
+  let loadedNamespace: string | undefined
+  let loadedLabelSelector: string | undefined
+
   function rowKey(row: K8sTableRow): string {
     const meta = row.object?.metadata
     if (meta?.uid !== undefined) return meta.uid
@@ -137,11 +150,10 @@ export function useResourceList(
       ) {
         return null
       }
-      const opts = getOptions()
       return watchUrl(ref_, {
-        namespace: opts.namespace,
+        namespace: loadedNamespace,
         resourceVersion: resourceVersion.value,
-        labelSelector: opts.labelSelector,
+        labelSelector: loadedLabelSelector,
       })
     },
     headers: { Accept: TABLE_ACCEPT },
@@ -163,6 +175,10 @@ export function useResourceList(
     const ref_ = getRef()
     if (ref_ === null) return gen
     const opts = getOptions()
+    // Pin what this collection is being listed with, so the watch reconnects
+    // against the same selection the rows came from.
+    loadedNamespace = opts.namespace
+    loadedLabelSelector = opts.labelSelector
     loading.value = true
     error.value = null
     // Drop the previous resource type's rows/columns immediately: otherwise
@@ -300,6 +316,12 @@ export function useResourceList(
   watch(
     () => auth.activeContext,
     () => {
+      // Stop first, like the sibling context watches (useClusterSummary,
+      // ProblemPodsCard): the running watch streams the *previous* cluster's
+      // events, and refresh() is what would otherwise have stopped it. Without
+      // this, a switch to a context with no session leaves that stream upserting
+      // old-cluster rows into a list the UI now labels as the new one.
+      watcher.stop()
       if (!auth.isAuthenticated) return
       void refresh()
     },

@@ -70,7 +70,15 @@ const MAX_OPEN_ITEMS = 3
 // Table cells are horizontally cramped; preview less than the leaf's 140.
 const CELL_PREVIEW_CHARS = 60
 
-const toggled = ref<Record<string, boolean>>({})
+// Null-prototype map: the keys are field names straight out of the rendered
+// object (a CRD spec may hold `constructor`, `toString`, `__proto__` — the last
+// of which JSON.parse makes an own key). On a plain object `toggled.value[key]`
+// would resolve those through the prototype and hand `??` a truthy function, so
+// such a group rendered permanently expanded, and `toggled.value["__proto__"] =
+// false` would hit the prototype setter and be discarded — a caret that never
+// works. Same guard as fieldTree's tableNode, podEnv and the auth/preferences
+// stores.
+const toggled = ref<Record<string, boolean>>(Object.create(null) as Record<string, boolean>)
 const expandedLong = ref<Set<string>>(new Set())
 
 function defaultGroupOpen(node: GroupNode): boolean {
@@ -82,6 +90,12 @@ function defaultItemOpen(node: ItemsNode, leafCount: number): boolean {
 }
 
 function isOpen(key: string, fallback: boolean): boolean {
+  // A plain indexed read, deliberately — not Object.hasOwn, which the sibling
+  // guards in this codebase use. Reactivity is why: Object.hasOwn goes through
+  // [[GetOwnProperty]], which Vue's reactive proxy does not trap for tracking,
+  // so a miss would register no dependency and the first toggle of a collapsed
+  // node would never re-render. The null prototype above is what makes the plain
+  // read safe: an absent key can only ever be `undefined`.
   return toggled.value[key] ?? fallback
 }
 

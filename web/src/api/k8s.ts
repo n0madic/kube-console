@@ -4,7 +4,7 @@
 
 import { listToTable } from "@/utils/tableFallback"
 
-import { apiFetch } from "./http"
+import { apiFetch, apiJson } from "./http"
 import type {
   K8sObject,
   K8sObjectList,
@@ -216,10 +216,9 @@ export async function fetchNamespaces(
   for (let page = 0; page < maxPages; page++) {
     const params = new URLSearchParams({ limit: String(limit) })
     if (cont !== "") params.set("continue", cont)
-    const resp = await apiFetch(`${base}?${params.toString()}`, {
+    const list = await apiJson<K8sObjectList>(`${base}?${params.toString()}`, {
       headers: { Accept: "application/json" },
     })
-    const list = (await resp.json()) as K8sObjectList
     items.push(...(list.items ?? []))
     cont = list.metadata?.continue ?? ""
     if (cont === "") break
@@ -243,10 +242,9 @@ export async function fetchNamespaces(
 export async function fetchNodes(): Promise<K8sObjectList> {
   const params = new URLSearchParams({ resourceVersion: "0" })
   const path = resourcePath({ group: "", version: "v1", resource: "nodes" })
-  const resp = await apiFetch(`${path}?${params.toString()}`, {
+  return apiJson<K8sObjectList>(`${path}?${params.toString()}`, {
     headers: { Accept: "application/json" },
   })
-  return (await resp.json()) as K8sObjectList
 }
 
 /**
@@ -259,10 +257,9 @@ export async function fetchNodes(): Promise<K8sObjectList> {
 export async function fetchPodCount(): Promise<number> {
   const params = new URLSearchParams({ limit: "500", includeObject: "None" })
   const path = resourcePath({ group: "", version: "v1", resource: "pods" })
-  const resp = await apiFetch(`${path}?${params.toString()}`, {
+  const body = await apiJson<K8sTable>(`${path}?${params.toString()}`, {
     headers: { Accept: TABLE_ACCEPT },
   })
-  const body = (await resp.json()) as K8sTable
   const rows = body.rows?.length ?? 0
   return rows + (body.metadata?.remainingItemCount ?? 0)
 }
@@ -272,10 +269,9 @@ export async function getObject(
   namespace: string | undefined,
   name: string,
 ): Promise<K8sObject> {
-  const resp = await apiFetch(resourcePath(ref, { namespace, name }), {
+  return apiJson<K8sObject>(resourcePath(ref, { namespace, name }), {
     headers: { Accept: "application/json" },
   })
-  return (await resp.json()) as K8sObject
 }
 
 export interface ApplyOptions {
@@ -299,7 +295,7 @@ export async function serverSideApply(
   params.set("force", opts.force === true ? "true" : "false")
   if (opts.dryRun === true) params.set("dryRun", "All")
   const path = `${resourcePath(ref, { namespace, name })}?${params.toString()}`
-  const resp = await apiFetch(path, {
+  return apiJson<K8sObject>(path, {
     method: "PATCH",
     headers: {
       "Content-Type": "application/apply-patch+yaml",
@@ -307,7 +303,6 @@ export async function serverSideApply(
     },
     body: yamlBody,
   })
-  return (await resp.json()) as K8sObject
 }
 
 export type PatchType = "merge" | "strategic"
@@ -331,7 +326,7 @@ export async function patchObject(
   opts: { type?: PatchType; subresource?: string } = {},
 ): Promise<K8sObject> {
   const path = resourcePath(ref, { namespace, name, subresource: opts.subresource })
-  const resp = await apiFetch(path, {
+  return apiJson<K8sObject>(path, {
     method: "PATCH",
     headers: {
       "Content-Type": PATCH_CONTENT_TYPES[opts.type ?? "merge"],
@@ -339,7 +334,6 @@ export async function patchObject(
     },
     body: JSON.stringify(patch),
   })
-  return (await resp.json()) as K8sObject
 }
 
 /** POST a new object into its collection (manual CronJob run). */
@@ -348,12 +342,11 @@ export async function createObject(
   namespace: string | undefined,
   object: K8sObject,
 ): Promise<K8sObject> {
-  const resp = await apiFetch(resourcePath(ref, { namespace }), {
+  return apiJson<K8sObject>(resourcePath(ref, { namespace }), {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify(object),
   })
-  return (await resp.json()) as K8sObject
 }
 
 export async function deleteObject(
@@ -383,10 +376,9 @@ export async function eventsFor(obj: K8sObject): Promise<K8sObjectList> {
     { group: "", version: "v1", resource: "events" },
     { namespace: meta.namespace },
   )
-  const resp = await apiFetch(`${base}?${params.toString()}`, {
+  return apiJson<K8sObjectList>(`${base}?${params.toString()}`, {
     headers: { Accept: "application/json" },
   })
-  return (await resp.json()) as K8sObjectList
 }
 
 export interface LogsOptions {

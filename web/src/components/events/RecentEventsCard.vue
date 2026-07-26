@@ -153,7 +153,7 @@ const rowsWithRoute = computed(() => rows.value.map((row) => ({ row, to: involve
           >
             <td
               class="px-2 py-1.5"
-              :class="row.type === 'Warning' ? 'text-amber-600 dark:text-amber-400' : ''"
+              :class="statusTextClass(row.type) ?? ''"
             >
               {{ row.type }}
             </td>

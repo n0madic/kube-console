@@ -50,6 +50,21 @@ describe("podMetricsSeries", () => {
     expect(mem).toEqual({ total: 3000, app: 20, "total (container)": 10 })
   })
 
+  // Regression: the single-container branch built its key from the raw name, so
+  // the reserved labels were only protected once a pod had two containers. A
+  // lone container called `total` wrote the aggregate's series; attaching an
+  // ephemeral debug container later (same pod uid, so the same cached buffer
+  // stays bound) switches to the multi-container branch and splices the pod
+  // aggregate onto that container's history under one label.
+  it("relabels a lone container named 'total'", () => {
+    const { cpu, mem } = podMetricsSeries(
+      item(1000, 3000, [{ name: "total", cpuNanoCores: 7, memoryBytes: 10 }]),
+      5,
+    )
+    expect(cpu).toEqual({ "total (container)": 7 })
+    expect(mem).toEqual({ "total (container)": 10 })
+  })
+
   // The other direction of the same collision: with the cap reached, the
   // rollup sum replaced a top-N container's own line named `other`.
   it("keeps a top-N container named 'other' separate from the rollup", () => {

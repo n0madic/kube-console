@@ -51,8 +51,11 @@ onMounted(() => void polling.start())
 // new context has no session — the switcher is already routing to /login, and
 // a tokenless capabilities probe would only 401 through the global handler,
 // replacing that redirect.
+// A joined string, never an array — see PodMetricsTab: an array getter re-fires
+// on every replacement of `props.object` (Refresh, Cordon/Uncordon) even though
+// the node name is unchanged, restarting the polling loop each time.
 watch(
-  () => [props.object.metadata?.name, auth.activeContext],
+  () => `${props.object.metadata?.name ?? ""}|${auth.activeContext}`,
   () => {
     const [cpu, mem] = getMetricsBuffers(cpuKey(), memKey())
     cpuBuffer.value = cpu

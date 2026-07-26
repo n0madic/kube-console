@@ -17,7 +17,7 @@ import type { RouteLocationRaw } from "vue-router"
 
 import type { K8sTableColumn, K8sTableRow } from "@/api/types"
 import { estimateColumnWidths, SAMPLE_ROWS } from "@/utils/columnWidths"
-import { isStatusColumn, statusTextClass } from "@/utils/statusColors"
+import { isStatusColumn, NEUTRAL_TEXT_CLASS, statusTextClass } from "@/utils/statusColors"
 import { cellText } from "@/utils/tableCells"
 import { compareTableValues } from "@/utils/tableSort"
 
@@ -34,6 +34,20 @@ const props = defineProps<{
    * Clicking a header still toggles direction as usual.
    */
   defaultSort?: { column: string }
+  /**
+   * Identity of what is being listed, and the only thing that may reset manual
+   * column widths, the chosen sort and the empty-column memo.
+   *
+   * The column *names* cannot stand in for it, in either direction. They go
+   * blank mid-reload — useResourceList clears columns before every walk so the
+   * previous kind's rows cannot linger — so keying on them threw away the user's
+   * sort and drag-resized widths on every Refresh, every label-selector apply and
+   * every 410 relist, the last of which happens with no user action at all. And
+   * two kinds whose printers emit the same column names (`Name|Age` is common for
+   * CRDs) are indistinguishable by name, so navigating between them reset
+   * nothing. Optional: without it the names are still the best available key.
+   */
+  resetKey?: string
   /** In-flight list load: show "Loading…" instead of "No resources found". */
   loading?: boolean
   /**
@@ -46,7 +60,9 @@ const props = defineProps<{
 
 const emit = defineEmits<{ rowClick: [row: K8sTableRow] }>()
 
-const columnSetKey = computed(() => props.columns.map((c) => c.name).join("|"))
+const columnNamesKey = computed(() => props.columns.map((c) => c.name).join("|"))
+// What "a different thing is being listed" means — see the resetKey prop.
+const columnSetKey = computed(() => props.resetKey ?? columnNamesKey.value)
 
 // Columns that carry no information ("<none>"/empty in every row, e.g.
 // Nominated Node / Readiness Gates on pods) are hidden automatically.
@@ -102,7 +118,9 @@ const defaultWidths = computed(() => {
   // (which is indexed by original column position), then pick each visible
   // column's width by its original index. Passing only the visible subset here
   // would misalign every column after a hidden non-trailing one.
-  const key = `${columnSetKey.value}#${Math.min(props.rows.length, SAMPLE_ROWS)}`
+  // Keyed on the column names, not on resetKey: this memo is about the measured
+  // content, so it must follow the columns actually being rendered.
+  const key = `${columnNamesKey.value}#${Math.min(props.rows.length, SAMPLE_ROWS)}`
   if (key !== cachedWidthsKey) {
     cachedWidthsKey = key
     cachedWidths = estimateColumnWidths(props.columns, props.rows)
@@ -229,12 +247,6 @@ const statusColumnIds = computed(() => {
   return ids
 })
 
-// The neutral cell color. Part of the resolved class string rather than a
-// static utility on the element beside the conditional one: stylesheet order —
-// not class order — decides which text color wins, which once made red `Failed`
-// statuses render neutral.
-const NEUTRAL_CELL_CLASS = "text-slate-700 dark:text-slate-300"
-
 interface CellView {
   cell: Cell<K8sTableRow, unknown>
   route: RouteLocationRaw | null
@@ -282,7 +294,7 @@ function cellViews(row: Row<K8sTableRow>): CellView[] {
       cell,
       route: cellRoute(cell, text),
       text,
-      class: (statusIds.has(cell.column.id) ? statusTextClass(text) : null) ?? NEUTRAL_CELL_CLASS,
+      class: (statusIds.has(cell.column.id) ? statusTextClass(text) : null) ?? NEUTRAL_TEXT_CLASS,
     }
   })
   cellViewCache.set(row, views)
@@ -387,7 +399,11 @@ const totalSize = computed(() => virtualizer.value.getTotalSize())
           >
             {{ text }}
           </RouterLink>
-          <FlexRender v-else :render="cell.column.columnDef.cell" :props="cell.getContext()" />
+          <!-- The plain cell is `text`, which the memo above already resolved:
+               accessorFn returns cellText(...) — always a string — so FlexRender
+               here only built one extra component instance per cell per frame to
+               render exactly that. -->
+          <template v-else>{{ text }}</template>
         </div>
       </div>
       </template>

@@ -68,7 +68,12 @@ watch(
 
 function openDetail(row: K8sTableRow): void {
   const meta = row.object?.metadata
-  const name = meta?.name ?? String(row.cells[0] ?? "")
+  // The row handed back by the table is the *projected* one in all-namespaces
+  // mode, whose cell 0 is the injected Namespace — so the Name fallback has to
+  // skip it, or a row without object metadata navigates to a namespace-as-name
+  // and a guaranteed 404.
+  const nameCell = row.cells[showNamespaceColumn.value ? 1 : 0]
+  const name = meta?.name ?? String(nameCell ?? "")
   if (name === "") return
   const namespace = namespaced.value ? (meta?.namespace ?? ui.namespace) : undefined
   void router.push(resourceDetailRoute(apiRef.value, namespace, name))
@@ -206,6 +211,7 @@ const eventObjectLink = computed(() => {
       :global-filter="filter"
       :hidden-columns="hiddenColumns"
       :default-sort="defaultSort"
+      :reset-key="`${props.group}/${props.version}/${props.resource}`"
       :loading="list.loading.value"
       :cell-link="eventObjectLink"
       @row-click="openDetail"

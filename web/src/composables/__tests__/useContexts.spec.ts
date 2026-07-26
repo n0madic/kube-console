@@ -19,7 +19,13 @@ vi.mock("@tanstack/vue-query", () => ({
 }))
 
 const push = vi.fn()
-vi.mock("vue-router", () => ({ useRouter: () => ({ push }) }))
+// recoverFromUnknownContext reads the current route to decide whether a detail
+// page has to collapse to its list, so the stub carries one — a bare { push }
+// router is not the Router the composable is typed against.
+const currentRoute: { value: { name: string; params: Record<string, string> } } = {
+  value: { name: "resource-list", params: {} },
+}
+vi.mock("vue-router", () => ({ useRouter: () => ({ push, currentRoute }) }))
 
 const SESSION_KEY = "kube-console.session.v1"
 
@@ -50,6 +56,7 @@ describe("useContexts", () => {
     window.localStorage.clear()
     setActivePinia(createPinia())
     push.mockReset()
+    currentRoute.value = { name: "resource-list", params: {} }
     state.data = ref<ContextsResponse | undefined>(undefined)
   })
 
@@ -94,5 +101,28 @@ describe("useContexts", () => {
     await resolveContexts({ contexts: [{ name: "alpha" }], default: "alpha" })
     expect(auth.activeContext).toBe("alpha")
     expect(push).toHaveBeenCalledWith({ name: "login" })
+  })
+
+  // Regression: the fallback cluster is authorized, so nothing redirects — but a
+  // detail page has no context watch and useResourceObject only refetches on a
+  // route-param change, so it would keep rendering the vanished cluster's object
+  // while Delete/Apply are already stamped with the fallback context and would
+  // hit the same-named object in a different cluster. Collapse to the list, as a
+  // deliberate switch through ClusterSelector does.
+  it("collapses a detail page to its list when the active context vanished", async () => {
+    const auth = useAuthStore()
+    auth.setSession("alpha", "tok-a", null, false)
+    auth.setSession("ghost", "tok-g", null, false)
+    currentRoute.value = {
+      name: "resource-detail",
+      params: { group: "apps", version: "v1", resource: "deployments" },
+    }
+    mountContexts()
+    await resolveContexts({ contexts: [{ name: "alpha" }], default: "alpha" })
+    expect(auth.activeContext).toBe("alpha")
+    expect(push).toHaveBeenCalledWith({
+      name: "resource-list",
+      params: { group: "apps", version: "v1", resource: "deployments" },
+    })
   })
 })

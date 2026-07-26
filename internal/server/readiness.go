@@ -75,7 +75,11 @@ func (c *readinessCache) probe() bool {
 	// probe endpoint; "not ready" is the honest answer and the same one an
 	// unreachable apiserver gets. Same reasoning as Resolve("") going through
 	// the ordinary lookup rather than returning the default unchecked.
-	if c.up == nil || c.up.BaseURL == nil {
+	// Transport is checked alongside BaseURL: it is dereferenced two lines below
+	// and NewRegistryFromUpstreams validates neither, so leaving it out would
+	// reintroduce the very panic this guard exists to avoid — as a 500 from the
+	// recoverer on the probe endpoint instead of the honest 503.
+	if c.up == nil || c.up.BaseURL == nil || c.up.Transport == nil {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), readinessProbeTimeout)

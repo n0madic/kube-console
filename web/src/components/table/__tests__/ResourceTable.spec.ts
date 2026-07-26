@@ -353,6 +353,76 @@ describe("ResourceTable", () => {
     expect(cells.indexOf("mid")).toBeLessThan(cells.indexOf("zeta"))
   })
 
+  // Regression: the reset watchers keyed on the joined column *names*, and
+  // useResourceList blanks columns before every walk so the previous kind's rows
+  // cannot linger on screen. So a same-resource reload — Refresh, a
+  // label-selector apply, or a 410 relist, which happens with no user action at
+  // all — took the key through "" and back, wiping the user's chosen sort and
+  // every drag-resized column width.
+  it("keeps the chosen sort across a reload that blanks the columns", async () => {
+    const columns: K8sTableColumn[] = [
+      { name: "Name", type: "string" },
+      { name: "Age", type: "string" },
+    ]
+    const rows: K8sTableRow[] = [
+      { cells: ["old", "44d"], object: { metadata: { name: "old", uid: "u1" } } },
+      { cells: ["fresh", "30s"], object: { metadata: { name: "fresh", uid: "u2" } } },
+    ]
+    const wrapper = mount(ResourceTable, {
+      props: {
+        columns,
+        rows,
+        globalFilter: "",
+        defaultSort: { column: "Age" },
+        resetKey: "/v1/pods",
+      },
+      global: { stubs },
+    })
+    // Sort by Name instead of the default (Age).
+    await wrapper.findAll('[role="columnheader"]')[0]!.trigger("click")
+    const sorted = renderedCells(wrapper).map((c) => c.text())
+    expect(sorted.indexOf("fresh")).toBeLessThan(sorted.indexOf("old"))
+
+    // The reload: columns blank, then come back unchanged.
+    await wrapper.setProps({ columns: [], rows: [] })
+    await wrapper.setProps({ columns, rows: [...rows] })
+
+    const after = renderedCells(wrapper).map((c) => c.text())
+    expect(after.indexOf("fresh")).toBeLessThan(after.indexOf("old"))
+  })
+
+  // The other direction: two kinds whose printers emit the same column names
+  // ("Name|Age" is ordinary for CRDs) were indistinguishable by name, so
+  // navigating between them re-applied nothing.
+  it("re-applies the default sort when resetKey changes under identical columns", async () => {
+    const columns: K8sTableColumn[] = [
+      { name: "Name", type: "string" },
+      { name: "Age", type: "string" },
+    ]
+    const rows: K8sTableRow[] = [
+      { cells: ["old", "44d"], object: { metadata: { name: "old", uid: "u1" } } },
+      { cells: ["fresh", "30s"], object: { metadata: { name: "fresh", uid: "u2" } } },
+    ]
+    const wrapper = mount(ResourceTable, {
+      props: {
+        columns,
+        rows,
+        globalFilter: "",
+        defaultSort: { column: "Name" },
+        resetKey: "widgets.example.com/v1/widgets",
+      },
+      global: { stubs },
+    })
+    // Sort descending by Name (two clicks: asc default → desc).
+    await wrapper.findAll('[role="columnheader"]')[0]!.trigger("click")
+    const descending = renderedCells(wrapper).map((c) => c.text())
+    expect(descending.indexOf("old")).toBeLessThan(descending.indexOf("fresh"))
+
+    await wrapper.setProps({ resetKey: "gadgets.example.com/v1/gadgets", rows: [...rows] })
+    const after = renderedCells(wrapper).map((c) => c.text())
+    expect(after.indexOf("fresh")).toBeLessThan(after.indexOf("old")) // back to Name ascending
+  })
+
   it("sizes visible columns by their own data when a middle column is hidden", () => {
     // Regression: estimateColumnWidths was fed the visible subset but indexed
     // row.cells by visible position, so columns after a hidden non-trailing one

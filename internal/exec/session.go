@@ -220,7 +220,17 @@ func (h *Handler) session(ctx context.Context, conn *websocket.Conn, releaseHand
 	// idle deadline landing in the next few microseconds would otherwise chase
 	// the exit frame with an "idle timeout" error frame. The deferred idle.Stop()
 	// cannot do this on its own — see `ending`.
-	ending.Store(true)
+	//
+	// The claim is a CAS, like every other claimant's, and losing it is not
+	// cosmetic: reportAndEnd sends its explanation and then waits up to
+	// idleFrameTimeout before cancelling, so a command exiting inside that window
+	// would otherwise chase an "idle timeout" error frame with a clean exit frame
+	// on a still-open socket — the same contradiction in the other order. Whoever
+	// claimed the teardown has already told the browser why it is ending.
+	if !ending.CompareAndSwap(false, true) {
+		conn.Close(websocket.StatusNormalClosure, "session ended")
+		return
+	}
 
 	switch {
 	case streamErr == nil:

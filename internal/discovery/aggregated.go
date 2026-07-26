@@ -3,12 +3,14 @@ package discovery
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/n0madic/kube-console/internal/httpx"
 	"github.com/n0madic/kube-console/internal/kube"
 )
 
@@ -113,37 +115,62 @@ func fetchAggregated(ctx context.Context, up *kube.Upstream, token string) ([]Re
 	for _, rs := range perRoot {
 		out = append(out, rs...)
 	}
+	if len(out) == 0 {
+		// Both roots answered, and between them named nothing. A 200 with an
+		// empty catalog is indistinguishable from an empty cluster to the SPA
+		// (useDiscovery coerces with ?? [] and Sidebar renders its error line
+		// only on isError), so it would paint a blank sidebar with no message —
+		// the outcome fetchLegacy's "every group version failed" guard exists to
+		// prevent. Fail the attempt instead and let legacy discovery answer.
+		return nil, errors.New("aggregated discovery returned an empty catalog")
+	}
 	return out, nil
 }
 
 func fetchAggregatedRoot(ctx context.Context, up *kube.Upstream, token, root string) (*aggGroupList, error) {
 	var lastErr error
 	for _, accept := range aggregatedAccepts {
-		header := http.Header{}
-		header.Set("Accept", accept)
-		resp, err := kube.Do(ctx, up, token, http.MethodGet, root, header, nil)
-		if err != nil {
+		list, fatal, err := fetchAggregatedOnce(ctx, up, token, root, accept)
+		if fatal {
 			return nil, err
 		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
-		_ = resp.Body.Close()
 		if err != nil {
-			return nil, err
-		}
-		if resp.StatusCode != http.StatusOK {
-			lastErr = &statusError{code: resp.StatusCode}
-			continue
-		}
-		var list aggGroupList
-		if err := json.Unmarshal(body, &list); err != nil {
 			lastErr = err
 			continue
 		}
-		if list.Kind != "APIGroupDiscoveryList" {
-			lastErr = fmt.Errorf("server returned %q, not APIGroupDiscoveryList", list.Kind)
-			continue
-		}
-		return &list, nil
+		return list, nil
 	}
 	return nil, lastErr
+}
+
+// fetchAggregatedOnce performs one aggregated-discovery request. fatal reports a
+// failure the next Accept variant cannot fix (the round trip itself never
+// happened), as opposed to an answer this server would not give in this shape —
+// a status, an unparsable body or a plain APIGroupList — which is exactly what
+// the second variant exists for.
+//
+// The status is checked *before* the body is read, and an unwanted body goes
+// through httpx.DrainAndClose like every other adapter's: buffering up to 32 MiB
+// of a 403 or a 500 only to throw it away is the upstream choosing how much
+// memory and time this request spends, and it spends it holding an in-flight
+// slot, twice per root, on half the discovery budget.
+func fetchAggregatedOnce(ctx context.Context, up *kube.Upstream, token, root, accept string) (*aggGroupList, bool, error) {
+	header := http.Header{}
+	header.Set("Accept", accept)
+	resp, err := kube.Do(ctx, up, token, http.MethodGet, root, header, nil)
+	if err != nil {
+		return nil, true, err
+	}
+	defer httpx.DrainAndClose(resp)
+	if resp.StatusCode != http.StatusOK {
+		return nil, false, &statusError{code: resp.StatusCode}
+	}
+	var list aggGroupList
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 32<<20)).Decode(&list); err != nil {
+		return nil, false, err
+	}
+	if list.Kind != "APIGroupDiscoveryList" {
+		return nil, false, fmt.Errorf("server returned %q, not APIGroupDiscoveryList", list.Kind)
+	}
+	return &list, false, nil
 }

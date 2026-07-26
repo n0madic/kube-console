@@ -256,6 +256,42 @@ describe("usePollingLoop", () => {
   })
 
   // Regression: only `start()`'s tick was caught. The scheduled path used
+  // Regression: the in-flight guard on the visibility catch-up was one global
+  // counter, so a poll abandoned by an earlier generation — a restart leaves the
+  // old tick running on purpose — also suppressed the catch-up for the live
+  // chain. Nothing re-arms behind an abandoned tick (its own `.finally` sees
+  // g !== gen), so the loop simply waited out the full interval, and forever if
+  // that request never settled.
+  it("catches up while an abandoned generation's poll is still in flight", async () => {
+    let releaseStale!: () => void
+    const stale = new Promise<void>((resolve) => {
+      releaseStale = resolve
+    })
+    let first = true
+    const h = mountLoop(() => {
+      if (!first) return
+      first = false
+      return stale // generation 1 never settles until we let it
+    }, 1000)
+
+    void h.loop.start() // generation 1: hangs
+    await flush()
+    expect(h.ticks.length).toBe(1)
+
+    await h.loop.start() // restart: generation 2 polls and completes
+    expect(h.ticks.length).toBe(2)
+
+    setHidden(true)
+    await vi.advanceTimersByTimeAsync(1500) // away for more than one interval
+    fireVisibilityChange(false)
+    await flush()
+
+    // Generation 1 is still unresolved; the catch-up must run regardless.
+    expect(h.ticks.length).toBe(3)
+    releaseStale()
+    h.loop.stop()
+  })
+
   // `.finally()`, which re-throws the reason it observed, and the visibility
   // catch-up had no handler at all — so every failing poll after the first
   // raised an unhandled rejection (a console error in the browser, and a failed

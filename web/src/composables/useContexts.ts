@@ -72,6 +72,25 @@ export function recoverFromUnknownContext(
     void router.push({ name: "login" })
     return false
   }
+  // A detail page is collapsed to its list, exactly as ClusterSelector does on a
+  // deliberate switch: the object on screen belongs to the cluster that just
+  // disappeared, and every context-scoped query key is rebuilt under the
+  // fallback — but ResourceDetailPage has no context watch and useResourceObject
+  // only refetches on a route-param change, so the header, the YAML tab and the
+  // action buttons would keep describing the removed cluster's object while
+  // Delete and Apply are already stamped X-Kube-Context: <fallback>, hitting the
+  // same-named object in a different cluster.
+  const route = router.currentRoute.value
+  if (route.name === "resource-detail") {
+    void router.push({
+      name: "resource-list",
+      params: {
+        group: route.params.group,
+        version: route.params.version,
+        resource: route.params.resource,
+      },
+    })
+  }
   return fallback !== rejected
 }
 

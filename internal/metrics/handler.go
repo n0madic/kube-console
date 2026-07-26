@@ -49,7 +49,7 @@ func (h *Handler) cachedGroupVersion(context string) string {
 	h.versionMu.Lock()
 	defer h.versionMu.Unlock()
 	entry, ok := h.versions[context]
-	if !ok || entry.version == "" || time.Since(entry.at) > versionCacheTTL {
+	if !ok || time.Since(entry.at) > versionCacheTTL {
 		return ""
 	}
 	return entry.version
@@ -103,6 +103,13 @@ func (h *Handler) Capabilities(w http.ResponseWriter, r *http.Request) {
 	}
 	if caps.State == StateAvailable {
 		h.cacheGroupVersion(contextName, caps.Version)
+	} else {
+		// The probe is the authority on this group, so a not-installed /
+		// forbidden / unavailable answer must also retire a version cached
+		// earlier: a data request (useClusterSummary's node metrics never
+		// probes) would otherwise keep taking the cache-hit path into a group
+		// version this cluster no longer serves for the rest of the TTL.
+		h.dropGroupVersion(contextName)
 	}
 	httpx.WriteJSON(w, http.StatusOK, caps)
 }
@@ -152,7 +159,15 @@ func (h *Handler) Node(w http.ResponseWriter, r *http.Request) {
 // upstream response or writes an error/capability status itself (ok=false).
 // ctx bounds the upstream calls; the caller keeps it alive until the response
 // body is fully consumed.
-func (h *Handler) fetch(ctx context.Context, w http.ResponseWriter, r *http.Request, subPath string) (*http.Response, bool) {
+//
+// collection says whether subPath addresses a collection. It decides whether a
+// 404 may retire the cached group version: metrics-server always answers a
+// collection, so a 404 there really does mean the version is gone — while for a
+// single object 404 is the ordinary "this pod has not been scraped yet" answer,
+// and treating it as a version failure would evict a cluster-global, per-context
+// cache every 15s for the first minute of every new pod, for every user of that
+// context.
+func (h *Handler) fetch(ctx context.Context, w http.ResponseWriter, r *http.Request, subPath string, collection bool) (*http.Response, bool) {
 	if !h.enabled {
 		httpx.WriteError(w, http.StatusNotFound, "NotFound", "metrics adapter is disabled")
 		return nil, false
@@ -205,8 +220,10 @@ func (h *Handler) fetch(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	if resp.StatusCode != http.StatusOK {
 		// Pass 403/404/503 (and anything else) through with the upstream body.
 		// A 404/503 may also mean the cached version went stale under us, so it
-		// stops being replayed: the next request re-probes.
-		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusServiceUnavailable {
+		// stops being replayed: the next request re-probes. A 404 only counts
+		// for a collection — see the `collection` parameter.
+		if resp.StatusCode == http.StatusServiceUnavailable ||
+			(collection && resp.StatusCode == http.StatusNotFound) {
 			h.dropGroupVersion(contextName)
 		}
 		httpx.CopyUpstreamError(w, resp)
@@ -218,7 +235,7 @@ func (h *Handler) fetch(ctx context.Context, w http.ResponseWriter, r *http.Requ
 func (h *Handler) serveList(w http.ResponseWriter, r *http.Request, subPath string, pods bool) {
 	ctx, cancel := context.WithTimeout(r.Context(), upstreamTimeout)
 	defer cancel() // body decode below is bounded by the same deadline
-	resp, ok := h.fetch(ctx, w, r, subPath)
+	resp, ok := h.fetch(ctx, w, r, subPath, true)
 	if !ok {
 		return
 	}
@@ -263,7 +280,7 @@ func (h *Handler) serveList(w http.ResponseWriter, r *http.Request, subPath stri
 func (h *Handler) serveSingle(w http.ResponseWriter, r *http.Request, subPath string, pod bool) {
 	ctx, cancel := context.WithTimeout(r.Context(), upstreamTimeout)
 	defer cancel() // body decode below is bounded by the same deadline
-	resp, ok := h.fetch(ctx, w, r, subPath)
+	resp, ok := h.fetch(ctx, w, r, subPath, false)
 	if !ok {
 		return
 	}

@@ -70,16 +70,22 @@ export function sortByLastSeenDesc(rows: EventRow[]): EventRow[] {
   // Compare by parsed time, not raw string: lastSeen mixes second-precision
   // core timestamps ("…05Z") with microsecond events.k8s.io ones ("…05.5Z"),
   // which a lexicographic compare misorders within the same second ('.' < 'Z').
-  // Ties (equal, or either unparseable) return 0 so the stable sort keeps tied
-  // events in their original order.
-  return [...rows].sort((a, b) => {
-    const ta = Date.parse(a.lastSeen)
-    const tb = Date.parse(b.lastSeen)
-    if (Number.isNaN(ta) || Number.isNaN(tb)) {
-      return a.lastSeen === b.lastSeen ? 0 : a.lastSeen < b.lastSeen ? 1 : -1
-    }
-    return tb - ta
-  })
+  // When either side is unparseable the raw strings decide, descending; equal
+  // values return 0 so the stable sort keeps them in their original order.
+  //
+  // Parsed once per row, not once per comparison: RecentEventsCard sorts up to
+  // 1000 events on mount, on every namespace and cluster switch and on every
+  // Refresh, and a comparator-side parse costs ~2·n·log₂n of them (~20k) to
+  // order n rows.
+  return rows
+    .map((row) => ({ row, t: Date.parse(row.lastSeen) }))
+    .sort((a, b) => {
+      if (Number.isNaN(a.t) || Number.isNaN(b.t)) {
+        return a.row.lastSeen === b.row.lastSeen ? 0 : a.row.lastSeen < b.row.lastSeen ? 1 : -1
+      }
+      return b.t - a.t
+    })
+    .map(({ row }) => row)
 }
 
 /**

@@ -138,6 +138,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.logger.Warn("exec websocket accept failed", "client", ip)
 		return
 	}
+	// Accept has hijacked the connection, so net/http will never close it for us
+	// and Recoverer cannot answer on it either (writing to a hijacked
+	// ResponseWriter returns ErrHijacked). session() closes it on every ordinary
+	// return path; this covers the one that is not ordinary — a panic before the
+	// read loop owns the socket would otherwise leak the fd and
+	// coder/websocket's timeout goroutine for the life of the process. CloseNow
+	// is a no-op once the connection is already closed.
+	defer func() { _ = conn.CloseNow() }()
 	h.session(r.Context(), conn, releaseHandshake)
 }
 

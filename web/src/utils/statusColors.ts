@@ -69,6 +69,17 @@ const SEVERITY_TEXT_CLASS: Record<StatusSeverity, string> = {
 }
 
 /**
+ * The neutral cell color, for the same reason the severity classes above are
+ * whole strings: it must be baked into the one expression that resolves a cell's
+ * color rather than sit on the element as a static utility beside a conditional
+ * one. Exported so the tables that need to complete `statusTextClass`'s nullable
+ * answer (ResourceTable, ResourceMiniTable, ObjectFieldTree) all spell "neutral"
+ * the same way — three inlined copies of this literal is how a repaint of the
+ * palette would silently leave some views behind.
+ */
+export const NEUTRAL_TEXT_CLASS = "text-slate-700 dark:text-slate-300"
+
+/**
  * Returns a text color class for a cell value when it looks like an error or
  * warning status, or null for neutral values — the color mapping of
  * statusSeverity above.

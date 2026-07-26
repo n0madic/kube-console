@@ -355,8 +355,20 @@ deliberate, so one broken aggregated API cannot break the sidebar, but returning
 `(nil, nil)` answered `200` with an empty catalog, and the SPA cannot tell that
 from an empty cluster — `useDiscovery` coerces with `?? []` and `Sidebar.vue`
 renders its error line only on `isError`, so a total failure painted a blank
-sidebar with no message. `Response.Resources` also serializes as `[]`, never
-`null`, the normalization `nonNilVerbs` already applies one level down.
+sidebar with no message. **`fetchAggregated` errors on an empty catalog for the
+same reason**, and it has to be said separately: it is tried first and wins
+whenever it does not error, so two roots answering `200` with nothing to name
+(an aggregation layer or admission proxy in front of the apiserver) reached that
+blank sidebar without legacy ever being asked. `Response.Resources` also
+serializes as `[]`, never `null`, the normalization `nonNilVerbs` already
+applies one level down. Both aggregated requests go through
+`fetchAggregatedOnce`, which checks the **status before reading the body** and
+drains through `httpx.DrainAndClose` like every other adapter — it used to
+buffer up to 32 MiB of a 403 or a 500 only to discard it, twice per root,
+concurrently, while holding an in-flight slot. Its `fatal` return is what keeps
+the second Accept variant meaningful: only a failed round trip skips it, while a
+status, an unparsable body or a plain `APIGroupList` are exactly what the retry
+is for.
 
 **Logs never contain headers, bodies or query strings** (RequestLogger).
 
@@ -695,7 +707,14 @@ one, and the no-list case is the common one rather than a corner: fetching
 `["contexts"]` carries the rejected name too, so after a reload it has already
 failed exactly as the request did; (3) routes to `/login` when the fallback has
 no session, instead of leaving a protected view firing tokenless requests until
-one 401s; and (4) reports whether the caller should refetch the list — **not**
+one 401s; (4) **collapses a `resource-detail` route to its list** when the
+fallback *is* authorized and nothing else redirects, exactly as
+`ClusterSelector.switchContext` does on a deliberate switch — `ResourceDetailPage`
+is the one page with no context reactivity (`useResourceObject` refetches on a
+route-param change only), so the header, YAML tab and action buttons would keep
+describing the vanished cluster's object while Delete and Apply already carry
+`X-Kube-Context: <fallback>` and hit the same-named object in another cluster;
+and (5) reports whether the caller should refetch the list — **not**
 when the fallback is the rejected name itself, since re-issuing the request that
 just failed re-enters the handler, which was a request loop with no backoff.
 
@@ -715,6 +734,20 @@ continue walk, 5000 cap — like `kubectl --sort-by`) so client-side sorting and
 filtering cover everything; a watch (Table-typed events, bookmarks, 410→relist,
 bounded backoff) keeps it live; beyond the cap it degrades to forward-only
 pagination and Enter-triggered server name scans.
+
+`buildUrl` reconnects with the namespace and label selector the rows on screen
+were **actually listed under** (pinned in `load()`), never the live options: the
+toolbar binds `labelSelector` with a plain `v-model` and only applies it on
+Enter, so between a keystroke and Enter the live value and `resourceVersion`
+describe different collections — and the apiserver closes watches routinely, so
+the reconnect resumed the unfiltered collection's `resourceVersion` under a
+half-typed selector. Every row outside it then silently stopped updating and its
+DELETED events never arrived, with `watchDegraded` still `false`. The context
+watch also `stop()`s the stream **before** its `isAuthenticated` gate, like the
+sibling watches in `useClusterSummary` and `ProblemPodsCard`: `refresh()` is what
+would otherwise have stopped it, so a switch to a context with no session left
+the previous cluster's stream upserting rows into a list now labelled as the new
+one.
 
 Because a whole collection sits behind a live watch, everything on the per-event
 path is sized against the 5000-row cap, not against the one row an event usually
@@ -759,9 +792,27 @@ and, per cell, re-derived the status class: a regex test, plus on status columns
 a `split(",")` and a handful of substring scans per part, ~240 times a frame.
 Whether a column carries statuses depends on the column alone, so `isStatusColumn`
 is resolved into a `statusColumnIds` set per column set, never per cell. The
-fallback `text-slate-700 dark:text-slate-300` is baked **into** that one class
-string, per the Tailwind order rule below — a static color utility beside a
-conditional one lets stylesheet order pick the winner.
+neutral fallback is baked **into** that one class string, per the Tailwind order
+rule below — a static color utility beside a conditional one lets stylesheet
+order pick the winner — and it is `NEUTRAL_TEXT_CLASS` from `statusColors.ts`,
+not a literal, because `ResourceMiniTable` and `ObjectFieldTree` complete the
+same nullable `statusTextClass` answer and three copies of the string is how a
+repaint leaves some views behind. The plain (unlinked) cell renders `{{ text }}`
+straight from the memo rather than through `FlexRender`: `accessorFn` is
+`cellText`, so the column def's `cell` renderer only ever produced that same
+string, at the cost of one component instance per cell per frame.
+
+`ResourceTable` takes the identity of what is listed as an explicit **`resetKey`**
+prop (`ResourceListPage` passes `<group>/<version>/<resource>`), and that — not
+the joined column names — is what may reset manual widths, the chosen sort and
+the empty-column memo. Names fail in both directions. They go *blank* mid-reload,
+because `useResourceList.load()` clears `columns` before every walk so the
+previous kind's rows cannot linger, so keying on them threw the user's sort and
+drag-resized widths away on every Refresh, every label-selector apply and every
+410 relist — the last with no user action at all. And two kinds whose printers
+emit the same names (`Name|Age`, ordinary for CRDs) are indistinguishable, so
+navigating between them reset nothing. The width memo stays keyed on the column
+names: it is about measured content, not about identity.
 
 That invalidation is keyed on `columnDefs`, so the defs must be **content-keyed**
 and keep their previous array when nothing a def is built from changed. Their
@@ -1010,7 +1061,17 @@ collapse). Mini-table cells are read with **`Object.hasOwn`**, like `podEnv.ts`
 and `fieldFilter.ts`: the homogeneity check validates own keys only, so an item
 naming `constructor`/`toString`/`__proto__` (`JSON.parse` makes the last an own
 key) made a bare `item[col]` print an `Object.prototype` member into the cell of
-every *other* row. A per-section `compact` toggle (default on) cuts noise via
+every *other* row. `ObjectFieldTree`'s own collapse map is the same hazard one
+level up and is fixed the other way: `toggled` is `Object.create(null)` and
+`isOpen` stays a **plain indexed read**, deliberately *not* `Object.hasOwn` —
+that goes through `[[GetOwnProperty]]`, which Vue's reactive proxy does not trap
+for tracking, so a miss would register no dependency and the first click on a
+collapsed node would never re-render. The null prototype is what makes the plain
+read safe (an absent key can only be `undefined`); on a plain object a field
+named `constructor` resolved to a truthy function and rendered permanently
+expanded, and `toggled["__proto__"] = false` hit the prototype setter and was
+discarded, so that caret never worked at all.
+A per-section `compact` toggle (default on) cuts noise via
 `utils/fieldFilter.ts`: `pruneEmpty` drops `null`/`""`/`{}`/`[]`, and for `spec`
 `compactSpec` narrows to **user-declared** fields to hide apiserver defaults,
 best signal first: (1) the `last-applied-configuration` annotation (client-side
@@ -1079,6 +1140,14 @@ header). A caller cannot fix that from outside, since its class reaches the
 select. Do not reintroduce a bare `<select>`, and do not put `.number` on its
 `v-model` — options bind real numbers already, and the modifier would only
 coerce a string form that never occurs.
+
+`NamespaceSelector`'s 403 fallback — a free-text input, for a token that cannot
+list namespaces — binds `v-model.lazy`, and that modifier is load-bearing rather
+than cosmetic: `ui.namespace` is watched by the list page (a bounded full
+collection walk), the recent-events card (a 1000-item fetch) and the Overview's
+metrics loop, so a plain `v-model` fired all three per keystroke and requested
+`k`, `ku`, `kub`, … against the apiserver. The `BaseSelect` branch never had the
+problem: a `<select>` emits once per pick.
 
 Shared value UX in `components/ui/`: `RevealButton.vue` (eye toggle) and
 `ExpandableValue.vue` (truncate/expand), used by SecretDataPanel,
@@ -1264,10 +1333,18 @@ labels), so swapping it in would change what both call sites accept.
 An advertised `preferredVersion` failing that
 check falls through to the first *usable* entry in `group.Versions` rather than
 failing the probe, so one unusable entry cannot hide a valid version behind it.
-The resolved version is cached per context for 5m, and a **404/503 from a data
-request drops that entry** so the next one re-probes: `cacheGroupVersion` had no
-counterpart, so a version the server stopped serving was replayed — and its 404
-forwarded, reporting a live metrics-server as absent — for the rest of the TTL.
+The resolved version is cached per context for 5m, and both ways out of that
+cache exist because `cacheGroupVersion` alone had no counterpart: a version the
+server stopped serving was replayed — and its 404 forwarded, reporting a live
+metrics-server as absent — for the rest of the TTL. It is dropped by a **503, or
+a 404 on a *collection*** (`Handler.fetch`'s `collection` parameter), and by a
+**capability probe that comes back anything but available**. The collection
+qualifier is the load-bearing half: metrics-server answers 404 for any pod it has
+not scraped yet, so treating a single-object 404 as a version failure evicted a
+cluster-global, per-context entry on every 15s poll for a new pod's first minute
+— for every user of that context. The probe-side drop covers the opposite gap:
+`useClusterSummary`'s node metrics never probe, so without it a data request kept
+taking the cache-hit path into a group version the probe had already found gone.
 The frontend polls ≥15s only while the tab is visible, into in-memory ring
 buffers (240 samples, deduped by source timestamp). The floor is one constant
 for every metrics caller (`METRICS_MIN_INTERVAL_SECONDS`/`metricsIntervalMs` in
@@ -1287,7 +1364,12 @@ catch-up returns while a poll is in flight (that poll *is* this cycle's, and its
 own `.finally` re-arms), and the timeout callback nulls `timer` as it fires so
 `clearTimer` only ever cancels something genuinely pending. It is a counter, not
 a flag: a restart briefly overlaps the old generation's last tick with the new
-one's first. A caller must therefore **restart the loop** rather than call its
+one's first. And it is counted **per generation** (a `Map`, entries deleted at
+zero), because the only question the catch-up asks is whether *this* cycle's poll
+is already running: one global count answered for abandoned generations too, so a
+slow tick a `stop()`/`start()` left behind — whose own `.finally` re-arms nothing,
+`g !== gen` — suppressed the catch-up for the live chain until it settled, and
+forever if it never did. A caller must therefore **restart the loop** rather than call its
 own refresh directly — `stop()` then `start()`, as `ProblemPodsCard` and now
 `useClusterSummary`'s context watch both do; a bare `refresh()` stamps nothing
 and leaves the armed timer to fire behind it (measured: two cluster-wide
@@ -1321,7 +1403,12 @@ replaced the switcher's `/login?redirect=<view>` with a bare `/login`.
 `utils/podMetricsSeries.ts` reserves the `total` and `other` series labels: both
 are valid DNS-1123 names, so a container called either one silently replaced the
 pod aggregate (a line still labelled "total" plotting one container) or was
-swallowed by the rollup. Such a container is rendered as `<name> (container)`. Ending a session wipes its series so a re-login never shows the
+swallowed by the rollup. Such a container is rendered as `<name> (container)`,
+on the **single-container branch too** — the reserved labels belong to the buffer,
+not to one branch, and a lone container named `total` wrote the aggregate's series
+until an ephemeral debug container arrived (same pod uid, so the same cached
+buffer stays bound) and the multi-container branch spliced the pod aggregate onto
+its history under one label. Ending a session wipes its series so a re-login never shows the
 previous session's charts: Sign out, the 401 handler and TTL expiry all reach
 `evictContextCaches(context)` and evict only the ended context's `<ctx>:` scopes
 (`clearMetricsCacheContext`); the vue-query cache is pruned in the same call
@@ -1483,7 +1570,12 @@ only ever ages pods *out*, so no answer must not mean "hide".
   must take the severity: `eventRowClass` used to tint whole rows by searching the
   returned class for `"red"`, so repainting error text to a `rose-` palette (which
   `GaugeCard` already uses) would have silently downgraded every error row to
-  amber, with no test covering it.
+  amber, with no test covering it. For the same reason the event **Type** cell
+  goes through `statusTextClass(row.type)` in both `EventsCard` and
+  `RecentEventsCard` instead of hardcoding the amber pair: that literal *is*
+  `SEVERITY_TEXT_CLASS.warning`, and two copies of it meant a repaint left two
+  columns of the same table in different colors. The neutral end of the same
+  mapping is `NEUTRAL_TEXT_CLASS`, exported beside it.
 - The gateway blocklist makes objects literally named
   `exec`/`attach`/`portforward`/`proxy` unreachable — known limitation,
   documented in README.

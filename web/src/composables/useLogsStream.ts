@@ -50,6 +50,13 @@ export function useLogsStream() {
   // Drops the head in place. `splice` shifts the survivors down inside the
   // existing array; returning a `slice` would allocate a second full copy of
   // the buffer on top of the append, on every flush past the cap.
+  //
+  // Applying it to the staging array as well as the visible one cannot leave a
+  // gap in the middle of the log, which is worth spelling out because it looks
+  // like it could: trimming staging leaves it holding exactly MAX_LINES, so the
+  // flush that follows appends onto a buffer of length B and then drops exactly
+  // B from the head — i.e. the whole previous buffer. What survives is always
+  // the contiguous tail `truncated` advertises.
   function trim(buffer: string[]): void {
     if (buffer.length <= MAX_LINES) return
     truncated.value = true

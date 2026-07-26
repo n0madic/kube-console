@@ -59,8 +59,14 @@ onMounted(() => void polling.start())
 // new context has no session — the switcher is already routing to /login, and
 // a tokenless capabilities probe would only 401 through the global handler,
 // replacing that redirect.
+// A joined string, never an array: props are shallowReactive, so this getter
+// re-runs whenever `props.object` is *replaced* — which every Refresh, YAML
+// apply and kind action does, with the same uid — and a freshly built array
+// never matches its predecessor under Object.is. That restarted the whole
+// polling loop (a capabilities probe plus an immediate fetch, cadence reset to
+// zero) on every one of them.
 watch(
-  () => [props.object.metadata?.uid, auth.activeContext],
+  () => `${props.object.metadata?.uid ?? ""}|${auth.activeContext}`,
   () => {
     const [cpu, mem] = getMetricsBuffers(cpuKey(), memKey())
     cpuBuffer.value = cpu

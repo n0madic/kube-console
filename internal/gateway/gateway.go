@@ -154,8 +154,14 @@ func (g *Gateway) errorHandler(w http.ResponseWriter, r *http.Request, err error
 		// Client went away; nothing to report.
 		return
 	}
+	// errors.As alone: http.MaxBytesReader — mounted by routes.go's maxBody, and
+	// the only producer of this condition — returns *http.MaxBytesError, whose
+	// own Error() is the message a substring test would look for, and errors.As
+	// already unwraps whatever the transport wrapped it in. A text match could
+	// therefore only add false positives: an unrelated upstream error whose
+	// message happens to carry that phrase would be answered 413.
 	var maxBytesErr *http.MaxBytesError
-	if errors.As(err, &maxBytesErr) || strings.Contains(err.Error(), "request body too large") {
+	if errors.As(err, &maxBytesErr) {
 		httpx.WriteError(w, http.StatusRequestEntityTooLarge, "RequestEntityTooLarge", "request body too large")
 		return
 	}

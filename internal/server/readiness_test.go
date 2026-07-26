@@ -12,6 +12,13 @@ import (
 	"github.com/n0madic/kube-console/internal/kube"
 )
 
+// unreachableURL is a base URL nothing listens on: the probe must fail on the
+// guard, never by dialling it.
+func unreachableURL() *url.URL {
+	u, _ := url.Parse("http://127.0.0.1:1")
+	return u
+}
+
 // newCountingUpstream returns an upstream whose /version hits are counted.
 func newCountingUpstream(t *testing.T) (*kube.Upstream, *atomic.Int64) {
 	t.Helper()
@@ -98,6 +105,10 @@ func TestReadinessFailsClosedWithoutAnUpstream(t *testing.T) {
 	for name, c := range map[string]*readinessCache{
 		"no upstream": newReadinessCache(nil, time.Minute),
 		"no base URL": newReadinessCache(&kube.Upstream{Transport: http.DefaultTransport}, time.Minute),
+		// Transport is dereferenced right after BaseURL, and
+		// NewRegistryFromUpstreams validates neither — leaving it out of the
+		// guard reintroduced the panic the guard exists to avoid.
+		"no transport": newReadinessCache(&kube.Upstream{BaseURL: unreachableURL()}, time.Minute),
 	} {
 		t.Run(name, func(t *testing.T) {
 			rec := httptest.NewRecorder()

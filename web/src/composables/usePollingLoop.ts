@@ -38,9 +38,22 @@ export function usePollingLoop(
   let live = false
   /** When the last poll *started* — the throttle for the visibility catch-up. */
   let lastTickMs = 0
-  /** Polls currently in flight (a counter: a restart can briefly overlap the
-   *  old generation's last tick with the new one's first). */
-  let inFlight = 0
+  /**
+   * Polls currently in flight, counted per generation.
+   *
+   * A counter, because a restart can briefly overlap the old generation's last
+   * tick with the new one's first — and keyed by generation for the same reason:
+   * the only question the catch-up below asks is whether *this* cycle's poll is
+   * already running. A single global counter answered for the abandoned one too,
+   * so a slow tick left behind by a stop()/start() (its own `.finally` re-arms
+   * nothing — `g !== gen`) suppressed the catch-up for the live chain until it
+   * settled, and forever if it never did.
+   */
+  const inFlight = new Map<number, number>()
+
+  function pending(g: number): number {
+    return inFlight.get(g) ?? 0
+  }
 
   function isCurrent(g: number): boolean {
     return g === gen && live
@@ -68,11 +81,14 @@ export function usePollingLoop(
     // Stamped on entry, not on completion: the throttle below must bound how
     // often a poll is *started*, or a slow tick would still let a burst queue up.
     lastTickMs = Date.now()
-    inFlight += 1
+    inFlight.set(g, pending(g) + 1)
     return Promise.resolve(tick(g))
       .catch(() => undefined)
       .finally(() => {
-        inFlight -= 1
+        const left = pending(g) - 1
+        // Deleted at zero so the map cannot grow by one entry per restart.
+        if (left <= 0) inFlight.delete(g)
+        else inFlight.set(g, left)
       })
   }
 
@@ -98,12 +114,13 @@ export function usePollingLoop(
     // ProblemPodsCard walks every pod in the cluster and its 60s cadence is
     // deliberate, and the metrics charts of the page behind it fire alongside it.
     if (Date.now() - lastTickMs < intervalMs()) return
-    // A poll still in flight *is* this cycle's poll — its `.finally` re-arms
-    // the timer. The throttle alone cannot see it (lastTickMs marks the start,
-    // so a tick outlasting the interval passes), and running the catch-up
-    // beside it would leave two `.finally` handlers each scheduling the same
-    // live generation: a permanently doubled chain.
-    if (inFlight > 0) return
+    // A poll of *this generation* still in flight is this cycle's poll — its
+    // `.finally` re-arms the timer. The throttle alone cannot see it (lastTickMs
+    // marks the start, so a tick outlasting the interval passes), and running
+    // the catch-up beside it would leave two `.finally` handlers each scheduling
+    // the same live generation: a permanently doubled chain. An abandoned older
+    // generation's poll is deliberately not counted — nothing re-arms behind it.
+    if (pending(gen) > 0) return
     // Re-arm from now, replacing the pending timer: the catch-up *is* this
     // cycle's poll, and leaving the old timer would fire another one right
     // behind it. The generation is captured, like every other tick path, so a

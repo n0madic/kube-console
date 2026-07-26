@@ -7,7 +7,7 @@
 import { resourceDetailRoute } from "@/router"
 import type { ResourceRef } from "@/api/types"
 import type { MiniRow } from "@/utils/miniTable"
-import { isStatusColumn, statusTextClass } from "@/utils/statusColors"
+import { isStatusColumn, NEUTRAL_TEXT_CLASS, statusTextClass } from "@/utils/statusColors"
 
 const props = defineProps<{
   linkRef: ResourceRef
@@ -18,8 +18,7 @@ const props = defineProps<{
 
 function cellClass(columnName: string, value: string): string {
   return (
-    (isStatusColumn(columnName) ? statusTextClass(value) : null) ??
-    "text-slate-700 dark:text-slate-300"
+    (isStatusColumn(columnName) ? statusTextClass(value) : null) ?? NEUTRAL_TEXT_CLASS
   )
 }
 </script>

@@ -38,8 +38,9 @@ vi.mock("@/composables/useDiscovery", () => ({
     findByLowerKind: () => undefined,
   }),
 }))
+const routerPush = vi.hoisted(() => vi.fn())
 vi.mock("vue-router", () => ({
-  useRouter: () => ({ push: vi.fn() }),
+  useRouter: () => ({ push: routerPush }),
   RouterLink: { props: ["to"], template: "<a><slot /></a>" },
 }))
 
@@ -153,12 +154,36 @@ describe("ResourceListPage in all-namespaces mode", () => {
     window.sessionStorage.clear()
     setActivePinia(createPinia())
     mockedWalk.mockReset()
+    routerPush.mockReset()
     watchFake.onEvent = undefined
     useAuthStore().setSession("alpha", "tok-alpha", null, false)
   })
 
   afterEach(() => {
     for (const wrapper of mounted.splice(0)) wrapper.unmount()
+  })
+
+  // Regression: the row the table hands back is the *projected* one, whose cell
+  // 0 is the injected Namespace — so openDetail's Name fallback read the
+  // namespace and navigated to an object that cannot exist. Only reachable when
+  // the row carries no object metadata (a server answering the Table request
+  // without it), which is exactly why the aliasing went unnoticed.
+  it("opens the right object when a row carries no metadata", async () => {
+    mockedWalk.mockImplementation(
+      walkOf([{ cells: ["api", "1/1"], object: { metadata: { namespace: "team-a" } } }]),
+    )
+    const wrapper = await mountPage()
+    expect(renderedRows(wrapper)).toEqual([["team-a", "api", "1/1"]])
+
+    await wrapper
+      .findAll('[role="row"]')
+      .filter((r) => r.findAll('[role="cell"]').length > 0)[0]!
+      .trigger("click")
+
+    expect(routerPush).toHaveBeenCalledTimes(1)
+    const route = routerPush.mock.calls[0]![0] as { params: Record<string, string> }
+    expect(route.params.name).toBe("api")
+    expect(route.params.namespace).toBe("team-a")
   })
 
   it("renders the injected Namespace column for every row", async () => {

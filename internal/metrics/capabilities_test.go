@@ -305,6 +305,90 @@ func TestStaleCachedVersionReprobedAfter404(t *testing.T) {
 	}
 }
 
+// Regression: the 404 invalidation above fired for single-object requests too,
+// where 404 is the *ordinary* answer — metrics-server returns it for any pod it
+// has not scraped yet. So opening the Metrics tab on a fresh pod evicted a
+// cluster-global, per-context cache on every 15s poll for that pod's first
+// minute, and every other user of the context paid a capability probe per
+// request. Only a collection 404 says the version is gone.
+func TestSingleObject404KeepsCachedVersion(t *testing.T) {
+	var probes atomic.Int32
+	h := newMetricsRouter(t, true, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/apis/metrics.k8s.io":
+			probes.Add(1)
+			_, _ = w.Write([]byte(`{"kind":"APIGroup","name":"metrics.k8s.io",
+				"preferredVersion":{"groupVersion":"metrics.k8s.io/v1beta1","version":"v1beta1"}}`))
+		case "/apis/metrics.k8s.io/v1beta1/nodes":
+			_, _ = w.Write([]byte(`{"items":[]}`))
+		default:
+			// Every pod lookup: not scraped yet.
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"kind":"Status","status":"Failure","reason":"NotFound","code":404}`))
+		}
+	})
+
+	if rec := getMetrics(h, "/api/ui/metrics/nodes"); rec.Code != http.StatusOK {
+		t.Fatalf("prime: status = %d: %s", rec.Code, rec.Body.String())
+	}
+	for range 3 {
+		rec := getMetrics(h, "/api/ui/metrics/pods/default/fresh-pod")
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("pod metrics: status = %d, want the upstream 404: %s", rec.Code, rec.Body.String())
+		}
+	}
+	if got := probes.Load(); got != 1 {
+		t.Fatalf("capability probe hit %d times, want 1 (a per-object 404 must not drop the cache)", got)
+	}
+}
+
+// The complement of the probe caching above: a probe that no longer reports the
+// group available must retire a version cached earlier, or a data request that
+// never probes (the Overview's node metrics) keeps taking the cache-hit path
+// into a group version this cluster stopped serving for the rest of the TTL.
+func TestCapabilitiesProbeDropsCachedVersionWhenUnavailable(t *testing.T) {
+	var installed atomic.Bool
+	installed.Store(true)
+	var probes atomic.Int32
+	h := newMetricsRouter(t, true, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/apis/metrics.k8s.io":
+			probes.Add(1)
+			if !installed.Load() {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"kind":"Status","code":404}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"kind":"APIGroup","name":"metrics.k8s.io",
+				"preferredVersion":{"groupVersion":"metrics.k8s.io/v1beta1","version":"v1beta1"}}`))
+		case "/apis/metrics.k8s.io/v1beta1/nodes":
+			_, _ = w.Write([]byte(`{"items":[]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"kind":"Status","code":404}`))
+		}
+	})
+
+	if rec := getMetrics(h, "/api/ui/metrics/capabilities"); decodeCaps(t, rec).State != StateAvailable {
+		t.Fatalf("prime: state = %q, want available", decodeCaps(t, rec).State)
+	}
+	installed.Store(false)
+	if rec := getMetrics(h, "/api/ui/metrics/capabilities"); decodeCaps(t, rec).State != StateNotInstalled {
+		t.Fatalf("after uninstall: state = %q, want not-installed", decodeCaps(t, rec).State)
+	}
+	before := probes.Load()
+	// The data request must re-probe (and answer not-installed) rather than
+	// replay the retired version.
+	if rec := getMetrics(h, "/api/ui/metrics/nodes"); rec.Code != http.StatusNotFound {
+		t.Fatalf("data request: status = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+	if got := probes.Load(); got != before+1 {
+		t.Fatalf("capability probes = %d, want %d (the data request must re-probe)", got, before+1)
+	}
+}
+
 // The version cache is keyed per context: two clusters running different
 // metrics.k8s.io versions must not bleed into one another.
 func TestVersionCacheIsolatedPerContext(t *testing.T) {

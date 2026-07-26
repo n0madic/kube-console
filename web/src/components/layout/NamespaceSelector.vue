@@ -96,10 +96,15 @@ watch(
            and DNS-1123 names cannot contain underscores. -->
       <option v-if="truncated" disabled value="__truncated__">… more namespaces not listed</option>
     </BaseSelect>
+    <!-- `.lazy`: a plain v-model commits on every keystroke, and this value is
+         watched by the list page (a full bounded collection walk), the events
+         card (a 1000-item fetch) and the Overview's metrics loop — so typing
+         "kube-system" fired eleven of each, one per prefix. The select branch
+         has no such problem: it emits once per pick. -->
     <input
       v-else
       id="ns-select"
-      v-model="ui.namespace"
+      v-model.lazy="ui.namespace"
       placeholder="namespace (empty = all)"
       class="w-32 min-w-0 rounded-md border border-slate-300 bg-white px-2 py-1 text-sm sm:w-48 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
     />

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -138,5 +139,52 @@ func TestFetchAggregatedErrorNamesFailingRoot(t *testing.T) {
 				t.Fatalf("error = %v, want a wrapped statusError 403", err)
 			}
 		})
+	}
+}
+
+// Regression: an aggregated attempt that succeeded but named nothing was served
+// as a 200 with an empty catalog. The SPA cannot tell that from an empty
+// cluster — useDiscovery coerces with `?? []` and Sidebar renders its error line
+// only on isError — so it painted a blank sidebar with no message, which is
+// exactly what fetchLegacy's "every group version failed" guard exists to
+// prevent. The attempt must fail so legacy discovery answers instead.
+func TestFetchAggregatedEmptyCatalogFallsBackToLegacy(t *testing.T) {
+	const emptyAggregated = `{"kind":"APIGroupDiscoveryList","items":[]}`
+
+	var legacyHits atomic.Int32
+	h := newDiscoveryHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		accept := r.Header.Get("Accept")
+		aggregated := strings.Contains(accept, "APIGroupDiscoveryList")
+		switch {
+		case aggregated && r.URL.Path == "/apis":
+			_, _ = w.Write([]byte(emptyAggregated))
+		case aggregated && r.URL.Path == "/api":
+			_, _ = w.Write([]byte(emptyAggregated))
+		case r.URL.Path == "/api":
+			legacyHits.Add(1)
+			_, _ = w.Write([]byte(`{"kind":"APIVersions","versions":["v1"]}`))
+		case r.URL.Path == "/apis":
+			legacyHits.Add(1)
+			_, _ = w.Write([]byte(`{"kind":"APIGroupList","groups":[]}`))
+		case r.URL.Path == "/api/v1":
+			_, _ = w.Write([]byte(`{"kind":"APIResourceList","groupVersion":"v1","resources":[
+				{"name":"pods","kind":"Pod","namespaced":true,"verbs":["get","list"]}]}`))
+		default:
+			t.Errorf("unexpected upstream path %s (accept %q)", r.URL.Path, accept)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	rec := getDiscovery(h, "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	byID := decodeResources(t, rec)
+	if _, ok := byID["core/v1/pods"]; !ok {
+		t.Fatalf("legacy fallback did not run: catalog = %v", byID)
+	}
+	if legacyHits.Load() == 0 {
+		t.Fatal("legacy discovery was never attempted")
 	}
 }
