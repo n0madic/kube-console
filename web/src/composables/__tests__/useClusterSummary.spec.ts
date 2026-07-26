@@ -4,17 +4,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import { defineComponent, h } from "vue"
 
 vi.mock("@/api/k8s", () => ({ fetchNodes: vi.fn(), fetchPodCount: vi.fn() }))
-vi.mock("@/api/ui", () => ({ fetchAllNodeMetrics: vi.fn() }))
+vi.mock("@/api/ui", () => ({ fetchAllNodeMetrics: vi.fn(), fetchMetricsCapabilities: vi.fn() }))
 
 import { fetchNodes, fetchPodCount } from "@/api/k8s"
 import type { K8sObjectList, MetricsResponse } from "@/api/types"
-import { fetchAllNodeMetrics } from "@/api/ui"
+import { fetchAllNodeMetrics, fetchMetricsCapabilities } from "@/api/ui"
 import { useClusterSummary } from "@/composables/useClusterSummary"
 import { useAuthStore } from "@/stores/auth"
 
 const mockNodes = vi.mocked(fetchNodes)
 const mockPods = vi.mocked(fetchPodCount)
 const mockMetrics = vi.mocked(fetchAllNodeMetrics)
+const mockCaps = vi.mocked(fetchMetricsCapabilities)
 
 function nodeList(): K8sObjectList {
   return {
@@ -62,8 +63,10 @@ const metrics: MetricsResponse = {
   ],
 }
 
+// Deep enough for the whole start() chain: the capability gate, then the first
+// refresh's three settled calls.
 async function flush(): Promise<void> {
-  for (let i = 0; i < 8; i++) await Promise.resolve()
+  for (let i = 0; i < 12; i++) await Promise.resolve()
 }
 
 function useInHost() {
@@ -87,6 +90,10 @@ describe("useClusterSummary", () => {
     mockNodes.mockReset()
     mockPods.mockReset()
     mockMetrics.mockReset()
+    mockCaps.mockReset()
+    // The cluster the other tests describe has metrics-server; the two that
+    // care override this.
+    mockCaps.mockResolvedValue({ state: "available" })
   })
 
   it("aggregates node totals, usage and pod count", async () => {
@@ -389,5 +396,76 @@ describe("useClusterSummary", () => {
 
     expect(summary.available.value).toBe(true)
     expect(summary.data.value?.pods).toEqual({ count: null, capacity: 220 })
+  })
+
+  // Regression: the usage call went out on every tick whether or not the
+  // cluster has metrics-server, so a cluster without one paid a doomed request
+  // every 15s for as long as an Overview tab stayed open. The probe is the same
+  // one the charts on this page already run, and it gates the usage call only —
+  // never the loop, since the node totals, the Ready count and the pod count
+  // stand on their own and the gauges already render "—" for absent usage.
+  it("stops requesting node usage on a cluster without metrics-server", async () => {
+    vi.useFakeTimers()
+    try {
+      mockCaps.mockResolvedValue({ state: "not-installed" })
+      mockNodes.mockResolvedValue(nodeList())
+      mockPods.mockResolvedValue(31)
+      mockMetrics.mockResolvedValue(metrics)
+      const auth = useAuthStore()
+      auth.setSession("alpha", "tok-alpha", null, false)
+
+      const summary = useInHost()
+      summary.start()
+      await flush()
+      expect(mockMetrics).not.toHaveBeenCalled()
+      // Everything the row does not need metrics-server for is still there.
+      expect(summary.available.value).toBe(true)
+      expect(summary.data.value?.cpu).toEqual({ usedCores: null, totalCores: 8 })
+      expect(summary.data.value?.pods.count).toBe(31)
+      expect(summary.data.value?.nodes).toEqual({ ready: 1, total: 2 })
+
+      // t=15s/30s/45s: the loop keeps polling what it can read …
+      await vi.advanceTimersByTimeAsync(45_000)
+      expect(mockPods).toHaveBeenCalledTimes(4)
+      // … without the call that cannot succeed, and without re-probing per
+      // tick, which would only swap one doomed request for another.
+      expect(mockMetrics).not.toHaveBeenCalled()
+      expect(mockCaps).toHaveBeenCalledTimes(1)
+      summary.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // The verdict must not outlive the cluster it was probed for: metrics-server
+  // is installed in one cluster and missing in the next. The probe runs per
+  // start(), and the context watch restarts the loop.
+  it("re-probes metrics capabilities on a context switch", async () => {
+    vi.useFakeTimers()
+    try {
+      mockCaps
+        .mockResolvedValueOnce({ state: "not-installed" })
+        .mockResolvedValue({ state: "available" })
+      mockNodes.mockResolvedValue(nodeList())
+      mockPods.mockResolvedValue(31)
+      mockMetrics.mockResolvedValue(metrics)
+      const auth = useAuthStore()
+      auth.setSession("alpha", "tok-alpha", null, false)
+
+      const summary = useInHost()
+      summary.start()
+      await flush()
+      expect(mockMetrics).not.toHaveBeenCalled()
+
+      auth.setSession("beta", "tok-beta", null, false)
+      await flush()
+
+      expect(mockCaps).toHaveBeenCalledTimes(2)
+      expect(mockMetrics).toHaveBeenCalledTimes(1)
+      expect(summary.data.value?.cpu.usedCores).toBe(0.82)
+      summary.stop()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

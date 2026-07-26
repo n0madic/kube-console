@@ -941,6 +941,16 @@ and the empty state keys on **both maps having resolved**, never on
 session past its TTL) data stays undefined, and "No environment variables."
 would then be a false statement about the Pod.
 
+That gated-off state gets its **own** branch (`signedOut`, ahead of the
+unresolved one), because it is not a slow fetch but a dead end: a session ends
+under an open tab with no navigation — TTL expiry is the usual way and the route
+guard only runs on a route change — after which `enabled` is false, so no
+request is made, so no 401 arrives to run the global handler's redirect to
+`/login`. `resolved` then stays false forever and the tab sat on "Loading..."
+until someone navigated away by hand. It covers the Pod that references no
+ConfigMap/Secret at all, too: its fetches would resolve instantly, but a
+disabled query does not run.
+
 ### Logs
 
 `PodLogsTab` → `LogViewer.vue` is **not** CodeMirror/xterm but a plain
@@ -1429,6 +1439,25 @@ from three calls — `GET /k8s/api/v1/nodes` (allocatable cpu/memory/pods via
 a one-page `fetchPodCount` (`includeObject=None` Table + `remainingItemCount`).
 A forbidden node list (namespace-scoped tokens) hides the whole row; the Pods and
 Nodes gauges link to their lists.
+
+The usage call is **capability-gated**, through the same
+`/api/ui/metrics/capabilities` probe the charts on this page use: without it a
+cluster with no metrics-server paid a doomed `fetchAllNodeMetrics` on every tick
+for as long as an Overview tab stayed open. The gate is `usePollingLoop`'s, so it
+runs once per `start()` and is re-run on the context watch's restart (two
+clusters genuinely differ) — but unlike `useMetricsPolling`'s it **always returns
+true**: it gates one of the three calls, never the loop, since the node totals,
+the Ready count and the pod count owe metrics-server nothing and absent usage is
+already a rendered "—". Two defaults make that safe. The flag starts **true**, so
+a `refresh()` called outside the loop with nothing probed yet still tries once
+rather than reading "not probed" as "absent"; and a **failed** probe falls back
+to trying the call, since guessing absent would blank the usage gauges of a
+cluster that does have metrics-server over one bad round trip. Only a definite
+non-`available` verdict turns the call off, and the verdict is assigned outright
+on every probe so none can outlive the cluster it was taken for. The probe's own
+write is guarded by a `gateSeq` bumped in the loop's `onStop`, exactly as
+`requestSeq` guards `refresh()`'s: the loop's generation is not live while its
+gate runs.
 
 Two of those ride the metrics cadence; the node list does **not**. It is the one
 expensive call — the API cannot project fields out of a list, so it transfers

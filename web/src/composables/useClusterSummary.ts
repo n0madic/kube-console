@@ -4,15 +4,16 @@
 // usePollingLoop); all state stays in memory. One loop, but not one cadence:
 // the node list is the expensive call and the slow-moving data, so it is fetched
 // only when its own snapshot is stale (NODES_INTERVAL_MS) while usage and the
-// pod count follow every tick. Node list access failing (e.g. a
-// namespace-scoped token) marks the summary unavailable so the caller can hide
-// the whole row.
+// pod count follow every tick, and usage is skipped entirely on a cluster whose
+// metrics capabilities say there is nothing to ask (probed per start()). Node
+// list access failing (e.g. a namespace-scoped token) marks the summary
+// unavailable so the caller can hide the whole row.
 
 import { ref, watch } from "vue"
 
 import { fetchNodes, fetchPodCount } from "@/api/k8s"
-import { fetchAllNodeMetrics } from "@/api/ui"
-import type { K8sObject } from "@/api/types"
+import { fetchAllNodeMetrics, fetchMetricsCapabilities } from "@/api/ui"
+import type { K8sObject, MetricsCapabilities } from "@/api/types"
 import { useAuthStore } from "@/stores/auth"
 import { usePreferencesStore } from "@/stores/preferences"
 import { metricsIntervalMs } from "@/utils/metricsRanges"
@@ -110,6 +111,44 @@ export function useClusterSummary() {
   let cachedNodes: NodeTotals | null = null
   let cachedNodesAtMs = 0
 
+  // Whether the usage call is worth making. Probed once per start() through the
+  // same capability endpoint the charts on this page use, and gating exactly one
+  // of the three calls — never the loop, unlike useMetricsPolling's gate: node
+  // totals, the Ready count and the pod count owe metrics-server nothing, and
+  // absent usage is already a rendered "—". Without it a cluster that has no
+  // metrics-server paid a doomed fetchAllNodeMetrics every tick, per open
+  // Overview tab, for as long as it stayed open.
+  //
+  // It starts true because refresh() is callable outside the loop, with nothing
+  // probed yet: one attempt is what that has always done, and "not probed" must
+  // not read as "absent".
+  let metricsUsable = true
+
+  // Guards the probe's write the way requestSeq guards refresh()'s: the loop's
+  // generation is not live while its gate runs, so a probe still outstanding
+  // across a stop()/restart would otherwise stamp the previous cluster's verdict
+  // onto the new one. Bumped by the same onStop hook.
+  let gateSeq = 0
+
+  async function probeMetrics(): Promise<boolean> {
+    const mine = ++gateSeq
+    let probed: MetricsCapabilities | null
+    try {
+      probed = await fetchMetricsCapabilities()
+    } catch {
+      probed = null
+    }
+    if (mine !== gateSeq) return false // superseded by a stop()/restart
+    // A failed probe is not a verdict, so it falls back to trying the call —
+    // what this composable did before the gate existed. Only a definite "not
+    // available" turns the call off: guessing absent would blank the usage
+    // gauges of a cluster that does have metrics-server over one bad round trip.
+    // Assigned outright rather than left alone, so no verdict can survive the
+    // cluster it was probed for.
+    metricsUsable = probed === null || probed.state === "available"
+    return true // the other two gauges are worth polling either way
+  }
+
   async function refresh(): Promise<void> {
     const req = ++requestSeq
     // Stamped on entry, like usePollingLoop's own throttle: what is bounded is
@@ -122,7 +161,7 @@ export function useClusterSummary() {
     const wantNodes = cachedNodes === null || startedAtMs - cachedNodesAtMs >= NODES_INTERVAL_MS
     const [nodesR, metricsR, podsR] = await Promise.allSettled([
       wantNodes ? fetchNodes() : Promise.resolve(null),
-      fetchAllNodeMetrics(),
+      metricsUsable ? fetchAllNodeMetrics() : Promise.resolve(null),
       fetchPodCount(),
     ])
     // Superseded by a newer refresh or by stop() during the await: discard
@@ -151,7 +190,9 @@ export function useClusterSummary() {
 
     let usedCores: number | null = null
     let usedBytes: number | null = null
-    if (metricsR.status === "fulfilled") {
+    // null is the skipped call (no metrics-server), which reads exactly like a
+    // failed one: usage stays null and the gauges render "—".
+    if (metricsR.status === "fulfilled" && metricsR.value !== null) {
       let cpu = 0
       let mem = 0
       for (const item of metricsR.value.items) {
@@ -181,11 +222,12 @@ export function useClusterSummary() {
     intervalMs,
     () => {
       requestSeq += 1 // invalidate any refresh still in flight
+      gateSeq += 1 // …and any capability probe, which the generation cannot see
     },
   )
 
   function start(): void {
-    void loop.start()
+    void loop.start(probeMetrics)
   }
 
   // Follow the active cluster: the Overview stays mounted across a context
@@ -212,7 +254,9 @@ export function useClusterSummary() {
       cachedNodes = null
       cachedNodesAtMs = 0
       if (!auth.isAuthenticated) return
-      void loop.start()
+      // Through start(), so the new cluster is probed for metrics-server rather
+      // than inheriting the previous one's verdict — the two genuinely differ.
+      start()
     },
   )
 

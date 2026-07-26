@@ -159,7 +159,12 @@ describe("PodEnvTab", () => {
   // A gated-off session (past its TTL) leaves the queries disabled and their
   // data undefined. That must never render as "No environment variables." —
   // the Pod does declare them, they simply were not fetched.
-  it("does not claim the Pod has no env vars while the sources are unresolved", async () => {
+  //
+  // Nor as "Loading...", which is what it used to say: nothing is loading and
+  // nothing ever will, because `enabled` is false and no request means no 401
+  // to route the user to /login. The tab sat on that spinner text until it was
+  // navigated away from by hand.
+  it("names the ended session instead of a Loading... that never resolves", async () => {
     resolveFixtures()
     useAuthStore().clearSession("test-ctx")
     const wrapper = mountTab()
@@ -167,7 +172,31 @@ describe("PodEnvTab", () => {
 
     expect(mockedGet).not.toHaveBeenCalled()
     expect(wrapper.text()).not.toContain("No environment variables.")
-    expect(wrapper.text()).toContain("Loading...")
+    expect(wrapper.text()).not.toContain("Loading...")
+    expect(wrapper.text()).toContain("Session expired")
+  })
+
+  // The same dead end reached with nothing to fetch: a Pod declaring only
+  // literal env vars still has both queries disabled, so `resolved` stays false
+  // and the rows it *could* render from the spec alone are never reached. The
+  // signed-out notice covers this case too — it is the session that is missing,
+  // not the data.
+  it("names the ended session for a Pod with no ConfigMap/Secret sources", async () => {
+    resolveFixtures()
+    useAuthStore().clearSession("test-ctx")
+    const literalOnly = {
+      kind: "Pod",
+      metadata: { name: "plain", namespace: "prod", uid: "p3" },
+      spec: { containers: [{ name: "app", env: [{ name: "PLAIN", value: "hello" }] }] },
+    } as unknown as K8sObject
+    const wrapper = mount(PodEnvTab, {
+      props: { object: literalOnly },
+      global: { plugins: [[VueQueryPlugin, { queryClient }]] },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain("Session expired")
+    expect(wrapper.text()).not.toContain("Loading...")
   })
 
   // Regression: the Env tab is v-else-if in ResourceDetailPage, so switching

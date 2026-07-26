@@ -102,6 +102,16 @@ const secretsQuery = envSourceQuery(SECRET_REF, () => sourceNames.value.secrets)
 const resolved = computed(
   () => configMapsQuery.data.value !== undefined && secretsQuery.data.value !== undefined,
 )
+
+// …and when they are gated off rather than merely slow, the tab has to say so.
+// A session ends under an open tab without any navigation — TTL expiry is the
+// usual way, and the route guard only runs on a route change — after which
+// `enabled` is false, no request is made, and therefore no 401 arrives to run
+// the global handler's redirect to /login. `resolved` then stays false forever,
+// and "Loading..." is a spinner for a fetch that will never happen. This covers
+// the Pod with no ConfigMap/Secret references too: its fetches would resolve
+// instantly, but a disabled query does not run at all.
+const signedOut = computed(() => !auth.isAuthenticated)
 const rows = computed<EnvRow[]>(() => {
   const configMaps = configMapsQuery.data.value
   const secrets = secretsQuery.data.value
@@ -152,7 +162,10 @@ const hasRows = computed(() => rows.value.length > 0)
       them in this browser tab only.
     </p>
 
-    <p v-if="!resolved" class="py-6 text-center text-sm text-slate-400">Loading...</p>
+    <p v-if="signedOut" class="py-6 text-center text-sm text-slate-400">
+      Session expired — sign in again to load environment variables.
+    </p>
+    <p v-else-if="!resolved" class="py-6 text-center text-sm text-slate-400">Loading...</p>
     <p v-else-if="!hasRows" class="py-6 text-center text-sm text-slate-400">
       No environment variables.
     </p>
