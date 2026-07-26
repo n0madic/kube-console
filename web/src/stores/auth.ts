@@ -201,30 +201,29 @@ export const useAuthStore = defineStore("auth", () => {
       ? (localIdentity.value?.unavailable ?? false)
       : (active.value?.identityUnavailable ?? false),
   )
-  /** A token alone is not authentication: an expired one must never read as
-   * signed in, or switching to a stale context flashes past the login guard.
-   * With localAuth there is no token to check — the backend holds the
-   * credentials, and every context is reachable. */
-  const isAuthenticated = computed(() => {
-    if (localAuth.value) return true
-    const session = active.value
-    return session !== null && session.token !== "" && !isSessionExpired(session)
-  })
-
   /**
    * True when this tab holds a usable token for the given context — what the
-   * cluster switcher marks as already signed in. Expiry is checked lazily
-   * (never as a reactive clock), so this is a read-only view: dropping what has
-   * expired is pruneExpiredSessions' job, and it must not happen inside the
-   * computeds that call this.
+   * cluster switcher marks as already signed in, and (through isAuthenticated
+   * below) what the route guard gates on. Expiry is checked lazily (never as a
+   * reactive clock), so this is a read-only view: dropping what has expired is
+   * pruneExpiredSessions' job, and it must not happen inside the computeds that
+   * call this.
+   *
+   * A token alone is not authentication: an expired one must never read as
+   * signed in, or switching to a stale context flashes past the login guard.
    */
   function hasSession(context: string): boolean {
-    // With localAuth every context is usable without a token of its own, so the
-    // cluster switcher marks them all as signed in — which they are.
+    // With localAuth there is no token to check — the backend holds the
+    // credentials and every context is reachable, so the cluster switcher marks
+    // them all as signed in, which they are.
     if (localAuth.value) return true
     const session = sessionFor(sessions.value, context)
     return session !== null && session.token !== "" && !isSessionExpired(session)
   }
+
+  /** The same predicate for whichever context is active: one rule, so the route
+   * guard and the switcher's "signed in" mark cannot drift apart. */
+  const isAuthenticated = computed(() => hasSession(activeContext.value))
 
   /** Every context this tab still holds a usable token for. Lets the login page
    * offer a way back when a switch landed on a cluster the user cannot (or does

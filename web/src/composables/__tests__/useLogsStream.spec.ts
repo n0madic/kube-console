@@ -37,6 +37,41 @@ function streamResponse(chunks: string[]): Response {
   return new Response(body)
 }
 
+/** Response whose body the test feeds one chunk at a time. */
+function manualResponse(): { resp: Response; push: (text: string) => void; close: () => void } {
+  let ctrl!: ReadableStreamDefaultController<Uint8Array>
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      ctrl = c
+    },
+  })
+  return {
+    resp: new Response(body),
+    push: (text) => ctrl.enqueue(encoder.encode(text)),
+    close: () => ctrl.close(),
+  }
+}
+
+/**
+ * Waits for the flush of a just-fed chunk: the 50ms window plus however long
+ * reading and staging it takes (a 200k-line chunk is not instant). Exactly one
+ * flush per call — with nothing staged the window is not armed again. Real
+ * timers throughout: the reads go through the platform's ReadableStream, whose
+ * queue is not a fake clock's.
+ */
+async function nextFlush(version: { value: number }): Promise<void> {
+  const before = version.value
+  for (let i = 0; i < 200; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    if (version.value !== before) return
+  }
+  throw new Error("no flush within 4s")
+}
+
+function joinedLines(prefix: string, from: number, count: number): string {
+  return Array.from({ length: count }, (_, i) => `${prefix}${from + i}`).join("\n") + "\n"
+}
+
 describe("useLogsStream", () => {
   afterEach(() => {
     mockedFetch.mockReset()
@@ -88,14 +123,145 @@ describe("useLogsStream", () => {
     const stream = useInHost()
 
     let updates = 0
-    watch(stream.lines, () => updates++)
+    // The counter is the signal, not the array: lines are appended in place, so
+    // watching `lines` itself would only ever see the reset in start().
+    watch(stream.linesVersion, () => updates++)
 
     await stream.start("/url")
     await nextTick()
 
     expect(stream.lines.value).toHaveLength(50)
-    // One reset to [] on start plus the final flush — never one per chunk.
+    // One reset on start plus the final flush — never one per chunk.
     expect(updates).toBeLessThanOrEqual(2)
+  })
+
+  // The buffer is appended to in place and the change announced by bumping
+  // `linesVersion`. Handing over a fresh array per flush (lines.concat(pending))
+  // was the quadratic cost this replaces: the flush window bounds how often a
+  // merge happens, not what it costs, so a bulk load into a capped 200k-line
+  // buffer copied ~100k lines per chunk.
+  it("appends into the same array across flushes and signals with a version bump", async () => {
+    const feed = manualResponse()
+    mockedFetch.mockResolvedValue(feed.resp)
+    const stream = useInHost()
+    const done = stream.start("/url")
+    // start() resets synchronously, so this is the buffer of the new stream.
+    const buffer = stream.lines.value
+    const afterReset = stream.linesVersion.value
+
+    feed.push("a\n")
+    await nextFlush(stream.linesVersion)
+    expect(stream.lines.value).toEqual(["a"])
+    expect(stream.linesVersion.value).toBeGreaterThan(afterReset)
+    const afterFirst = stream.linesVersion.value
+
+    feed.push("b\nc\n")
+    await nextFlush(stream.linesVersion)
+    expect(stream.lines.value).toEqual(["a", "b", "c"])
+    expect(stream.linesVersion.value).toBeGreaterThan(afterFirst)
+    // The point of the counter: nothing about the array itself changed.
+    expect(stream.lines.value).toBe(buffer)
+
+    feed.close()
+    await done
+    expect(stream.lines.value).toBe(buffer)
+    expect(stream.running.value).toBe(false)
+  })
+
+  // The cost check. Wall-clock timing would be flaky, so the whole-buffer copies
+  // themselves are counted: `concat` in flush() and `slice` in trim() were the
+  // two, and only arrays holding this test's own log lines are counted so no
+  // unrelated call can decide the outcome.
+  it("never copies the whole buffer while appending", async () => {
+    const COPY_THRESHOLD = 500
+    type ArrayCopy = (this: unknown[], ...args: unknown[]) => unknown[]
+    const proto = Array.prototype as unknown as Record<"concat" | "slice", ArrayCopy>
+    const realConcat = proto.concat
+    const realSlice = proto.slice
+    const copies: number[] = []
+    function watchCopies(real: ArrayCopy): ArrayCopy {
+      return function (this: unknown[], ...args: unknown[]) {
+        const first = this[0]
+        const isLogBuffer = typeof first === "string" && first.startsWith("line-")
+        if (isLogBuffer && this.length >= COPY_THRESHOLD) copies.push(this.length)
+        return real.apply(this, args)
+      }
+    }
+
+    const feed = manualResponse()
+    mockedFetch.mockResolvedValue(feed.resp)
+    const stream = useInHost()
+    const done = stream.start("/url")
+    proto.concat = watchCopies(realConcat)
+    proto.slice = watchCopies(realSlice)
+    try {
+      for (let i = 0; i < 10; i++) {
+        feed.push(joinedLines("line-", i * 200, 200))
+        await nextFlush(stream.linesVersion)
+      }
+      feed.close()
+      await done
+    } finally {
+      proto.concat = realConcat
+      proto.slice = realSlice
+    }
+
+    expect(stream.lines.value).toHaveLength(2000)
+    expect(stream.lines.value[0]).toBe("line-0")
+    expect(stream.lines.value.at(-1)).toBe("line-1999")
+    expect(copies).toEqual([])
+  })
+
+  it("drops the head in place once the buffer reaches the cap", async () => {
+    const feed = manualResponse()
+    mockedFetch.mockResolvedValue(feed.resp)
+    const stream = useInHost()
+    const done = stream.start("/url")
+    const buffer = stream.lines.value
+
+    feed.push(joinedLines("line-", 0, MAX_LINES))
+    await nextFlush(stream.linesVersion)
+    expect(stream.lines.value).toHaveLength(MAX_LINES)
+    expect(stream.truncated.value).toBe(false)
+
+    feed.push(joinedLines("line-", MAX_LINES, 2))
+    await nextFlush(stream.linesVersion)
+
+    expect(stream.lines.value).toBe(buffer)
+    expect(stream.lines.value).toHaveLength(MAX_LINES)
+    expect(stream.lines.value[0]).toBe("line-2")
+    expect(stream.lines.value.at(-1)).toBe(`line-${MAX_LINES + 1}`)
+    expect(stream.truncated.value).toBe(true)
+
+    feed.close()
+    await done
+  })
+
+  it("shows no line from the previous stream after a restart", async () => {
+    mockedFetch.mockResolvedValueOnce(streamResponse(["old-1\nold-2\n"]))
+    const stream = useInHost()
+    await stream.start("/podA/log")
+    expect(stream.lines.value).toEqual(["old-1", "old-2"])
+    const beforeRestart = stream.linesVersion.value
+
+    // A pod that has not logged anything yet, so nothing but the reset itself
+    // can announce the change.
+    const feed = manualResponse()
+    mockedFetch.mockResolvedValueOnce(feed.resp)
+    const done = stream.start("/podB/log")
+
+    expect(stream.lines.value).toEqual([])
+    // Checked before the first flush on purpose: appends are in place, so a
+    // consumer watching only the counter would keep the previous pod's lines on
+    // screen until a flush it may wait arbitrarily long for.
+    expect(stream.linesVersion.value).toBeGreaterThan(beforeRestart)
+
+    feed.push("new-1\n")
+    await nextFlush(stream.linesVersion)
+    expect(stream.lines.value).toEqual(["new-1"])
+
+    feed.close()
+    await done
   })
 
   it("surfaces an ApiError message and falls back for unknown errors", async () => {

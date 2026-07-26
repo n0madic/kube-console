@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/n0madic/kube-console/internal/httpx"
 	"github.com/n0madic/kube-console/internal/kube"
 )
 
@@ -122,10 +123,10 @@ func getJSON(ctx context.Context, up *kube.Upstream, token, path string, v any) 
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	// Bounded drain: how long an unread body takes to reach io.Discard is
+	// otherwise the upstream's choice, and it is paid while this request holds
+	// an in-flight slot. Connection reuse is worth 64 KiB, not an open tap.
+	defer httpx.DrainAndClose(resp)
 	if resp.StatusCode != http.StatusOK {
 		return &statusError{code: resp.StatusCode}
 	}

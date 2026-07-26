@@ -95,18 +95,45 @@ describe("tableToMini", () => {
     expect(tableToMini(table).rows[0]?.cells).toEqual(['{"a":1}'])
   })
 
-  it("drops named columns and coerces null cells to empty", () => {
+  it("coerces null cells to empty", () => {
     const table: K8sTable = {
       kind: "Table",
       columnDefinitions: [
         { name: "Name", type: "string" },
         { name: "Status", type: "string" },
-        { name: "Note", type: "string" },
       ],
-      rows: [{ cells: ["x", null, { a: 1 }], object: { metadata: { name: "x", namespace: "ns" } } }],
+      rows: [{ cells: ["x", null], object: { metadata: { name: "x", namespace: "ns" } } }],
     }
-    const mini = tableToMini(table, { drop: ["Note"] })
+    const mini = tableToMini(table)
     expect(mini.columns).toEqual(["Status"])
     expect(mini.rows[0]?.cells).toEqual([""])
+  })
+
+  // The Name column is dropped by name, case-insensitively — printers are free
+  // to spell it differently, and it is rendered as a link by the component.
+  it("drops the Name column whatever its case, and only that one", () => {
+    const table: K8sTable = {
+      kind: "Table",
+      columnDefinitions: [
+        { name: "NAME", type: "string" },
+        { name: "Namespace", type: "string" },
+        { name: "Status", type: "string" },
+      ],
+      rows: [
+        { cells: ["x", "ns", "Running"], object: { metadata: { name: "x", namespace: "ns" } } },
+      ],
+    }
+    const mini = tableToMini(table)
+    expect(mini.columns).toEqual(["Namespace", "Status"])
+    expect(mini.rows[0]?.cells).toEqual(["ns", "Running"])
+  })
+
+  // keepOnly bypasses the priority filter entirely, so it may name the Name
+  // column back in — unchanged behaviour, worth pinning now that the generic
+  // path has no options left besides rowFilter.
+  it("keepOnly ignores the priority-0 rule and the Name drop", () => {
+    const mini = tableToMini(rsTable, { keepOnly: ["Name", "Selector"] })
+    expect(mini.columns).toEqual(["Name", "Selector"])
+    expect(mini.rows[0]?.cells).toEqual(["web-abc", "app=web"])
   })
 })

@@ -83,6 +83,9 @@ const showNamespaceColumn = computed(() =>
 const displayColumns = computed(() =>
   showNamespaceColumn.value ? withNamespaceColumn(list.columns.value) : list.columns.value,
 )
+// Re-runs per watch event (each one replaces list.rows), so the projection
+// memoizes per source row and only the changed rows are rebuilt; the array
+// itself is always new, which is what the table rebuilds its row model on.
 const displayRows = computed(() =>
   showNamespaceColumn.value ? withNamespaceCells(list.rows.value) : list.rows.value,
 )
@@ -98,9 +101,9 @@ const hiddenColumns = computed(() => {
 // events in order. Columns missing the requested name are handled gracefully
 // by the table (no sort applied).
 const defaultSort = computed(() => {
-  if (props.resource === "events") return { column: "Last Seen", desc: false }
-  if (props.resource === "pods") return { column: "Age", desc: false }
-  return { column: "Name", desc: false }
+  if (props.resource === "events") return { column: "Last Seen" }
+  if (props.resource === "pods") return { column: "Age" }
+  return { column: "Name" }
 })
 
 const title = computed(() => discoveryEntry.value?.kind ?? props.resource)

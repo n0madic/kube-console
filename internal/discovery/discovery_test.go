@@ -7,18 +7,30 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/n0madic/kube-console/internal/kube"
 )
 
-func newDiscoveryHandler(t *testing.T, upstream http.HandlerFunc) *Handler {
+// newUpstream stands up a fake apiserver and the credential-free upstream that
+// points at it — the shape the fetchers take directly, without a Handler (which
+// sorts by ID and so cannot observe fetch order).
+func newUpstream(t *testing.T, upstream http.HandlerFunc) *kube.Upstream {
 	t.Helper()
 	ts := httptest.NewServer(upstream)
 	t.Cleanup(ts.Close)
-	base, _ := url.Parse(ts.URL)
-	up := &kube.Upstream{BaseURL: base, Transport: http.DefaultTransport}
+	base, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	return &kube.Upstream{BaseURL: base, Transport: http.DefaultTransport}
+}
+
+func newDiscoveryHandler(t *testing.T, upstream http.HandlerFunc) *Handler {
+	t.Helper()
+	up := newUpstream(t, upstream)
 	reg := kube.NewRegistryFromUpstreams("default", map[string]*kube.Upstream{"default": up})
 	return NewHandler(reg, slog.New(slog.DiscardHandler))
 }
@@ -251,9 +263,11 @@ func TestDiscoveryRoutesByContext(t *testing.T) {
 		t.Error("alpha must not be contacted for a beta request")
 	}))
 	t.Cleanup(alpha.Close)
-	betaHit := false
+	// Atomic: aggregated discovery fetches its two roots concurrently, so this
+	// handler runs on two goroutines at once for a single request.
+	var betaHit atomic.Bool
 	beta := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		betaHit = true
+		betaHit.Store(true)
 		minimal(w, r)
 	}))
 	t.Cleanup(beta.Close)
@@ -268,7 +282,7 @@ func TestDiscoveryRoutesByContext(t *testing.T) {
 	if rec := getDiscoveryContext(h, "tok", "beta"); rec.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 	}
-	if !betaHit {
+	if !betaHit.Load() {
 		t.Fatal("beta upstream was not contacted")
 	}
 }

@@ -9,15 +9,18 @@ const props = defineProps<{
   title: string
   items: MetricsItem[]
   sortBy: "cpu" | "memory"
-  limit?: number
 }>()
+
+// "Top pods" is a glance, not a list: the full set is one click away on the pods
+// list page, so the card stays short enough to sit beside its twin.
+const MAX_ROWS = 10
 
 const sorted = computed(() =>
   [...props.items]
     .sort((a, b) =>
       props.sortBy === "cpu" ? b.cpuNanoCores - a.cpuNanoCores : b.memoryBytes - a.memoryBytes,
     )
-    .slice(0, props.limit ?? 10),
+    .slice(0, MAX_ROWS),
 )
 
 function podRoute(item: MetricsItem) {

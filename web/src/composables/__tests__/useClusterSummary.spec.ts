@@ -37,6 +37,22 @@ function nodeList(): K8sObjectList {
   }
 }
 
+/** A deliberately different cluster: every total differs from nodeList()'s, so
+ *  a leaked snapshot cannot pass for the new cluster's own numbers. */
+function otherNodeList(): K8sObjectList {
+  return {
+    items: [
+      {
+        metadata: { name: "b1" },
+        status: {
+          allocatable: { cpu: "32", memory: "64000000Ki", pods: "250" },
+          conditions: [{ type: "Ready", status: "True" }],
+        },
+      },
+    ] as K8sObjectList["items"],
+  }
+}
+
 const metrics: MetricsResponse = {
   observedAt: "t",
   windowSeconds: 15,
@@ -150,6 +166,9 @@ describe("useClusterSummary", () => {
   // only wraps — nothing outside usePollingLoop can stamp its cadence, so the
   // timer armed before the switch still fired on the old schedule: a switch at
   // t=12s polled at 0s, 12s AND 15s — two full cluster summaries 3s apart.
+  //
+  // Polls are counted through fetchAllNodeMetrics, not fetchNodes: the node list
+  // has its own slower interval and is skipped on most ticks.
   it("restarts the polling cadence on a context switch instead of polling beside it", async () => {
     vi.useFakeTimers()
     try {
@@ -162,20 +181,155 @@ describe("useClusterSummary", () => {
       const summary = useInHost()
       summary.start()
       await flush()
-      expect(mockNodes).toHaveBeenCalledTimes(1) // t=0
+      expect(mockMetrics).toHaveBeenCalledTimes(1) // t=0
 
       await vi.advanceTimersByTimeAsync(12_000) // 15s interval floor: no poll yet
-      expect(mockNodes).toHaveBeenCalledTimes(1)
+      expect(mockMetrics).toHaveBeenCalledTimes(1)
       auth.setSession("beta", "tok-beta", null, false) // switch → immediate poll
       await flush()
-      expect(mockNodes).toHaveBeenCalledTimes(2) // t=12s
+      expect(mockMetrics).toHaveBeenCalledTimes(2) // t=12s
 
       // The pre-switch timer (armed for t=15s) must be gone …
       await vi.advanceTimersByTimeAsync(5_000) // t=17s
-      expect(mockNodes).toHaveBeenCalledTimes(2)
+      expect(mockMetrics).toHaveBeenCalledTimes(2)
       // … and the next poll comes one full interval after the switch.
       await vi.advanceTimersByTimeAsync(10_000) // t=27s
-      expect(mockNodes).toHaveBeenCalledTimes(3)
+      expect(mockMetrics).toHaveBeenCalledTimes(3)
+      summary.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // The node list is the summary's expensive call (whole node objects — the API
+  // cannot project fields out of a list) and its slow-moving data, so it has its
+  // own 60s interval inside the single polling loop.
+  it("fetches the node list on its own slower interval, usage every tick", async () => {
+    vi.useFakeTimers()
+    try {
+      mockNodes.mockResolvedValue(nodeList())
+      mockPods.mockResolvedValue(31)
+      mockMetrics.mockResolvedValue(metrics)
+      const auth = useAuthStore()
+      auth.setSession("alpha", "tok-alpha", null, false)
+
+      const summary = useInHost()
+      summary.start()
+      await flush()
+      // The first refresh has nothing cached, so it always fetches.
+      expect(mockNodes).toHaveBeenCalledTimes(1)
+      expect(mockMetrics).toHaveBeenCalledTimes(1)
+
+      // t=15s/30s/45s: three more metrics-cadence polls, still one node list.
+      await vi.advanceTimersByTimeAsync(45_000)
+      expect(mockMetrics).toHaveBeenCalledTimes(4)
+      expect(mockPods).toHaveBeenCalledTimes(4)
+      expect(mockNodes).toHaveBeenCalledTimes(1)
+
+      // t=60s: the node interval has elapsed, so this tick fetches the list too.
+      await vi.advanceTimersByTimeAsync(15_000)
+      expect(mockMetrics).toHaveBeenCalledTimes(5)
+      expect(mockNodes).toHaveBeenCalledTimes(2)
+      summary.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("renders the cached node totals on a tick that skipped the node list", async () => {
+    vi.useFakeTimers()
+    try {
+      // A second node list would change every total — it must never be read.
+      mockNodes.mockResolvedValueOnce(nodeList()).mockResolvedValue(otherNodeList())
+      mockPods.mockResolvedValueOnce(31).mockResolvedValue(35)
+      mockMetrics.mockResolvedValueOnce(metrics).mockResolvedValue({
+        ...metrics,
+        items: [
+          { kind: "Node", name: "n1", cpuNanoCores: 1_000_000_000, memoryBytes: 4_000_000_000 },
+        ],
+      })
+      const auth = useAuthStore()
+      auth.setSession("alpha", "tok-alpha", null, false)
+
+      const summary = useInHost()
+      summary.start()
+      await flush()
+      await vi.advanceTimersByTimeAsync(15_000) // second tick: cached nodes
+      expect(mockNodes).toHaveBeenCalledTimes(1)
+
+      const d = summary.data.value
+      expect(summary.available.value).toBe(true)
+      // Usage and the pod count are the fresh tick's …
+      expect(d?.cpu.usedCores).toBe(1)
+      expect(d?.memory.usedBytes).toBe(4_000_000_000)
+      expect(d?.pods.count).toBe(35)
+      // … while every node-derived total is the one node fetch's.
+      expect(d?.cpu.totalCores).toBe(8)
+      expect(d?.memory.totalBytes).toBe(2 * 16_000_000 * 1024)
+      expect(d?.pods.capacity).toBe(220)
+      expect(d?.nodes).toEqual({ ready: 1, total: 2 })
+      summary.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // Allocatable capacity and Ready counts are per-cluster: reusing them across a
+  // switch would render the previous cluster's capacity under the new cluster's
+  // usage for up to a full node interval.
+  it("refetches the node list on a context switch instead of reusing the cache", async () => {
+    vi.useFakeTimers()
+    try {
+      mockNodes.mockResolvedValueOnce(nodeList()).mockResolvedValue(otherNodeList())
+      mockPods.mockResolvedValue(31)
+      mockMetrics.mockResolvedValue(metrics)
+      const auth = useAuthStore()
+      auth.setSession("alpha", "tok-alpha", null, false)
+
+      const summary = useInHost()
+      summary.start()
+      await flush()
+      expect(summary.data.value?.cpu.totalCores).toBe(8)
+
+      // Well inside the node interval, so only a per-cluster reset can refetch.
+      await vi.advanceTimersByTimeAsync(12_000)
+      auth.setSession("beta", "tok-beta", null, false)
+      await flush()
+
+      expect(mockNodes).toHaveBeenCalledTimes(2)
+      const d = summary.data.value
+      expect(d?.cpu.totalCores).toBe(32)
+      expect(d?.memory.totalBytes).toBe(64_000_000 * 1024)
+      expect(d?.pods.capacity).toBe(250)
+      expect(d?.nodes).toEqual({ ready: 1, total: 1 })
+      summary.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // A failed attempt must not stamp the node interval: the gauges are hidden
+  // until it succeeds, so waiting out a full minute over one transient error
+  // would keep the row off screen for that long.
+  it("retries the node list on the next tick after a failed fetch", async () => {
+    vi.useFakeTimers()
+    try {
+      mockNodes.mockRejectedValueOnce(new Error("boom")).mockResolvedValue(nodeList())
+      mockPods.mockResolvedValue(31)
+      mockMetrics.mockResolvedValue(metrics)
+      const auth = useAuthStore()
+      auth.setSession("alpha", "tok-alpha", null, false)
+
+      const summary = useInHost()
+      summary.start()
+      await flush()
+      expect(summary.available.value).toBe(false)
+      expect(summary.data.value).toBeNull()
+
+      await vi.advanceTimersByTimeAsync(15_000)
+      expect(mockNodes).toHaveBeenCalledTimes(2)
+      expect(summary.available.value).toBe(true)
+      expect(summary.data.value?.cpu.totalCores).toBe(8)
       summary.stop()
     } finally {
       vi.useRealTimers()

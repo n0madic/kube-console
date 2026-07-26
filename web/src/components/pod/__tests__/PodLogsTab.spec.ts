@@ -6,19 +6,27 @@ import type { K8sObject } from "@/api/types"
 
 const startSpy = vi.hoisted(() => vi.fn())
 const truncated = vi.hoisted(() => ({ value: false }))
+// The version counter of the stream last created, so a test can bump it the way
+// a flush does — the composable appends in place and this is its only signal.
+const held = vi.hoisted(() => ({ version: { value: 0 } }))
 const fetchSpy = vi.hoisted(() => vi.fn())
 const saveSpy = vi.hoisted(() => vi.fn())
 
 vi.mock("@/composables/useLogsStream", () => ({
   MAX_LINES: 200000,
-  useLogsStream: () => ({
-    lines: ref<string[]>([]),
-    running: ref(false),
-    error: ref<string | null>(null),
-    truncated,
-    start: startSpy,
-    stop: vi.fn(),
-  }),
+  useLogsStream: () => {
+    const linesVersion = ref(0)
+    held.version = linesVersion
+    return {
+      lines: ref<string[]>([]),
+      linesVersion,
+      running: ref(false),
+      error: ref<string | null>(null),
+      truncated,
+      start: startSpy,
+      stop: vi.fn(),
+    }
+  },
 }))
 
 vi.mock("@/api/http", async () => {
@@ -111,6 +119,19 @@ describe("PodLogsTab", () => {
     expect(url).not.toContain("follow")
     expect(saveSpy).toHaveBeenCalledTimes(1)
     expect(saveSpy.mock.calls[0]?.[1]).toBe("pod-a_app.log")
+  })
+
+  it("hands the stream's version counter to the viewer", async () => {
+    const wrapper = mount(PodLogsTab, { props: { object: pod("u1", "pod-a", "app") } })
+    await nextTick()
+    const viewer = wrapper.findComponent({ name: "LogViewer" })
+    expect(viewer.props("version")).toBe(0)
+
+    // Without this wiring the viewer never learns that the shared line array
+    // grew, since the stream mutates it instead of replacing it.
+    held.version.value++
+    await nextTick()
+    expect(viewer.props("version")).toBe(1)
   })
 
   it("warns when the viewer dropped the start of the log", async () => {

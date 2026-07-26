@@ -2,7 +2,7 @@
 // overview recent-events card).
 
 import type { K8sObject } from "@/api/types"
-import { statusTextClass } from "./statusColors"
+import { statusSeverity } from "./statusColors"
 
 export interface EventRow {
   /** Stable identity for list keys (metadata.uid). */
@@ -85,11 +85,16 @@ export function sortByLastSeenDesc(rows: EventRow[]): EventRow[] {
 /**
  * Alarming rows: Warning events get an amber tint, error-like reasons
  * (Failed*, BackOff, Unhealthy, ...) a red one.
+ *
+ * The reason is classified with statusSeverity, never by searching the text
+ * color statusTextClass returns for "red": that recovered the severity from a
+ * palette name, so repainting error text to rose- (as GaugeCard already does)
+ * would have quietly downgraded every error row's background to amber.
+ * Each branch is one complete class string, per the Tailwind order rule.
  */
 export function eventRowClass(row: Pick<EventRow, "type" | "reason">): string {
   if (row.type !== "Warning") return ""
-  const reasonClass = statusTextClass(row.reason)
-  return reasonClass !== null && reasonClass.includes("red")
+  return statusSeverity(row.reason) === "error"
     ? "bg-red-50 dark:bg-red-950/40"
     : "bg-amber-50 dark:bg-amber-950/30"
 }

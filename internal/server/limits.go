@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -92,6 +93,62 @@ func (l *inFlightLimiter) middleware(longLived func(*http.Request) bool) func(ht
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// streamClassifier resolves a per-request predicate once and shares the verdict
+// with every middleware that needs it. On /k8s/* two of them ask the same
+// question of the same request — AbortOnShutdown, to decide whether to cancel
+// the moment shutdown starts, and the in-flight cap, to pick a pool — and
+// nothing mounted between them can change the answer. The question is not free:
+// gateway.IsStreaming parses the query string and, on a miss, walks the path
+// segments looking for the deprecated legacy-watch prefix, so asking twice pays
+// for all of that twice on every proxied request, watches and unary alike.
+type streamClassifier struct{ match func(*http.Request) bool }
+
+// streamingCtxKey keys the resolved verdict on the request context. An
+// unexported struct type, not a string: no other package can collide with it or
+// reach the value by guessing a name.
+type streamingCtxKey struct{}
+
+func newStreamClassifier(match func(*http.Request) bool) *streamClassifier {
+	return &streamClassifier{match: match}
+}
+
+// middleware evaluates the predicate once and stores the verdict on the request
+// context. It has to be mounted outside every consumer of verdict — the derived
+// contexts they build inherit values (AbortOnShutdown's context.WithCancelCause
+// included), so one value set out here is visible all the way in, but a value
+// set inside a consumer is invisible to it.
+func (c *streamClassifier) middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		streaming := c.match != nil && c.match(r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), streamingCtxKey{}, streaming)))
+	})
+}
+
+// verdict reports whether r is long-lived: the cached answer when the classifier
+// ran ahead of the caller, a fresh evaluation of the predicate otherwise.
+//
+// That fallback is load-bearing, not defensive tidiness. It is what keeps this
+// an optimization instead of a way out of the in-flight cap: "long-lived" is
+// decided by a client-supplied query parameter, so the cap must never become
+// opt-out, and without the fallback a route that mounted a consumer with no
+// classifier in front of it would classify every request by the zero value —
+// either sending watches into the small unary pool, where each one pins a slot
+// for as long as the page stays open, or (had the default gone the other way)
+// waving everything through the loose stream pool, which is the opt-out itself.
+// The /api subrouter mounts the cap with its own cheap isExecWS predicate and no
+// classifier, so this is a live path, not a hypothetical one.
+//
+// The value is per-request and lives only on that request's context. Do not add
+// a cross-request cache keyed by path or query: recomputing is cheap, and a
+// shared verdict keyed by client-supplied input would be a second source of
+// truth for what streams.
+func (c *streamClassifier) verdict(r *http.Request) bool {
+	if v, ok := r.Context().Value(streamingCtxKey{}).(bool); ok {
+		return v
+	}
+	return c.match != nil && c.match(r)
 }
 
 // isExecWS reports whether r targets the exec WebSocket bridge, which holds its

@@ -65,6 +65,25 @@ function mountTable(columns: K8sTableColumn[], rows: K8sTableRow[], globalFilter
   })
 }
 
+// The rendered cells, asserted non-empty first: the virtualizer renders zero
+// rows whenever the layout stubs above stop working, and every assertion over
+// the result would then pass against an empty DOM.
+function renderedCells(wrapper: ReturnType<typeof mountTable>) {
+  const found = wrapper.findAll('[role="cell"]')
+  expect(found.length, "expected rendered rows, got none").toBeGreaterThan(0)
+  return found
+}
+
+// A light- or dark-mode text color utility (text-red-600, dark:text-slate-300),
+// as opposed to text-sm / truncate.
+const COLOR_CLASS_RE = /^text-[a-z]+-\d{3}$/
+const DARK_COLOR_CLASS_RE = /^dark:text-[a-z]+-\d{3}$/
+
+const NAME_AND_STATUS: K8sTableColumn[] = [
+  { name: "Name", type: "string" },
+  { name: "Status", type: "string" },
+]
+
 describe("ResourceTable", () => {
   it("renders native Table columnDefinitions and rows", () => {
     const wrapper = mountTable(
@@ -210,6 +229,63 @@ describe("ResourceTable", () => {
     expect(failedCell!.classes()).not.toContain("text-slate-700")
   })
 
+  // The class is resolved once per row per column set inside the cell-view memo
+  // rather than per rendered cell; these pin the classification end to end,
+  // since a memo is exactly what would freeze a stale color on screen.
+  it("colors status cells by severity and leaves neutral ones on the fallback", () => {
+    const wrapper = mountTable(NAME_AND_STATUS, [
+      { cells: ["job-1", "Failed"], object: { metadata: { name: "job-1", uid: "u1" } } },
+      { cells: ["job-2", "Pending"], object: { metadata: { name: "job-2", uid: "u2" } } },
+      { cells: ["job-3", "Running"], object: { metadata: { name: "job-3", uid: "u3" } } },
+    ])
+    const classesByText = new Map(renderedCells(wrapper).map((c) => [c.text(), c.classes()]))
+    expect(classesByText.get("Failed")).toContain("text-red-600")
+    expect(classesByText.get("Pending")).toContain("text-amber-600")
+    expect(classesByText.get("Running")).toContain("text-slate-700")
+  })
+
+  it("keeps a non-status column neutral even when the value reads like an error", () => {
+    const wrapper = mountTable(NAME_AND_STATUS, [
+      { cells: ["error-page", "Running"], object: { metadata: { name: "error-page", uid: "u1" } } },
+    ])
+    const name = renderedCells(wrapper).find((c) => c.text() === "error-page")
+    expect(name).toBeDefined()
+    expect(name!.classes()).toContain("text-slate-700")
+    expect(name!.classes()).not.toContain("text-red-600")
+  })
+
+  it("colors a comma-joined Node status by its worst part", () => {
+    // kubectl's Node printer joins the condition list, so a cordoned NotReady
+    // node used to render exactly like a healthy one.
+    const wrapper = mountTable(NAME_AND_STATUS, [
+      {
+        cells: ["node-a", "NotReady,SchedulingDisabled"],
+        object: { metadata: { name: "node-a", uid: "u1" } },
+      },
+      {
+        cells: ["node-b", "Ready,SchedulingDisabled"],
+        object: { metadata: { name: "node-b", uid: "u2" } },
+      },
+    ])
+    const classesByText = new Map(renderedCells(wrapper).map((c) => [c.text(), c.classes()]))
+    expect(classesByText.get("NotReady,SchedulingDisabled")).toContain("text-red-600")
+    expect(classesByText.get("Ready,SchedulingDisabled")).toContain("text-amber-600")
+  })
+
+  it("gives every cell exactly one text color utility, never two competing ones", () => {
+    // Tailwind resolves by stylesheet order, not class order, so the neutral
+    // fallback must be baked into the same single class expression.
+    const wrapper = mountTable(NAME_AND_STATUS, [
+      { cells: ["job-1", "Failed"], object: { metadata: { name: "job-1", uid: "u1" } } },
+      { cells: ["job-2", "Running"], object: { metadata: { name: "job-2", uid: "u2" } } },
+    ])
+    for (const cell of renderedCells(wrapper)) {
+      const classes = cell.classes()
+      expect(classes.filter((c) => COLOR_CLASS_RE.test(c)), cell.text()).toHaveLength(1)
+      expect(classes.filter((c) => DARK_COLOR_CLASS_RE.test(c)), cell.text()).toHaveLength(1)
+    }
+  })
+
   it("applies the default sort (events newest first by Last Seen)", () => {
     const wrapper = mount(ResourceTable, {
       props: {
@@ -223,7 +299,7 @@ describe("ResourceTable", () => {
           { cells: ["5m", "Recent"], object: { metadata: { name: "e3", uid: "u3" } } },
         ],
         globalFilter: "",
-        defaultSort: { column: "Last Seen", desc: false },
+        defaultSort: { column: "Last Seen" },
       },
       global: { stubs },
     })
@@ -246,7 +322,7 @@ describe("ResourceTable", () => {
           { cells: ["mid", "5m"], object: { metadata: { name: "mid", uid: "u3" } } },
         ],
         globalFilter: "",
-        defaultSort: { column: "Age", desc: false },
+        defaultSort: { column: "Age" },
       },
       global: { stubs },
     })
@@ -268,7 +344,7 @@ describe("ResourceTable", () => {
           { cells: ["mid", "Running"], object: { metadata: { name: "mid", uid: "u3" } } },
         ],
         globalFilter: "",
-        defaultSort: { column: "Name", desc: false },
+        defaultSort: { column: "Name" },
       },
       global: { stubs },
     })
@@ -446,6 +522,86 @@ describe("ResourceTable", () => {
     // A changed column set drops it: the remaining cells re-resolve.
     await wrapper.setProps({ columns: [{ name: "Reason", type: "string" }] })
     expect(cellLink.mock.calls.length).toBeGreaterThan(initialCalls)
+  })
+
+  // The memo also holds each cell's resolved color class, and whether a column
+  // carries statuses is derived from columnDefs — so the same rows, keeping
+  // their Row identity, must be re-colored when the column set changes under
+  // them. Without columnDefs in the invalidation the cell stays neutral.
+  it("re-colors cells when the column set changes under the same rows", async () => {
+    const rows: K8sTableRow[] = [
+      { cells: ["svc-1", "Failed"], object: { metadata: { name: "svc-1", uid: "u1" } } },
+    ]
+    const wrapper = mount(ResourceTable, {
+      props: {
+        columns: [
+          { name: "Name", type: "string" },
+          { name: "Detail", type: "string" },
+        ],
+        rows,
+        globalFilter: "",
+      },
+      global: { stubs },
+    })
+    const before = renderedCells(wrapper).find((c) => c.text() === "Failed")
+    expect(before).toBeDefined()
+    expect(before!.classes()).toContain("text-slate-700")
+
+    // Same rows array (same Row objects), same values — only the column at
+    // index 1 is now a status column.
+    await wrapper.setProps({
+      columns: [
+        { name: "Name", type: "string" },
+        { name: "Phase", type: "string" },
+      ],
+    })
+    const after = renderedCells(wrapper).find((c) => c.text() === "Failed")
+    expect(after).toBeDefined()
+    expect(after!.classes()).toContain("text-red-600")
+    expect(after!.classes()).not.toContain("text-slate-700")
+  })
+
+  it("re-resolves routes when cellLink changes under the same rows and columns", async () => {
+    const columns: K8sTableColumn[] = [
+      { name: "Reason", type: "string" },
+      { name: "Object", type: "string" },
+    ]
+    const rows: K8sTableRow[] = [
+      { cells: ["Killing", "pod/nginx-abc"], object: { metadata: { name: "e1", uid: "u1" } } },
+    ]
+    const wrapper = mount(ResourceTable, {
+      props: { columns, rows, globalFilter: "", cellLink: () => null },
+      global: { stubs },
+    })
+    expect(renderedCells(wrapper).length).toBeGreaterThan(0)
+    expect(wrapper.findAll("a")).toHaveLength(0)
+
+    await wrapper.setProps({
+      cellLink: (_row: K8sTableRow, column: string) =>
+        column === "Object" ? { path: "/r/core/v1/pods" } : null,
+    })
+    expect(wrapper.findAll("a")).toHaveLength(1)
+    expect(wrapper.findAll("a")[0]!.text()).toBe("pod/nginx-abc")
+  })
+
+  // Row identity is what covers the cached text and class: a watch event
+  // replaces the rows array, TanStack rebuilds the rows and the memo misses.
+  it("updates cell text, title and color on a rows-only update", async () => {
+    const wrapper = mountTable(NAME_AND_STATUS, [
+      { cells: ["job-1", "Running"], object: { metadata: { name: "job-1", uid: "u1" } } },
+    ])
+    const before = renderedCells(wrapper).find((c) => c.text() === "Running")
+    expect(before).toBeDefined()
+    expect(before!.classes()).toContain("text-slate-700")
+
+    await wrapper.setProps({
+      rows: [{ cells: ["job-1", "Failed"], object: { metadata: { name: "job-1", uid: "u1" } } }],
+    })
+    const after = renderedCells(wrapper).find((c) => c.text() === "Failed")
+    expect(after).toBeDefined()
+    expect(after!.attributes("title")).toBe("Failed")
+    expect(after!.classes()).toContain("text-red-600")
+    expect(renderedCells(wrapper).some((c) => c.text() === "Running")).toBe(false)
   })
 
   it("renders plain cells when no cellLink is given", () => {

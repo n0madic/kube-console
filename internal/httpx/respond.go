@@ -32,12 +32,9 @@ func WriteJSON(w http.ResponseWriter, code int, v any) {
 // transparently, preserving Kubernetes Status JSON when present. It consumes
 // and closes resp.Body: callers must not use the response afterwards.
 func CopyUpstreamError(w http.ResponseWriter, resp *http.Response) {
-	defer func() {
-		// Drain and close so the upstream connection can be reused; without
-		// this the body leaks on every non-2xx upstream response.
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	// Drain (boundedly) and close so the upstream connection can be reused;
+	// without this the body leaks on every non-2xx upstream response.
+	defer DrainAndClose(resp)
 	ct := resp.Header.Get("Content-Type")
 	if ct == "" {
 		ct = "application/json"

@@ -12,6 +12,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/n0madic/kube-console/internal/httpx"
 	"github.com/n0madic/kube-console/internal/kube"
 )
 
@@ -50,10 +51,7 @@ func probeCapabilities(ctx context.Context, up *kube.Upstream, token string) (Ca
 	if err != nil {
 		return Capabilities{State: StateUnavailable}, 0
 	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	defer httpx.DrainAndClose(resp)
 
 	switch {
 	case resp.StatusCode == http.StatusOK:

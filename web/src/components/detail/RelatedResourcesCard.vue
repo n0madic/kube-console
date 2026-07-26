@@ -93,7 +93,6 @@ interface TableGroup {
   linkRef: ResourceRef
   columns: string[]
   rows: MiniRow[]
-  showNamespace: boolean
   moreLink: RouteLocationRaw | null
 }
 
@@ -127,8 +126,8 @@ function tableGroup(
     linkRef,
     columns: mini.columns,
     rows: mini.rows.slice(0, MAX_ROWS),
-    // Children share the parent's namespace, so a Namespace column is redundant.
-    showNamespace: false,
+    // No Namespace column: children share the parent's namespace, so
+    // ResourceMiniTable's show-namespace is deliberately left unbound.
     moreLink: mini.rows.length > MAX_ROWS || truncated ? resourceListRoute(linkRef) : null,
   }
 }
@@ -340,7 +339,6 @@ const hasContent = computed(
             :link-ref="group.linkRef"
             :columns="group.columns"
             :rows="group.rows"
-            :show-namespace="group.showNamespace"
           />
           <RouterLink
             v-if="group.moreLink !== null"

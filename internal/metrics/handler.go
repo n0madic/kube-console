@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"sync"
 	"time"
 
@@ -15,8 +14,6 @@ import (
 	"github.com/n0madic/kube-console/internal/httpx"
 	"github.com/n0madic/kube-console/internal/kube"
 )
-
-var nameRe = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$`)
 
 // versionCacheTTL bounds how long a resolved metrics API version is reused
 // before the next capability probe.
@@ -113,7 +110,7 @@ func (h *Handler) Capabilities(w http.ResponseWriter, r *http.Request) {
 // Pods serves GET /api/ui/metrics/pods[?namespace=ns].
 func (h *Handler) Pods(w http.ResponseWriter, r *http.Request) {
 	namespace := r.URL.Query().Get("namespace")
-	if namespace != "" && !nameRe.MatchString(namespace) {
+	if namespace != "" && !kube.IsDNS1123Subdomain(namespace) {
 		httpx.WriteError(w, http.StatusBadRequest, "BadRequest", "invalid namespace")
 		return
 	}
@@ -128,7 +125,7 @@ func (h *Handler) Pods(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Pod(w http.ResponseWriter, r *http.Request) {
 	namespace := chi.URLParam(r, "namespace")
 	name := chi.URLParam(r, "name")
-	if !nameRe.MatchString(namespace) || !nameRe.MatchString(name) {
+	if !kube.IsDNS1123Subdomain(namespace) || !kube.IsDNS1123Subdomain(name) {
 		httpx.WriteError(w, http.StatusBadRequest, "BadRequest", "invalid namespace or name")
 		return
 	}
@@ -143,7 +140,7 @@ func (h *Handler) Nodes(w http.ResponseWriter, r *http.Request) {
 // Node serves GET /api/ui/metrics/nodes/{name}.
 func (h *Handler) Node(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
-	if !nameRe.MatchString(name) {
+	if !kube.IsDNS1123Subdomain(name) {
 		httpx.WriteError(w, http.StatusBadRequest, "BadRequest", "invalid node name")
 		return
 	}
@@ -225,7 +222,7 @@ func (h *Handler) serveList(w http.ResponseWriter, r *http.Request, subPath stri
 	if !ok {
 		return
 	}
-	defer closeBody(resp)
+	defer httpx.DrainAndClose(resp)
 
 	// Items is initialized non-nil so an empty result serializes as "items": []
 	// (matching serveSingle), never "items": null.
@@ -270,7 +267,7 @@ func (h *Handler) serveSingle(w http.ResponseWriter, r *http.Request, subPath st
 	if !ok {
 		return
 	}
-	defer closeBody(resp)
+	defer httpx.DrainAndClose(resp)
 
 	var out Response
 	if pod {
@@ -293,9 +290,4 @@ func (h *Handler) serveSingle(w http.ResponseWriter, r *http.Request, subPath st
 		out.WindowSeconds = parseWindowSeconds(item.Window)
 	}
 	httpx.WriteJSON(w, http.StatusOK, out)
-}
-
-func closeBody(resp *http.Response) {
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
 }

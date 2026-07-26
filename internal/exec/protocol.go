@@ -25,11 +25,11 @@ const (
 	maxTokenBytes  = 48 << 10
 )
 
-// dns1123Label: namespaces and containers.
+// dns1123Label: namespaces and containers. Pod names are the subdomain shape,
+// checked with the shared kube.IsDNS1123Subdomain — it guards a value spliced
+// into the upstream exec URL, exactly like the metrics adapter's path
+// parameters, so the two must not carry separate copies of that pattern.
 var dns1123Label = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
-
-// dns1123Subdomain: pod names.
-var dns1123Subdomain = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$`)
 
 // AuthFrame is the mandatory first text frame from the browser.
 type AuthFrame struct {
@@ -90,7 +90,7 @@ func (a *AuthFrame) validate(requireToken bool) error {
 	if !dns1123Label.MatchString(a.Namespace) {
 		return fmt.Errorf("%w: invalid namespace", errInvalidAuth)
 	}
-	if !dns1123Subdomain.MatchString(a.Pod) {
+	if !kube.IsDNS1123Subdomain(a.Pod) {
 		return fmt.Errorf("%w: invalid pod name", errInvalidAuth)
 	}
 	if a.Container != "" && !dns1123Label.MatchString(a.Container) {

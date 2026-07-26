@@ -303,6 +303,17 @@ hop is theirs). Hence the abuse limits:
   128 unary slots with responses it never reads, far inside even an enabled rate
   limit. `server.Run`'s `abuse limits` line therefore also carries
   `responseWriteTimeout`.
+- An adapter that stops reading an upstream response early — a non-2xx, a decode
+  failure, a probe that only wants the status — must drain before `Close` or
+  net/http cannot pool the connection, and that drain is **bounded** in exactly
+  one place: `httpx.DrainAndClose` (64 KiB, `internal/httpx/drain.go`), used by
+  `CopyUpstreamError`, `auth.VerifyToken`, discovery's `getJSON`, both metrics
+  paths and the readiness probe. Unbounded, the size of that courtesy was the
+  upstream's choice and was paid while holding an in-flight slot. The bound is far
+  above any `Status` or `APIGroup` body, so ordinary responses are still drained
+  whole and still pool; a bigger one loses its connection instead of our time,
+  which is the right way round — keep-alive is an optimization. Do not add a
+  second drain policy or a per-caller limit.
 - Probes and the SPA are never rate limited (a 429 on `/readyz` restarts the
   pod). The two paths answering *without* asking the apiserver are gated by hand
   — exceptions to "adapters are thin": `/api/ui/contexts` verifies with
@@ -330,7 +341,12 @@ Three things keep that promise honest. The aggregated attempt and the legacy
 fallback get **half the budget each** rather than sharing one deadline: the
 aggregated path can spend four upstream calls (two Accept variants × `/apis` +
 `/api`), and burning the whole budget handed legacy a dead context — a 502 where
-legacy would have answered. When legacy then fails with an error carrying no
+legacy would have answered. Which is also why `fetchAggregated` runs its two
+roots **concurrently** (an `errgroup`, like `fetchLegacy`) instead of back to
+back: halving the budget halved the time those serial round trips had, raising
+the odds of exactly the timeout the split exists to prevent. The result is still
+assembled `/apis` first, then `/api`, so the catalog order does not depend on
+which reply arrives first. When legacy then fails with an error carrying no
 status, the **aggregated** status is preferred, so a 401/403 is not masked by a
 fallback that died on the network. And `fetchLegacy` **errors when every**
 group-version failed (`len(groupVersions) > 0 && failed == len(...)`, surfacing a
@@ -381,9 +397,15 @@ computeds, which must not mutate); dropping is `pruneExpiredSessions()`, called
 where a session is about to be used or picked (`getBearerToken`,
 `setActiveContext`, the route guard) and matched by the restore path at startup.
 Otherwise the token string sits in sessionStorage — readable by any same-origin
-script — until a reload. `isAuthenticated` checks the TTL too: a token alone is
+script — until a reload. `isAuthenticated` checks the TTL too — a token alone is
 not authentication, or switching to a stale context flashes past the login guard
-as authorized. A restore that drops expired/tampered entries rewrites
+as authorized — and it does so by **being** that predicate for the active
+context: `computed(() => hasSession(activeContext.value))`, one rule rather than
+two copies of it, so the route guard and the switcher's "signed in" mark cannot
+drift apart. (`parseSession` still spells the expiry rule out a third time, and
+has already drifted: `expiresAt: 0` reads as "never expires" there while the
+restore path drops it. Left alone deliberately — it is a parser, not a gate.)
+A restore that drops expired/tampered entries rewrites
 sessionStorage immediately; tests assert all of this with sentinel tokens.
 
 In the `--use-kubeconfig-credentials` mode none of this runs: `stores/auth.ts`
@@ -594,6 +616,22 @@ forced on, keyed to the **segment position** (`/api/<v>/watch/…`,
 `/apis/<g>/<v>/watch/…`) so an object literally named `watch` deeper in the path
 does not match.
 
+Because it now parses the query *and* walks the path segments, and **two**
+middlewares on `/k8s/*` ask it the same question about the same request, the
+verdict is resolved once per request and shared: `streamClassifier`
+(`server/limits.go`) is mounted inside the rate limit — a shed request never pays
+for the classification — and outside both consumers, since only a value set ahead
+of them is on the context they read (wrapping is inside-out; `AbortOnShutdown`'s
+derived context inherits it). `verdict` **falls back to evaluating the
+predicate** when no value is present, and that fallback is load-bearing rather
+than defensive: the `/api` subrouter mounts the cap with its own `isExecWS`
+predicate and no classifier, and without the fallback a consumer with nothing in
+front of it would classify by the zero value — pinning every watch in the small
+unary pool, or, had the default gone the other way, handing out the loose stream
+pool to everyone, which is the opt-out the cap must never have. The value is
+per-request only; a cross-request cache keyed by path or query would be a second
+source of truth for what streams.
+
 ### Frontend: following the active cluster
 
 Everything hangs off **context-scoped keys**: `auth.activeContext` is part of
@@ -678,6 +716,26 @@ filtering cover everything; a watch (Table-typed events, bookmarks, 410→relist
 bounded backoff) keeps it live; beyond the cap it degrades to forward-only
 pagination and Enter-triggered server name scans.
 
+Because a whole collection sits behind a live watch, everything on the per-event
+path is sized against the 5000-row cap, not against the one row an event usually
+carries. The `rowKey → index` map is therefore kept **across** events (it was
+rebuilt per event, so absorbing one MODIFIED ran `rowKey()` over all 5000 rows,
+dozens of times a second during a rollout), with `setRows()` as the single choke
+point for every wholesale assignment — that is what keeps map and array in step
+and what stops the map surviving a resource-type/namespace/context switch. Only
+the upsert path updates it incrementally; a DELETE shifts every surviving
+position, so it rebuilds through the same choke point, which is affordable
+because deletes are rare next to modifications. The array identity **must still
+change** on every update — `ResourceTable` memoizes cell views per TanStack Row
+and TanStack rebuilds those exactly when `data` changes identity — so the copy
+stays; it is a pointer memcpy, and the `rowKey()` calls were the cost. In
+all-namespaces mode `withNamespaceCells` then re-projected the same 5000 rows per
+event (a row object and a cells array each) to absorb one change, so the
+projection is memoized per source row in a `WeakMap` (`utils/namespaceColumn.ts`)
+— module-level and shared, which is safe because it is a pure function of the row.
+That memo saves the allocations only: the projected rows' identity does *not* help
+`ResourceTable`'s memo, which dies with the array identity above.
+
 `ResourceTable` takes an optional `cellLink(row, column, value)` prop turning a
 cell into a RouterLink (`@click.stop`, so it does not also fire the row click).
 Its one caller is the **events** list, linking the Object column to the involved
@@ -688,13 +746,22 @@ a bare "event" is the core one — then highest version, like the sidebar dedupe
 the namespace comes from the event's row metadata, cluster-scoped kinds (Node
 events live in `default`) take the `_` sentinel. `ResourceListPage` memoizes the
 resolver per namespace+cell, since the table asks per visible cell on every
-render — and `ResourceTable` memoizes the cell/route pairs it builds from it in
-a `WeakMap` keyed by the **TanStack Row**, which is rebuilt exactly when `data`
+render — and `ResourceTable` memoizes, in a `WeakMap` keyed by the **TanStack
+Row**, everything the template needs per cell: the route, the displayed text and
+the resolved color class (`CellView`). The Row is rebuilt exactly when `data`
 changes (sorting and filtering reuse the instances, so a cached row is one whose
-cells and values are unchanged). What row identity does not cover is invalidated
+cells and values are unchanged — which is what makes the cached text and class
+safe to hold). What row identity does not cover is invalidated
 by hand: the column set, which decides which cells are visible, and `cellLink`
 itself. Without the memo every scroll frame allocated an array per rendered row
-and a wrapper per cell for a route that is `null` on every list but events.
+and a wrapper per cell for a route that is `null` on every list but events —
+and, per cell, re-derived the status class: a regex test, plus on status columns
+a `split(",")` and a handful of substring scans per part, ~240 times a frame.
+Whether a column carries statuses depends on the column alone, so `isStatusColumn`
+is resolved into a `statusColumnIds` set per column set, never per cell. The
+fallback `text-slate-700 dark:text-slate-300` is baked **into** that one class
+string, per the Tailwind order rule below — a static color utility beside a
+conditional one lets stylesheet order pick the winner.
 
 That invalidation is keyed on `columnDefs`, so the defs must be **content-keyed**
 and keep their previous array when nothing a def is built from changed. Their
@@ -844,10 +911,29 @@ through `apiFetch` (the endpoint needs the bearer, so a plain link cannot work)
 and `utils/download.ts`.
 
 Chunks merge into the buffer on a 50ms window (`flush`), not per chunk — a bulk
-load arrives as hundreds of chunks and each merge copies the buffer and
-re-renders. The staging array is capped like the visible one (a hidden tab keeps
-streaming while its timers are throttled), and a finished stream flushes
-synchronously so `running=false` never leaves lines staged.
+load arrives as hundreds of chunks and each merge re-renders. The window bounds
+how *often* a merge happens, not what it costs, so the merge itself appends **in
+place**: `lines.value.concat(pending)` copied the whole buffer per flush, which
+with `Tail: All` and `MAX_LINES` is quadratic in the lines loaded (~100 copies of
+a ~100k-line array on one bulk load), and `trim` added a second full copy once
+the cap was reached — it now `splice`s the head off in place. Appending is
+one-at-a-time rather than `push(...pending)`: a spread passes every staged line
+as an argument, and `pending` holds up to `MAX_LINES` of them.
+
+Neither half of a mutated `shallowRef` signals anything — mutating the array is
+invisible to it, and re-assigning the same array is a no-op (`Object.is`) — so
+the reactive signal is an explicit `linesVersion` counter, bumped on every
+mutation, which `LogViewer` takes as a prop and reads **everything** through
+(`buffer`, one computed pairing array and version). Consumers must depend on that
+counter rather than on identity or `lines.length`: the length stops changing once
+the buffer sits at the cap, which is exactly when Follow must keep working — the
+old identity watcher was there for that same reason. `version` alone is not
+enough either, because a restart hands over a fresh array; `start()` therefore
+resets through a helper that empties the buffer *and* bumps the counter, or the
+previous pod's lines stay on screen until the next flush. The staging array is
+capped like the visible one (a hidden tab keeps streaming while its timers are
+throttled), and a finished stream flushes synchronously so `running=false` never
+leaves lines staged.
 
 **Wrap** (off by default, render-only — hence deliberately absent from the
 `restart` watch) switches rows to `whitespace-pre-wrap` and measured heights
@@ -1167,7 +1253,15 @@ The `metrics.k8s.io` version always comes from discovery, never hardcoded, and
 it is the one upstream-supplied string that ends up **in a path**
 (`/apis/metrics.k8s.io/<version>/…`), so `versionRe` (`^v[0-9]+((alpha|beta)[0-9]+)?$`,
 `capabilities.go`) is what may enter it — the same reason namespace/name are
-`nameRe`-checked in `handler.go`. An advertised `preferredVersion` failing that
+checked with `kube.IsDNS1123Subdomain` in `handler.go`. That validator lives in
+`internal/kube/names.go` because the exec auth frame's pod name
+(`exec/protocol.go`) is the same kind of gate in front of the same kind of
+interpolation, and the two used to be byte-identical copies: relaxing one breaks
+no build and no test in the other, so an agreement test (`names_test.go`) now
+makes such an edit visible. It is deliberately **not** apimachinery's
+`IsDNS1123Subdomain`, which is stricter (it requires dots to separate non-empty
+labels), so swapping it in would change what both call sites accept.
+An advertised `preferredVersion` failing that
 check falls through to the first *usable* entry in `group.Versions` rather than
 failing the probe, so one unusable entry cannot hide a valid version behind it.
 The resolved version is cached per context for 5m, and a **404/503 from a data
@@ -1242,12 +1336,39 @@ only the lower one follows the namespace selector: the gauge row carries its own
 "Cluster · global view" heading (**inside** its availability guard, so a
 forbidden node list hides the title too), the block below names the selected
 namespace ("All namespaces" when none). `useClusterSummary.ts` fills the gauges
-on the metrics cadence from three cheap calls — `GET /k8s/api/v1/nodes`
-(allocatable cpu/memory/pods via `parseQuantity` in `utils/units.ts`, plus Ready
-conditions), `fetchAllNodeMetrics` (usage; null when metrics are absent, gauge
-shows "—") and a one-page `fetchPodCount` (`includeObject=None` Table +
-`remainingItemCount`). A forbidden node list (namespace-scoped tokens) hides the
-whole row; the Pods and Nodes gauges link to their lists.
+from three calls — `GET /k8s/api/v1/nodes` (allocatable cpu/memory/pods via
+`parseQuantity` in `utils/units.ts`, plus Ready conditions),
+`fetchAllNodeMetrics` (usage; null when metrics are absent, gauge shows "—") and
+a one-page `fetchPodCount` (`includeObject=None` Table + `remainingItemCount`).
+A forbidden node list (namespace-scoped tokens) hides the whole row; the Pods and
+Nodes gauges link to their lists.
+
+Two of those ride the metrics cadence; the node list does **not**. It is the one
+expensive call — the API cannot project fields out of a list, so it transfers
+whole node objects (**~21 KiB each** measured against a real cluster,
+`status.images` a third of it) to produce four scalars and a Ready count: ~0.6
+MiB/min for 7 nodes and ~8 MiB/min at 100, per open Overview tab. So it gets its
+own `NODES_INTERVAL_MS` (60s) inside the same loop — not a second
+`usePollingLoop`, which would duplicate the visibility/catch-up machinery — with
+the derived totals cached between fetches, plus `resourceVersion=0` so the
+apiserver serves it from its watch cache instead of a quorum read from etcd
+(seconds of staleness, which is what a capacity gauge is). Allocatable and Ready
+move when a node joins or goes down, not between samples; usage and the pod count
+are the numbers that actually change.
+
+Three properties of that cache are load-bearing. The **context watch clears it**
+beside `data.value = null` — allocatable totals describe *a* cluster, and without
+it the new cluster's gauges render the previous one's capacity for up to a minute
+with the new cluster's usage plotted against it, which reads as a real
+utilisation number rather than as missing data. It is cleared there and not in
+the loop's `onStop`, which every stop() runs (unmount, and the stop() inside
+every restart) without the cluster having changed. A **failed** node fetch keeps
+today's meaning exactly — `available = false`, hiding the row — and leaves the
+freshness stamp untouched, so the next tick retries at the metrics cadence rather
+than hiding the gauges for a full minute over one transient error; only an actual
+attempt can say the row is unavailable, since a skipped fetch resolves as `null`.
+And the stamp is taken on **entry**, like `usePollingLoop`'s own throttle, so what
+is bounded is how often the list is requested regardless of how long it takes.
 
 The Pods gauge also carries the problem-pod count: `GaugeCard`'s optional
 `alertPercent`/`alertLabel` paint a rose segment over the **end** of the filled
@@ -1352,11 +1473,17 @@ only ever ages pods *out*, so no answer must not mean "hide".
   bake another branch's content-hashed assets into the binary. CI never sees it
   (only `.gitkeep` is tracked), which is exactly why it stayed invisible.
 - Status color-coding applies only to status-bearing columns (`isStatusColumn`),
-  otherwise names like "error-page" light up red. `statusTextClass` classifies a
-  cell **by its comma-separated parts**, worst severity winning: the Node printer
-  emits STATUS as a joined condition list, so matching the whole cell left every
-  cordoned node neutral — including `NotReady,SchedulingDisabled`, which rendered
-  exactly like a healthy one, while a bare `NotReady` was red.
+  otherwise names like "error-page" light up red. The classification itself is
+  `statusSeverity` (`"error" | "warning" | null`), which reads a cell **by its
+  comma-separated parts**, worst severity winning: the Node printer emits STATUS
+  as a joined condition list, so matching the whole cell left every cordoned node
+  neutral — including `NotReady,SchedulingDisabled`, which rendered exactly like a
+  healthy one, while a bare `NotReady` was red. `statusTextClass` is the *color
+  mapping* of that severity, and anything needing something other than text color
+  must take the severity: `eventRowClass` used to tint whole rows by searching the
+  returned class for `"red"`, so repainting error text to a `rose-` palette (which
+  `GaugeCard` already uses) would have silently downgraded every error row to
+  amber, with no test covering it.
 - The gateway blocklist makes objects literally named
   `exec`/`attach`/`portforward`/`proxy` unreachable — known limitation,
   documented in README.

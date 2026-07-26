@@ -53,18 +53,46 @@ export function useResourceList(
     return String(row.cells[0] ?? "")
   }
 
+  // rowKey → position in rows.value, kept ACROSS watch events. It used to be
+  // rebuilt per event, so absorbing the single row an event usually carries ran
+  // rowKey() over the whole collection — 5000 calls at the documented cap, and a
+  // rollout emits dozens of events per second.
+  //
+  // setRows() is the choke point for every wholesale assignment of the
+  // collection: it is what keeps the map in step with the array, and what stops
+  // it surviving a resource-type / namespace / context switch (all of which
+  // reload through load(), which resets the rows).
+  let indexByKey = new Map<string, number>()
+
+  function setRows(next: K8sTableRow[]): void {
+    rows.value = next
+    indexByKey = new Map()
+    next.forEach((r, i) => indexByKey.set(rowKey(r), i))
+  }
+
   function upsertRows(incoming: K8sTableRow[], removed: boolean): void {
     if (incoming.length === 0) return
-    // O(n+m): key the current set once instead of a linear findIndex per
-    // incoming row (which recomputed rowKey for every existing row).
     if (removed) {
+      // A removal shifts every surviving position, so the index is rebuilt
+      // wholesale here — the same O(n) the filter itself costs. Deletes are rare
+      // next to MODIFIED (a rollout is a stream of modifications), so paying for
+      // them keeps the hot path free of index bookkeeping.
       const removedKeys = new Set(incoming.map(rowKey))
-      rows.value = rows.value.filter((r) => !removedKeys.has(rowKey(r)))
+      setRows(rows.value.filter((r) => !removedKeys.has(rowKey(r))))
       return
     }
+    // The one assignment that deliberately does not go through setRows(): an
+    // upsert leaves every existing position untouched, so the index is updated
+    // incrementally (O(incoming)) instead of rebuilt — that is the whole point
+    // of keeping it.
+    //
+    // The array identity must still change on every update. ResourceTable
+    // memoizes its cell views per TanStack Row and TanStack rebuilds those
+    // exactly when `data` changes identity (its column-def memo keys its own
+    // invalidation on that contract), so mutating in place would leave stale
+    // cells on screen. The copy is a pointer memcpy — what cost here was the
+    // per-row rowKey() calls, not the copy. Do not "optimize" it away.
     const next = [...rows.value]
-    const indexByKey = new Map<string, number>()
-    next.forEach((r, i) => indexByKey.set(rowKey(r), i))
     for (const row of incoming) {
       const key = rowKey(row)
       const idx = indexByKey.get(key)
@@ -140,7 +168,7 @@ export function useResourceList(
     // Drop the previous resource type's rows/columns immediately: otherwise
     // they stay on screen — indistinguishable from freshly loaded data —
     // for the whole walk, e.g. while switching between resource tables.
-    rows.value = []
+    setRows([])
     columns.value = []
     try {
       const walked = await walkTable(ref_, {
@@ -154,13 +182,13 @@ export function useResourceList(
       if (gen !== loadGen) return gen // superseded: drop stale work
       columns.value = walked.columnDefinitions
       fallback.value = walked.fallback
-      rows.value = walked.rows
+      setRows(walked.rows)
       resourceVersion.value = walked.resourceVersion
       continueToken.value = walked.continueToken
     } catch (e) {
       if (gen !== loadGen) return gen
       error.value = asApiError(e)
-      rows.value = []
+      setRows([])
       columns.value = []
     } finally {
       if (gen === loadGen) loading.value = false
@@ -235,7 +263,7 @@ export function useResourceList(
     searchQuery.value = query.trim()
     searchTruncated.value = false
     searchScanned.value = 0
-    rows.value = []
+    setRows([])
     try {
       const walked = await walkTable(ref_, {
         namespace: opts.namespace,
@@ -251,13 +279,13 @@ export function useResourceList(
       fallback.value = walked.fallback
       searchTruncated.value = walked.truncated
       searchScanned.value = walked.scanned
-      rows.value = walked.rows
+      setRows(walked.rows)
       continueToken.value = ""
       resourceVersion.value = ""
     } catch (e) {
       if (gen !== loadGen) return
       error.value = asApiError(e)
-      rows.value = []
+      setRows([])
     } finally {
       if (gen === loadGen) loading.value = false
     }

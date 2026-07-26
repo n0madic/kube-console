@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -352,6 +353,11 @@ func TestMetricsUnknownContext400(t *testing.T) {
 	}
 }
 
+// Every namespace/name here is spliced into the upstream metrics path, so all
+// three routes gate on kube.IsDNS1123Subdomain (see internal/kube/names.go).
+// The verdict itself is pinned by that package's agreement test; what this
+// covers is that each route actually asks — including the two that only got a
+// shared validator when the duplicated pattern was removed.
 func TestPodMetricsInvalidNames(t *testing.T) {
 	h := newMetricsRouter(t, true, func(w http.ResponseWriter, r *http.Request) {
 		t.Error("upstream must not be called for invalid names")
@@ -359,10 +365,120 @@ func TestPodMetricsInvalidNames(t *testing.T) {
 	for _, p := range []string{
 		"/api/ui/metrics/pods?namespace=UPPER",
 		"/api/ui/metrics/pods?namespace=bad%20ns",
+		"/api/ui/metrics/pods?namespace=" + strings.Repeat("n", 254),
+		"/api/ui/metrics/pods/UPPER/api-123",
+		"/api/ui/metrics/pods/default/BadPod",
+		"/api/ui/metrics/pods/default/" + strings.Repeat("p", 254),
+		"/api/ui/metrics/nodes/NODE",
+		"/api/ui/metrics/nodes/bad_node",
+		"/api/ui/metrics/nodes/" + strings.Repeat("n", 254),
 	} {
 		if rec := getMetrics(h, p); rec.Code != http.StatusBadRequest {
 			t.Errorf("GET %s = %d, want 400", p, rec.Code)
 		}
+	}
+}
+
+// stubTransport answers upstream requests from a function, so a test can hand
+// the handler a response body it fully controls. A real httptest upstream
+// cannot serve this purpose: the kernel and net/http buffer whatever the server
+// writes, so how much of a body the handler consumed is not observable there,
+// and the only remaining instrument — wall clock — measures the load on the
+// machine as much as the code (a correct, bounded drain reported 3s under a
+// parallel -race run).
+type stubTransport func(*http.Request) *http.Response
+
+func (s stubTransport) RoundTrip(r *http.Request) (*http.Response, error) { return s(r), nil }
+
+// countingBody offers far more data than any drain should want and records how
+// much of it was read, and whether it was closed. It ends at EOF rather than
+// going on forever so that an unbounded drain fails the test loudly instead of
+// hanging it.
+type countingBody struct {
+	prefix    string
+	remaining int
+	read      int
+	closed    bool
+}
+
+func (b *countingBody) Read(p []byte) (int, error) {
+	if b.prefix != "" {
+		n := copy(p, b.prefix)
+		b.prefix = b.prefix[n:]
+		b.read += n
+		return n, nil
+	}
+	if b.remaining == 0 {
+		return 0, io.EOF
+	}
+	n := min(len(p), b.remaining)
+	for i := range p[:n] {
+		p[i] = 'x'
+	}
+	b.remaining -= n
+	b.read += n
+	return n, nil
+}
+
+func (b *countingBody) Close() error { b.closed = true; return nil }
+
+func newMetricsRouterWithTransport(rt http.RoundTripper) http.Handler {
+	base, _ := url.Parse("https://apiserver.invalid")
+	up := &kube.Upstream{BaseURL: base, Transport: rt}
+	reg := kube.NewRegistryFromUpstreams("default", map[string]*kube.Upstream{"default": up})
+	return newMetricsRouterForRegistry(NewHandler(reg, true))
+}
+
+// maxDrained bounds what a metrics path may read out of a body it does not
+// decode. httpx.DrainAndClose stops at 64 KiB; the slack covers the bytes a
+// json.Decoder buffers before it gives up on the first token, and keeps this
+// test from pinning httpx's exact constant.
+const maxDrained = 128 << 10
+
+// Both metrics paths that stop reading an upstream body early — the capability
+// probe, which only wants the status, and a data response that failed to decode
+// — used to drain it with an unbounded io.Copy, which made the time spent
+// reading a body nobody wants the upstream's choice, paid while holding an
+// in-flight slot. They now go through httpx.DrainAndClose.
+func TestCapabilityProbeDrainIsBounded(t *testing.T) {
+	body := &countingBody{remaining: 8 << 20}
+	h := newMetricsRouterWithTransport(stubTransport(func(*http.Request) *http.Response {
+		return &http.Response{StatusCode: http.StatusInternalServerError, Header: http.Header{}, Body: body}
+	}))
+
+	if caps := decodeCaps(t, getMetrics(h, "/api/ui/metrics/capabilities")); caps.State != StateUnavailable {
+		t.Fatalf("state = %q, want unavailable", caps.State)
+	}
+	if !body.closed {
+		t.Error("upstream body was not closed")
+	}
+	if body.read > maxDrained {
+		t.Errorf("probe read %d bytes of a body whose status was all it wanted, want at most %d", body.read, maxDrained)
+	}
+}
+
+func TestDataResponseDrainIsBounded(t *testing.T) {
+	// "not-json" fails the decode on the first token, so the rest of the body is
+	// never decoded — only drained.
+	body := &countingBody{prefix: "not-json", remaining: 8 << 20}
+	h := newMetricsRouterWithTransport(stubTransport(func(r *http.Request) *http.Response {
+		if r.URL.Path == metricsGroupPath {
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(
+				`{"kind":"APIGroup","name":"metrics.k8s.io",
+				"preferredVersion":{"groupVersion":"metrics.k8s.io/v1beta1","version":"v1beta1"}}`))}
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: body}
+	}))
+
+	rec := getMetrics(h, "/api/ui/metrics/nodes")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 for an undecodable body: %s", rec.Code, rec.Body.String())
+	}
+	if !body.closed {
+		t.Error("upstream body was not closed")
+	}
+	if body.read > maxDrained {
+		t.Errorf("handler read %d bytes of a body it had already failed to decode, want at most %d", body.read, maxDrained)
 	}
 }
 

@@ -4,15 +4,29 @@ import { computed, ref, watch } from "vue"
 
 import { logTokenClass, tokenizeJsonLine, type LogToken } from "@/utils/logJson"
 
-const props = defineProps<{ lines: string[]; follow: boolean; wrap?: boolean }>()
+const props = defineProps<{
+  lines: string[]
+  /** Bumped by the producer on every mutation of `lines` — see `buffer` below. */
+  version: number
+  follow: boolean
+  wrap?: boolean
+}>()
 
 const scrollRef = ref<HTMLElement | null>(null)
+
+// The one dependency everything below reads the buffer through, because neither
+// of its two parts is a complete signal on its own. `useLogsStream` appends into
+// the same array in place (copying a 200k-line buffer per flush was quadratic in
+// the lines loaded), so during a stream the identity never changes and — once
+// MAX_LINES caps it — neither does the length; `version` is what changes. And
+// `version` alone would not survive a restart handing over a fresh array.
+const buffer = computed(() => ({ lines: props.lines, version: props.version }))
 
 const virtualizer = useVirtualizer(
   computed(() => {
     const el = scrollRef.value
     return {
-      count: props.lines.length,
+      count: buffer.value.lines.length,
       getScrollElement: () => el,
       estimateSize: () => 20,
       overscan: 30,
@@ -55,27 +69,25 @@ function tokensOf(line: string): LogToken[] | null {
   return tokens
 }
 
+// Read through `buffer`, not `props.lines`: the visible slice must be re-derived
+// for the same indices when the head is trimmed in place, which shifts every
+// line up by the number dropped.
 const rows = computed(() =>
   virtualizer.value.getVirtualItems().map((item) => {
-    const text = props.lines[item.index] ?? ""
+    const text = buffer.value.lines[item.index] ?? ""
     return { index: item.index, start: item.start, text, tokens: tokensOf(text) }
   }),
 )
 
-// Keyed on the array itself, never on its length: `useLogsStream` caps the
-// buffer at MAX_LINES, so once a chatty container reaches the cap every flush
-// hands over a *new* array of the *same* length. A length watcher would stop
-// firing exactly there and Follow would silently freeze while lines keep
-// arriving. The producer replaces the array on every flush, so identity is the
-// signal.
-watch(
-  () => props.lines,
-  () => {
-    if (props.follow && props.lines.length > 0) {
-      virtualizer.value.scrollToIndex(props.lines.length - 1, { align: "end" })
-    }
-  },
-)
+// Keyed on `buffer`, never on the line count: `useLogsStream` caps the buffer at
+// MAX_LINES, so once a chatty container reaches the cap the length stops
+// changing while lines keep arriving — a count watcher would stop firing exactly
+// there and Follow would silently freeze.
+watch(buffer, ({ lines }) => {
+  if (props.follow && lines.length > 0) {
+    virtualizer.value.scrollToIndex(lines.length - 1, { align: "end" })
+  }
+})
 </script>
 
 <template>
@@ -102,6 +114,6 @@ watch(
           :class="logTokenClass(token)"
         >{{ token.text }}</span></template><template v-else>{{ row.text }}</template></div>
     </div>
-    <p v-if="lines.length === 0" class="p-4 text-slate-500">No log output.</p>
+    <p v-if="buffer.lines.length === 0" class="p-4 text-slate-500">No log output.</p>
   </div>
 </template>

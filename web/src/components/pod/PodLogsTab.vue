@@ -168,7 +168,14 @@ watch([container, tailLines, timestamps, previous, follow], () => {
     </p>
 
     <div class="min-h-0 flex-1">
-      <LogViewer :lines="stream.lines.value" :follow="follow" :wrap="wrap" />
+      <!-- The stream appends into the same array in place, so the viewer needs
+           the version counter to see it change at all. -->
+      <LogViewer
+        :lines="stream.lines.value"
+        :version="stream.linesVersion.value"
+        :follow="follow"
+        :wrap="wrap"
+      />
     </div>
   </div>
 </template>

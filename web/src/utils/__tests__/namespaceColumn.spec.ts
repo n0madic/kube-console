@@ -76,4 +76,29 @@ describe("withNamespaceCells", () => {
     const result = withNamespaceCells([row(undefined, ["orphan"])])
     expect(result[0]!.cells[0]).toBe("")
   })
+
+  // A watch event replaces the whole rows array, so without a per-row memo the
+  // entire collection (up to 5000 rows) was re-projected — two allocations each
+  // — to absorb the single row that changed.
+  it("reuses the projection of an unchanged row and rebuilds only the changed one", () => {
+    const unchanged = row("team-a", ["api", "1/1"])
+    const before = row("team-b", ["api", "0/1"])
+    const first = withNamespaceCells([unchanged, before])
+
+    // What one MODIFIED event produces: the same row objects but one replaced.
+    const after = row("team-b", ["api", "1/1"])
+    const second = withNamespaceCells([unchanged, after])
+
+    expect(second[0]).toBe(first[0]) // same source row → same projection
+    expect(second[1]).not.toBe(first[1])
+    expect(second[1]!.cells).toEqual(["team-b", "api", "1/1"])
+    expect(second[0]!.cells).toEqual(["team-a", "api", "1/1"])
+  })
+
+  it("returns a new array on every call", () => {
+    // The table's memos hang off the data array's identity; reusing it would
+    // leave stale cells on screen.
+    const rows = [row("team-a", ["api"])]
+    expect(withNamespaceCells(rows)).not.toBe(withNamespaceCells(rows))
+  })
 })

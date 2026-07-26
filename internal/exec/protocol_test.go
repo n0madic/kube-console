@@ -43,7 +43,11 @@ func TestAuthFrameValidateRejects(t *testing.T) {
 		"empty namespace":    func(a *AuthFrame) { a.Namespace = "" },
 		"invalid pod":        func(a *AuthFrame) { a.Pod = "pod name with spaces" },
 		"path traversal pod": func(a *AuthFrame) { a.Pod = "../etc" },
-		"invalid container":  func(a *AuthFrame) { a.Container = "UPPER" },
+		"empty pod":          func(a *AuthFrame) { a.Pod = "" },
+		// The pod name is spliced into the upstream exec URL, so the length
+		// bound of the shared kube.IsDNS1123Subdomain is part of this gate.
+		"oversized pod":     func(a *AuthFrame) { a.Pod = strings.Repeat("p", 254) },
+		"invalid container": func(a *AuthFrame) { a.Container = "UPPER" },
 		"too many args": func(a *AuthFrame) {
 			a.Command = make([]string, maxCommandArgs+1)
 			for i := range a.Command {

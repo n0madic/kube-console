@@ -229,10 +229,21 @@ export async function fetchNamespaces(
 
 /**
  * Raw node list for the cluster summary. Full objects (not Table) because we
- * need `status.allocatable` and `status.conditions`, which Table rows drop.
+ * need `status.allocatable` and `status.conditions`, which Table rows drop —
+ * and the API cannot project fields out of a list, so this is the summary's one
+ * expensive call: whole node objects, measured at ~21 KiB each against a real
+ * cluster (`status.images` alone a third of that) to produce four scalars.
+ *
+ * `resourceVersion=0` is what keeps that cheap for the apiserver: the list is
+ * then served from its watch cache instead of a quorum read from etcd (the same
+ * thing every informer asks for on its initial list). The answer may be seconds
+ * stale, which is exactly right for a capacity gauge — allocatable totals and
+ * Ready counts move when a node joins or goes down, not between polls.
  */
 export async function fetchNodes(): Promise<K8sObjectList> {
-  const resp = await apiFetch(resourcePath({ group: "", version: "v1", resource: "nodes" }), {
+  const params = new URLSearchParams({ resourceVersion: "0" })
+  const path = resourcePath({ group: "", version: "v1", resource: "nodes" })
+  const resp = await apiFetch(`${path}?${params.toString()}`, {
     headers: { Accept: "application/json" },
   })
   return (await resp.json()) as K8sObjectList

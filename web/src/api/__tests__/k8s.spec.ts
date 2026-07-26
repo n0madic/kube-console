@@ -4,6 +4,7 @@ import {
   deleteObject,
   eventsFor,
   fetchNamespaces,
+  fetchNodes,
   listAsTable,
   logsUrl,
   resourcePath,
@@ -305,6 +306,21 @@ describe("fetchNamespaces", () => {
     expect(result.items.map((i) => i.metadata?.name)).toEqual(["a", "b"])
     // A non-empty token tells callers this list can prove nothing absent.
     expect(result.metadata?.continue).toBe("more")
+  })
+})
+
+describe("fetchNodes", () => {
+  // resourceVersion=0 lets the apiserver answer from its watch cache instead of
+  // a quorum read from etcd — a seconds-stale capacity gauge is the trade.
+  it("lists nodes from the watch cache", async () => {
+    const mock = stubFetch({ kind: "NodeList", items: [] })
+    await fetchNodes()
+    const url = mock.mock.calls[0]?.[0] as string
+    expect(url).toContain("/k8s/api/v1/nodes?")
+    expect(url).toContain("resourceVersion=0")
+    expect(new Headers((mock.mock.calls[0]?.[1] as RequestInit).headers).get("Accept")).toBe(
+      "application/json",
+    )
   })
 })
 

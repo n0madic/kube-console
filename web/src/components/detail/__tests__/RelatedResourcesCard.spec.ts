@@ -100,6 +100,28 @@ describe("RelatedResourcesCard owner-children table", () => {
     expect(mockedTable.mock.calls.length).toBe(before * 2)
   })
 
+  // Children share the parent's namespace, so the mini table must render no
+  // Namespace column — the card leaves ResourceMiniTable's optional
+  // show-namespace unbound and relies on it defaulting to falsy.
+  it("renders no Namespace column or cell", async () => {
+    mockedTable.mockResolvedValue({ table: rsTable, truncated: false })
+    const deployment: K8sObject = {
+      apiVersion: "apps/v1",
+      kind: "Deployment",
+      metadata: { name: "web", namespace: "prod", uid: "dep-1" },
+      spec: { selector: { matchLabels: { app: "web" } } },
+    }
+    const wrapper = mountFor(deployment)
+    await flushPromises()
+
+    const headers = wrapper.findAll("th").map((th) => th.text())
+    expect(headers).not.toContain("Namespace")
+    // Name link + one cell per selected column, nothing extra in front.
+    expect(wrapper.findAll("tbody tr")).toHaveLength(1)
+    expect(wrapper.findAll("tbody td")).toHaveLength(headers.length)
+    expect(wrapper.find("tbody td").text()).toBe("web-abc")
+  })
+
   it("renders nothing when no child is owned by this object", async () => {
     mockedTable.mockResolvedValue({ table: rsTable, truncated: false })
     const deployment: K8sObject = {

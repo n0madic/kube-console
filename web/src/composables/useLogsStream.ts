@@ -12,11 +12,24 @@ export const MAX_LINES = 200000
 
 // Lines are merged into the reactive buffer at most once per window instead of
 // once per network chunk: a bulk load arrives as hundreds of chunks, and each
-// merge copies the whole buffer and re-renders the viewer.
+// merge re-renders the viewer.
 const FLUSH_INTERVAL_MS = 50
 
 export function useLogsStream() {
   const lines = shallowRef<string[]>([])
+  // The reactive signal for `lines`, bumped on every mutation of it.
+  //
+  // `lines` is a shallowRef appended to **in place**, and neither half of that
+  // signals anything on its own: mutating the array is invisible to a
+  // shallowRef, and re-assigning the same array is a no-op (Object.is). The
+  // alternative — handing over a fresh array per flush — was the whole cost of
+  // this composable: the window bounds how *often* a flush happens, not what it
+  // costs, so with "Tail: All" and MAX_LINES a bulk load copied a ~100k-line
+  // buffer once per chunk, i.e. quadratically in the lines loaded.
+  //
+  // Consumers therefore depend on this counter, not on the array's identity or
+  // its length (which stops changing once the buffer sits at the cap).
+  const linesVersion = ref(0)
   const running = ref(false)
   const error = ref<string | null>(null)
   // Set once the head of the log had to be dropped. With "All" the user is
@@ -34,10 +47,13 @@ export function useLogsStream() {
   let pending: string[] = []
   let timer: ReturnType<typeof setTimeout> | null = null
 
-  function trim(buffer: string[]): string[] {
-    if (buffer.length <= MAX_LINES) return buffer
+  // Drops the head in place. `splice` shifts the survivors down inside the
+  // existing array; returning a `slice` would allocate a second full copy of
+  // the buffer on top of the append, on every flush past the cap.
+  function trim(buffer: string[]): void {
+    if (buffer.length <= MAX_LINES) return
     truncated.value = true
-    return buffer.slice(buffer.length - MAX_LINES)
+    buffer.splice(0, buffer.length - MAX_LINES)
   }
 
   function flush(): void {
@@ -46,9 +62,14 @@ export function useLogsStream() {
       timer = null
     }
     if (pending.length === 0) return
-    const merged = lines.value.concat(pending)
+    const buffer = lines.value
+    // One element at a time rather than push(...pending): a spread passes every
+    // staged line as an argument, and pending holds up to MAX_LINES of them —
+    // far past the engine's argument limit.
+    for (const line of pending) buffer.push(line)
     pending = []
-    lines.value = trim(merged)
+    trim(buffer)
+    linesVersion.value++
   }
 
   function append(newLines: string[]): void {
@@ -56,7 +77,7 @@ export function useLogsStream() {
     for (const line of newLines) pending.push(line)
     // A hidden tab still streams while timers are throttled, so the staging
     // buffer gets the same ceiling as the visible one.
-    pending = trim(pending)
+    trim(pending)
     if (timer !== null) return
     const gen = generation
     timer = setTimeout(() => {
@@ -65,10 +86,18 @@ export function useLogsStream() {
     }, FLUSH_INTERVAL_MS)
   }
 
+  // A restart must really empty the buffer, and must say so: appends are in
+  // place, so a consumer that depends on the version counter alone would keep
+  // the previous pod's lines on screen until the next flush bumped it.
+  function reset(): void {
+    lines.value = []
+    linesVersion.value++
+  }
+
   async function start(url: string): Promise<void> {
     stop()
     const gen = generation
-    lines.value = []
+    reset()
     error.value = null
     truncated.value = false
     controller = new AbortController()
@@ -125,5 +154,5 @@ export function useLogsStream() {
 
   onBeforeUnmount(stop)
 
-  return { lines, running, error, truncated, start, stop }
+  return { lines, linesVersion, running, error, truncated, start, stop }
 }

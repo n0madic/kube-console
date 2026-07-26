@@ -8,7 +8,7 @@ import { toYaml } from "@/utils/yamlView"
 // not on every detail-page view.
 const CodeMirrorEditor = defineAsyncComponent(() => import("./CodeMirrorEditor.vue"))
 
-const props = defineProps<{ object: K8sObject; hideManagedFields?: boolean }>()
+const props = defineProps<{ object: K8sObject }>()
 
 const showManaged = ref(false)
 

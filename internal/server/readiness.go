@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -89,8 +88,10 @@ func (c *readinessCache) probe() bool {
 	if err != nil {
 		return false
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	_ = resp.Body.Close()
+	// One drain policy for the whole codebase, bounded: nothing here reads the
+	// body, only the fact that a response arrived, but it still has to be
+	// consumed before Close or the connection cannot be reused.
+	httpx.DrainAndClose(resp)
 	return true
 }
 

@@ -87,9 +87,17 @@ func NewHandler(d Deps) http.Handler {
 	limiter := newRateLimiter(d.Cfg)
 	inFlight := newInFlightLimiter(d.Cfg.MaxInFlight)
 
+	// Both consumers below need the same verdict about the same request, so it is
+	// resolved once here and read from the context by each. Mounted inside the
+	// rate limit, so a shed request never pays for the classification, and
+	// outside both consumers, since only a value set ahead of them is visible to
+	// them (wrapping is inside-out: the last wrap runs first).
+	streaming := newStreamClassifier(gateway.IsStreaming)
+
 	gw := maxBody(d.Cfg.MaxBodyBytes, gateway.New(d.Registry, d.Logger))
-	gw = AbortOnShutdown(d.ShutdownCtx, gateway.IsStreaming)(gw)
-	gw = inFlight.middleware(gateway.IsStreaming)(gw)
+	gw = AbortOnShutdown(d.ShutdownCtx, streaming.verdict)(gw)
+	gw = inFlight.middleware(streaming.verdict)(gw)
+	gw = streaming.middleware(gw)
 	gw = rateLimit(limiter)(gw)
 	r.Handle("/k8s", gw)
 	r.Handle("/k8s/*", gw)

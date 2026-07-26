@@ -1,12 +1,16 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import type { K8sObject } from "@/api/types"
 import {
+  eventRowClass,
   parseEventObjectCell,
   sortByLastSeenDesc,
   toEventRow,
   type EventRow,
 } from "@/utils/eventHelpers"
+
+const ERROR_ROW_CLASS = "bg-red-50 dark:bg-red-950/40"
+const WARNING_ROW_CLASS = "bg-amber-50 dark:bg-amber-950/30"
 
 function row(partial: Partial<EventRow>): EventRow {
   return {
@@ -107,5 +111,59 @@ describe("parseEventObjectCell", () => {
     expect(parseEventObjectCell("/nginx")).toBeNull()
     // A name never contains a slash — a subresource path is not an object.
     expect(parseEventObjectCell("pod/nginx/log")).toBeNull()
+  })
+})
+
+describe("eventRowClass", () => {
+  afterEach(() => {
+    vi.doUnmock("@/utils/statusColors")
+    vi.resetModules()
+  })
+
+  it("leaves anything but a Warning event untinted", () => {
+    for (const type of ["Normal", "", "warning"]) {
+      expect(eventRowClass(row({ type, reason: "FailedMount" })), type).toBe("")
+    }
+  })
+
+  it("tints a Warning with an error-like reason red", () => {
+    for (const reason of ["FailedMount", "BackOff", "Unhealthy", "FailedScheduling", "ErrImagePull"]) {
+      expect(eventRowClass(row({ type: "Warning", reason })), reason).toBe(ERROR_ROW_CLASS)
+    }
+  })
+
+  it("tints a Warning with a neutral or merely-warning reason amber", () => {
+    for (const reason of ["Scheduled", "Pulled", "NodeNotSchedulable", "", "Unschedulable"]) {
+      expect(eventRowClass(row({ type: "Warning", reason })), reason).toBe(WARNING_ROW_CLASS)
+    }
+  })
+
+  /**
+   * The decoupling itself. eventRowClass used to recover the severity by
+   * searching statusTextClass' output for the substring "red", which made a
+   * cosmetic repaint semantically load-bearing. Here statusTextClass is replaced
+   * with a rose- palette holding no "red" at all: the tint must stay red, and
+   * the spies must show *which* function was consulted — without them the test
+   * would also pass if the mock never reached eventHelpers.
+   */
+  it("reads the severity, not the text color's palette name", async () => {
+    const actual = await vi.importActual<typeof import("@/utils/statusColors")>(
+      "@/utils/statusColors",
+    )
+    const severity = vi.fn(actual.statusSeverity)
+    const textClass = vi.fn((value: string) =>
+      actual.statusSeverity(value) === "error"
+        ? "text-rose-600 dark:text-rose-400 font-medium"
+        : actual.statusTextClass(value),
+    )
+    vi.resetModules()
+    vi.doMock("@/utils/statusColors", () => ({ ...actual, statusSeverity: severity, statusTextClass: textClass }))
+
+    const mocked = await import("@/utils/eventHelpers")
+    expect(mocked.eventRowClass({ type: "Warning", reason: "FailedMount" })).toBe(ERROR_ROW_CLASS)
+    // Proof the mock is the module under test's dependency, and that the class
+    // string plays no part in the decision.
+    expect(severity).toHaveBeenCalledWith("FailedMount")
+    expect(textClass).not.toHaveBeenCalled()
   })
 })

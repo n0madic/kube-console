@@ -26,8 +26,14 @@ const props = defineProps<{
   rows: K8sTableRow[]
   globalFilter: string
   hiddenColumns?: string[]
-  /** Sort applied when the column set (resource type) changes. */
-  defaultSort?: { column: string; desc: boolean }
+  /**
+   * Sort applied when the column set (resource type) changes. Ascending only:
+   * every caller's default is ascending (the age columns hold relative ages, so
+   * ascending age *is* newest first), and a `desc` flag that was never passed
+   * true made descending look like a supported option that nothing produced.
+   * Clicking a header still toggles direction as usual.
+   */
+  defaultSort?: { column: string }
   /** In-flight list load: show "Loading…" instead of "No resources found". */
   loading?: boolean
   /**
@@ -153,7 +159,7 @@ function defaultSorting(): SortingState {
   if (wanted === undefined) return []
   const match = props.columns.findIndex((c) => c.name === wanted.column)
   if (match < 0) return []
-  return [{ id: `${match}-${wanted.column}`, desc: wanted.desc }]
+  return [{ id: `${match}-${wanted.column}`, desc: false }]
 }
 
 const sorting = ref<SortingState>(defaultSorting())
@@ -205,36 +211,61 @@ function headerTitle(header: { column: { columnDef: ColumnDef<K8sTableRow, strin
   return description !== "" && description !== name ? `${name} — ${description}` : name
 }
 
-function cellRoute(cell: Cell<K8sTableRow, unknown>): RouteLocationRaw | null {
+function cellRoute(cell: Cell<K8sTableRow, unknown>, value: string): RouteLocationRaw | null {
   if (props.cellLink === undefined) return null
-  return props.cellLink(
-    cell.row.original,
-    String(cell.column.columnDef.header ?? ""),
-    String(cell.getValue() ?? ""),
-  )
+  return props.cellLink(cell.row.original, String(cell.column.columnDef.header ?? ""), value)
 }
+
+// Whether a column carries statuses depends on the column alone, so it is
+// resolved once per column set instead of once per rendered cell (a regex test
+// per cell, ~240 per scroll frame). Derived from columnDefs, whose identity is
+// content-keyed above and is what the cell-view memo below invalidates on.
+const statusColumnIds = computed(() => {
+  const ids = new Set<string>()
+  for (const def of columnDefs.value) {
+    const header = typeof def.header === "string" ? def.header : ""
+    if (def.id !== undefined && isStatusColumn(header)) ids.add(def.id)
+  }
+  return ids
+})
+
+// The neutral cell color. Part of the resolved class string rather than a
+// static utility on the element beside the conditional one: stylesheet order —
+// not class order — decides which text color wins, which once made red `Failed`
+// statuses render neutral.
+const NEUTRAL_CELL_CLASS = "text-slate-700 dark:text-slate-300"
 
 interface CellView {
   cell: Cell<K8sTableRow, unknown>
   route: RouteLocationRaw | null
+  /** The displayed value: the `title` attribute and a linked cell's body. */
+  text: string
+  /** The complete text-color class, fallback included (see above). */
+  class: string
 }
 
 /**
- * Visible cells paired with their route, resolved once per cell per render —
- * the template used to ask twice for every cell (once in `v-if`, once for
- * `:to`) on the hot path of a virtualized table, same reason MetadataCard
- * precomputes `owners` and RecentEventsCard `rowsWithRoute`.
+ * Visible cells paired with everything the template needs per cell — route,
+ * displayed text and resolved color class — computed once per cell per render
+ * instead of inline in the markup, on the hot path of a virtualized table
+ * (~30 rows × ~8 columns per scroll frame). The route used to be asked for
+ * twice per cell (once in `v-if`, once for `:to`) and the value four times;
+ * the class cost a regex test per cell plus, on status columns, a split and a
+ * handful of substring scans per part. Same reason MetadataCard precomputes
+ * `owners` and RecentEventsCard `rowsWithRoute`.
  *
- * Memoized per row, because pairing them allocates: without this, every scroll
+ * Memoized per row, because building them allocates: without this, every scroll
  * frame builds ~30 arrays and ~240 wrapper objects for a route that is null on
  * every list but events. Keyed on the Row object, which TanStack rebuilds
  * exactly when `data` changes (sorting and filtering reuse the instances) — so
- * a row in the cache is a row whose cells and values are unchanged. What is not
- * covered by row identity is invalidated by hand below: columnDefs identity
- * (content-keyed above), which changes exactly when TanStack rebuilds the Cell
- * objects the cache holds — a rows-only update no longer resets it — and
- * `cellLink`, rebuilt by its owner whenever it would resolve differently
- * (discovery loading, a namespace or cluster switch).
+ * a row in the cache is a row whose cells and values are unchanged, which is
+ * what covers the cached text and class. What is not covered by row identity is
+ * invalidated by hand below: columnDefs identity (content-keyed above), which
+ * changes exactly when TanStack rebuilds the Cell objects the cache holds — a
+ * rows-only update no longer resets it — and is also what `statusColumnIds` is
+ * derived from, so the class cannot outlive the column set it was resolved
+ * against; and `cellLink`, rebuilt by its owner whenever it would resolve
+ * differently (discovery loading, a namespace or cluster switch).
  */
 let cellViewCache = new WeakMap<Row<K8sTableRow>, CellView[]>()
 watch([() => props.cellLink, columnDefs], () => {
@@ -244,7 +275,16 @@ watch([() => props.cellLink, columnDefs], () => {
 function cellViews(row: Row<K8sTableRow>): CellView[] {
   const cached = cellViewCache.get(row)
   if (cached !== undefined) return cached
-  const views = row.getVisibleCells().map((cell) => ({ cell, route: cellRoute(cell) }))
+  const statusIds = statusColumnIds.value
+  const views = row.getVisibleCells().map((cell) => {
+    const text = String(cell.getValue() ?? "")
+    return {
+      cell,
+      route: cellRoute(cell, text),
+      text,
+      class: (statusIds.has(cell.column.id) ? statusTextClass(text) : null) ?? NEUTRAL_CELL_CLASS,
+    }
+  })
   cellViewCache.set(row, views)
   return views
 }
@@ -329,17 +369,13 @@ const totalSize = computed(() => virtualizer.value.getTotalSize())
         @click="emit('rowClick', tableRows[virtualRow.index]!.original)"
       >
         <div
-          v-for="{ cell, route } in cellViews(tableRows[virtualRow.index]!)"
+          v-for="{ cell, route, text, class: cellClass } in cellViews(tableRows[virtualRow.index]!)"
           :key="cell.id"
           role="cell"
           class="shrink-0 truncate px-3 py-2"
-          :class="
-            (isStatusColumn(cell.column.columnDef.header as string)
-              ? statusTextClass(String(cell.getValue() ?? ''))
-              : null) ?? 'text-slate-700 dark:text-slate-300'
-          "
+          :class="cellClass"
           :style="{ width: `${cell.column.getSize()}px` }"
-          :title="String(cell.getValue() ?? '')"
+          :title="text"
         >
           <!-- Linked cell (e.g. an event's involved object): navigating to the
                referenced object must not also trigger the row click. -->
@@ -349,7 +385,7 @@ const totalSize = computed(() => virtualizer.value.getTotalSize())
             class="text-blue-600 hover:underline dark:text-blue-400"
             @click.stop
           >
-            {{ cell.getValue() }}
+            {{ text }}
           </RouterLink>
           <FlexRender v-else :render="cell.column.columnDef.cell" :props="cell.getContext()" />
         </div>

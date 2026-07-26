@@ -23,13 +23,11 @@ interface ToMiniOptions {
    * wide ones. When omitted, all priority-0 columns are kept in server order.
    */
   keepOnly?: string[]
-  /** Extra column names to drop (case-insensitive). "Name" is always dropped. */
-  drop?: string[]
   /** Keep only rows whose object metadata passes this predicate. */
   rowFilter?: (meta: K8sObjectMeta) => boolean
 }
 
-/** Selected server columns as {index, name}, honoring keepOnly/priority/drop. */
+/** Selected server columns as {index, name}, honoring keepOnly and priority. */
 function selectColumns(table: K8sTable, opts: ToMiniOptions): Array<{ index: number; name: string }> {
   const defs = table.columnDefinitions ?? []
   if (opts.keepOnly !== undefined) {
@@ -39,9 +37,8 @@ function selectColumns(table: K8sTable, opts: ToMiniOptions): Array<{ index: num
       return index >= 0 && def !== undefined ? [{ index, name: def.name }] : []
     })
   }
-  const drop = new Set([...(opts.drop ?? []), "Name"].map((s) => s.toLowerCase()))
   return defs.flatMap((def, index) =>
-    (def.priority ?? 0) === 0 && !drop.has(def.name.toLowerCase()) ? [{ index, name: def.name }] : [],
+    (def.priority ?? 0) === 0 && def.name.toLowerCase() !== "name" ? [{ index, name: def.name }] : [],
   )
 }
 

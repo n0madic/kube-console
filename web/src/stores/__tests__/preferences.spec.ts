@@ -17,6 +17,60 @@ describe("preferences eventsOnlyWarnings", () => {
   })
 })
 
+// The serializer is the localStorage allowlist — the guarantee that no token or
+// fetched object can ever reach storage. It must fail loudly if the key set
+// grows, and the sanitizer must keep dropping anything not on it (including
+// `defaultNamespace`, a removed field still sitting in existing browsers).
+describe("preferences localStorage allowlist", () => {
+  const ALLOWED_KEYS = [
+    "theme",
+    "pinnedResources",
+    "hiddenColumns",
+    "tablePageSize",
+    "eventsOnlyWarnings",
+    "sidebarCollapsed",
+    "metrics",
+  ]
+
+  const stored = {
+    theme: "dark",
+    defaultNamespace: "kube-system",
+    bearerToken: "sentinel-must-not-persist",
+    pinnedResources: ["core/v1/pods"],
+    hiddenColumns: { "core/v1/pods": ["Node"] },
+    tablePageSize: 100,
+    eventsOnlyWarnings: true,
+    sidebarCollapsed: true,
+    metrics: { enabled: false, pollIntervalSeconds: 60, defaultRange: "1h" },
+  }
+
+  it("keeps every supported preference and drops unknown keys silently", () => {
+    const prefs = sanitizePreferences(stored)
+    expect(prefs).toEqual({
+      theme: "dark",
+      pinnedResources: ["core/v1/pods"],
+      hiddenColumns: { "core/v1/pods": ["Node"] },
+      tablePageSize: 100,
+      eventsOnlyWarnings: true,
+      sidebarCollapsed: true,
+      metrics: { enabled: false, pollIntervalSeconds: 60, defaultRange: "1h" },
+    })
+    expect(Object.keys(prefs).sort()).toEqual([...ALLOWED_KEYS].sort())
+  })
+
+  it("serializes only allowlisted keys", () => {
+    const raw = serializePreferences(sanitizePreferences(stored))
+    expect(Object.keys(JSON.parse(raw)).sort()).toEqual([...ALLOWED_KEYS].sort())
+    expect(raw).not.toContain("defaultNamespace")
+    expect(raw).not.toContain("sentinel-must-not-persist")
+  })
+
+  it("round-trips a legacy payload without error", () => {
+    const restored = sanitizePreferences(JSON.parse(serializePreferences(sanitizePreferences(stored))))
+    expect(restored).toEqual(sanitizePreferences(stored))
+  })
+})
+
 describe("movePinned", () => {
   beforeEach(() => {
     window.localStorage.clear()

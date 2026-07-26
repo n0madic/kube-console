@@ -10,7 +10,6 @@ export type MetricsRange = "5m" | "15m" | "1h"
 
 export interface UserPreferences {
   theme: "light" | "dark" | "system"
-  defaultNamespace?: string
   pinnedResources: string[]
   hiddenColumns: Record<string, string[]>
   tablePageSize: number
@@ -59,9 +58,6 @@ export function sanitizePreferences(input: unknown): UserPreferences {
   const p = input as Record<string, unknown>
 
   if (p.theme === "light" || p.theme === "dark" || p.theme === "system") out.theme = p.theme
-  if (typeof p.defaultNamespace === "string" && p.defaultNamespace !== "") {
-    out.defaultNamespace = p.defaultNamespace
-  }
   if (isStringArray(p.pinnedResources)) out.pinnedResources = p.pinnedResources
   if (typeof p.hiddenColumns === "object" && p.hiddenColumns !== null) {
     for (const [key, cols] of Object.entries(p.hiddenColumns as Record<string, unknown>)) {
@@ -90,7 +86,6 @@ export function sanitizePreferences(input: unknown): UserPreferences {
 export function serializePreferences(prefs: UserPreferences): string {
   const allowlisted: UserPreferences = {
     theme: prefs.theme,
-    ...(prefs.defaultNamespace !== undefined ? { defaultNamespace: prefs.defaultNamespace } : {}),
     pinnedResources: [...prefs.pinnedResources],
     // Spread defines own properties, so a "__proto__" key stays a key here too.
     hiddenColumns: { ...prefs.hiddenColumns },

@@ -54,10 +54,7 @@ func VerifyToken(ctx context.Context, up *kube.Upstream, token string) (*Verific
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUpstream, err)
 	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	defer httpx.DrainAndClose(resp)
 
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusCreated:

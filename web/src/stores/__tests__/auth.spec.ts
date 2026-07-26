@@ -358,6 +358,92 @@ describe("auth store", () => {
     }
   })
 
+  // isAuthenticated is hasSession(activeContext) — the route guard and the
+  // switcher's "signed in" mark are one rule, so they cannot drift (they were
+  // two line-for-line copies, and the historical bug was one of them forgetting
+  // the TTL). These assert the agreement itself, not each side separately.
+  describe("isAuthenticated agrees with hasSession(activeContext)", () => {
+    it("across no session and a valid one", () => {
+      const auth = useAuthStore()
+
+      // No session at all.
+      expect(auth.isAuthenticated).toBe(auth.hasSession(auth.activeContext))
+      expect(auth.isAuthenticated).toBe(false)
+
+      auth.setSession("alpha", SENTINEL, null, false)
+      expect(auth.isAuthenticated).toBe(auth.hasSession("alpha"))
+      expect(auth.isAuthenticated).toBe(true)
+    })
+
+    // An expired session, evaluated fresh. isAuthenticated is a computed and
+    // Date.now() is not reactive, so a TTL that lapses with nothing else moving
+    // is seen at the next evaluation — which every use path forces, since
+    // pruneExpiredSessions rewrites `sessions` exactly when something expired
+    // (route guard, context switch, token fetch).
+    it("on an expired session", () => {
+      const auth = useAuthStore()
+      auth.setSession("alpha", SENTINEL, null, false)
+
+      vi.useFakeTimers()
+      try {
+        vi.setSystemTime(Date.now() + SESSION_TTL_MS + 1000)
+        expect(auth.isAuthenticated).toBe(auth.hasSession("alpha"))
+        expect(auth.isAuthenticated).toBe(false)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it("after switching to a context with and without a session", () => {
+      const auth = useAuthStore()
+      auth.setSession("alpha", SENTINEL, null, false)
+
+      auth.setActiveContext("beta")
+      expect(auth.isAuthenticated).toBe(auth.hasSession("beta"))
+      expect(auth.isAuthenticated).toBe(false)
+
+      auth.setActiveContext("alpha")
+      expect(auth.isAuthenticated).toBe(auth.hasSession("alpha"))
+      expect(auth.isAuthenticated).toBe(true)
+    })
+
+    it("in local kubeconfig mode, where every context is authenticated", () => {
+      const auth = useAuthStore()
+      auth.setLocalAuth(true)
+
+      for (const name of ["", "alpha", "never-seen"]) {
+        auth.setActiveContext(name)
+        expect(auth.isAuthenticated, name).toBe(auth.hasSession(name))
+        expect(auth.isAuthenticated, name).toBe(true)
+      }
+      expect(auth.token).toBeNull()
+    })
+
+    // Both are lazy reads of the TTL, never a reactive clock and never a
+    // mutation: a computed must not write, and dropping what expired belongs to
+    // pruneExpiredSessions alone.
+    it("reads the TTL without dropping the expired session", () => {
+      const auth = useAuthStore()
+      auth.setSession("alpha", SENTINEL, null, false)
+
+      vi.useFakeTimers()
+      try {
+        vi.setSystemTime(Date.now() + SESSION_TTL_MS + 1000)
+
+        expect(auth.isAuthenticated).toBe(false)
+        expect(auth.hasSession("alpha")).toBe(false)
+        expect(auth.signedInContexts()).toEqual([])
+        // Still on disk: reading is not pruning.
+        expect(window.sessionStorage.getItem(SESSION_STORAGE_KEY) ?? "").toContain(SENTINEL)
+
+        expect(auth.pruneExpiredSessions()).toEqual(["alpha"])
+        expect(window.sessionStorage.getItem(SESSION_STORAGE_KEY) ?? "").not.toContain(SENTINEL)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
+
   // What a late 401 from a cluster the user already switched away from does.
   it("clearSession(context) ends a non-active session, leaving the active one", () => {
     const auth = useAuthStore()
