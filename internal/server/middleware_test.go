@@ -52,6 +52,52 @@ func TestRequestLoggerNeverLogsTokenOrQuery(t *testing.T) {
 	}
 }
 
+// Probe traffic is the kubelet asking every few seconds, forever, per pod: at
+// Info it drowns the log it shares with real requests. It drops to Debug while
+// it succeeds and stays at Info the moment it does not — a /readyz turning 503
+// is the last thing logged before the pod is restarted.
+func TestRequestLoggerDemotesSuccessfulProbes(t *testing.T) {
+	handlerFor := func(buf *bytes.Buffer, level slog.Level, status int) http.Handler {
+		logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: level}))
+		return RequestLogger(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+		}))
+	}
+
+	for _, path := range []string{"/healthz", "/readyz"} {
+		var buf bytes.Buffer
+		handlerFor(&buf, slog.LevelInfo, http.StatusOK).ServeHTTP(
+			httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+		if logged := buf.String(); logged != "" {
+			t.Fatalf("successful %s logged at info: %q", path, logged)
+		}
+
+		buf.Reset()
+		handlerFor(&buf, slog.LevelDebug, http.StatusOK).ServeHTTP(
+			httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+		logged := buf.String()
+		if !strings.Contains(logged, "level=DEBUG") || !strings.Contains(logged, path) {
+			t.Fatalf("successful %s not logged at debug: %q", path, logged)
+		}
+
+		buf.Reset()
+		handlerFor(&buf, slog.LevelInfo, http.StatusServiceUnavailable).ServeHTTP(
+			httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+		logged = buf.String()
+		if !strings.Contains(logged, "level=INFO") || !strings.Contains(logged, "status=503") {
+			t.Fatalf("failing %s must stay at info: %q", path, logged)
+		}
+	}
+
+	// Everything else keeps its Info line whatever the status.
+	var buf bytes.Buffer
+	handlerFor(&buf, slog.LevelInfo, http.StatusOK).ServeHTTP(
+		httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/k8s/api/v1/pods", nil))
+	if logged := buf.String(); !strings.Contains(logged, "level=INFO") {
+		t.Fatalf("ordinary request not logged at info: %q", logged)
+	}
+}
+
 // TestRequestLoggerLogsAbortedStreams is the regression for the silent abort
 // path: Recoverer re-panics http.ErrAbortHandler — how every stream the
 // ReverseProxy aborts ends — and net/http then swallows it, so a log call on

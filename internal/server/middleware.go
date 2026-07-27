@@ -97,16 +97,30 @@ func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 			// return path would leave every stream the ReverseProxy aborts —
 			// a closed tab on a watch or log follow — with no trace at all.
 			defer func() {
-				logger.Info("request",
+				status := sw.Status()
+				logger.Log(r.Context(), requestLogLevel(r.URL.Path, status), "request",
 					"method", r.Method,
 					"path", r.URL.Path,
-					"status", sw.Status(),
+					"status", status,
 					"duration_ms", time.Since(start).Milliseconds(),
 				)
 			}()
 			next.ServeHTTP(sw, r)
 		})
 	}
+}
+
+// requestLogLevel demotes *successful* probe traffic to Debug. The kubelet asks
+// for /healthz and /readyz every few seconds for the life of every pod and a
+// 200 there says nothing, so at Info it is all one ever sees; --log-level debug
+// brings it back. A failing probe keeps Info: a /readyz answering 503 is the
+// last thing logged before the pod is restarted, which is exactly when the log
+// has to say why.
+func requestLogLevel(path string, status int) slog.Level {
+	if status < http.StatusBadRequest && probePaths[path] {
+		return slog.LevelDebug
+	}
+	return slog.LevelInfo
 }
 
 // Recoverer converts panics into JSON 500 responses.

@@ -29,6 +29,11 @@ type Deps struct {
 	ShutdownCtx context.Context
 }
 
+// probePaths are the kubelet-facing endpoints registered in NewHandler, kept
+// beside their routes so the set RequestLogger demotes to Debug cannot name a
+// path this router does not serve.
+var probePaths = map[string]bool{"/healthz": true, "/readyz": true}
+
 // NewHandler builds the full HTTP handler tree.
 func NewHandler(d Deps) http.Handler {
 	if d.ShutdownCtx == nil {
