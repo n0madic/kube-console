@@ -423,6 +423,78 @@ describe("ResourceTable", () => {
     expect(after.indexOf("fresh")).toBeLessThan(after.indexOf("old")) // back to Name ascending
   })
 
+  // Regression: the default sort resolves the column by its *index*, so it can
+  // only be applied once the columns have arrived — and they never have at the
+  // moment it used to be applied. useResourceList blanks columns before every
+  // walk, so both the first mount and every resource-type switch resolve it
+  // against an empty column list, which silently means "no sort at all". Pods
+  // stopped coming up newest first and everything else stopped coming up by
+  // name.
+  it("applies the default sort once the columns arrive after mount", async () => {
+    const wrapper = mount(ResourceTable, {
+      props: {
+        columns: [] as K8sTableColumn[],
+        rows: [] as K8sTableRow[],
+        globalFilter: "",
+        defaultSort: { column: "Age" },
+        resetKey: "/v1/pods",
+      },
+      global: { stubs },
+    })
+    await wrapper.setProps({
+      columns: [
+        { name: "Name", type: "string" },
+        { name: "Age", type: "string" },
+      ],
+      rows: [
+        { cells: ["old", "44d"], object: { metadata: { name: "old", uid: "u1" } } },
+        { cells: ["fresh", "30s"], object: { metadata: { name: "fresh", uid: "u2" } } },
+        { cells: ["mid", "5m"], object: { metadata: { name: "mid", uid: "u3" } } },
+      ],
+    })
+    const cells = renderedCells(wrapper).map((c) => c.text())
+    expect(cells.indexOf("fresh")).toBeLessThan(cells.indexOf("mid"))
+    expect(cells.indexOf("mid")).toBeLessThan(cells.indexOf("old"))
+  })
+
+  // The same thing on a navigation: the resource type changes and the columns
+  // are blanked in the same flush, so the default has to survive until the new
+  // kind's columns land.
+  it("applies the default sort of the new resource type after a blanked switch", async () => {
+    const columns: K8sTableColumn[] = [
+      { name: "Name", type: "string" },
+      { name: "Age", type: "string" },
+    ]
+    const rows: K8sTableRow[] = [
+      { cells: ["old", "44d"], object: { metadata: { name: "old", uid: "u1" } } },
+      { cells: ["fresh", "30s"], object: { metadata: { name: "fresh", uid: "u2" } } },
+    ]
+    const wrapper = mount(ResourceTable, {
+      props: {
+        columns,
+        rows,
+        globalFilter: "",
+        defaultSort: { column: "Name" },
+        resetKey: "apps/v1/deployments",
+      },
+      global: { stubs },
+    })
+    // Sort descending by Name, so a re-applied default is visible.
+    await wrapper.findAll('[role="columnheader"]')[0]!.trigger("click")
+    expect(renderedCells(wrapper).map((c) => c.text()).indexOf("old")).toBeLessThan(
+      renderedCells(wrapper)
+        .map((c) => c.text())
+        .indexOf("fresh"),
+    )
+
+    // Navigation: the new kind's key arrives while the columns are still blank.
+    await wrapper.setProps({ resetKey: "apps/v1/statefulsets", columns: [], rows: [] })
+    await wrapper.setProps({ columns, rows: [...rows] })
+
+    const after = renderedCells(wrapper).map((c) => c.text())
+    expect(after.indexOf("fresh")).toBeLessThan(after.indexOf("old")) // Name ascending
+  })
+
   it("sizes visible columns by their own data when a middle column is hidden", () => {
     // Regression: estimateColumnWidths was fed the visible subset but indexed
     // row.cells by visible position, so columns after a hidden non-trailing one

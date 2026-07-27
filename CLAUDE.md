@@ -814,6 +814,20 @@ emit the same names (`Name|Age`, ordinary for CRDs) are indistinguishable, so
 navigating between them reset nothing. The width memo stays keyed on the column
 names: it is about measured content, not about identity.
 
+**Resetting the sort and applying the default sort are two different moments**,
+and collapsing them cost the feature entirely: `defaultSort` names a column while
+the sort id is `<index>-<name>`, so it can only be resolved once the columns are
+there — and at both points it was asked for (mount, `resetKey` change) they are
+blank, precisely because `load()` clears them ahead of every walk. It resolved to
+`[]`, i.e. **no sort at all**: pods stopped coming up newest first and every other
+kind stopped coming up by name. So the reset clears `sorting` and re-arms a
+`defaultPending` flag, and the default is applied by a **second watch on the
+column names** — declared after the reset watch, so a switch that brings its
+columns in the same flush still resets first. It lands at most once per column set
+and never over a sort the user picked (`onSortingChange` clears the flag, which
+matters for a kind whose printer emits no `Age` column: pending would otherwise
+still be armed when a later reload produces one).
+
 That invalidation is keyed on `columnDefs`, so the defs must be **content-keyed**
 and keep their previous array when nothing a def is built from changed. Their
 computed reaches `props.rows` (via `emptyColumnNames` and `defaultWidths`), so it

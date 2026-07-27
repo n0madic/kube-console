@@ -180,14 +180,42 @@ function defaultSorting(): SortingState {
   return [{ id: `${match}-${wanted.column}`, desc: false }]
 }
 
-const sorting = ref<SortingState>(defaultSorting())
+const sorting = ref<SortingState>([])
 const columnSizing = ref<ColumnSizingState>({})
 
+/**
+ * The default sort names a column but the sort id is `<index>-<name>`, so it can
+ * only be applied once the columns have actually arrived — and at both moments
+ * it is asked for, they usually have not: useResourceList blanks `columns`
+ * before every walk, so the first mount and every resource-type switch resolve
+ * it against an empty list, where it silently means "no sort at all". So it
+ * stays *pending* until the named column shows up, at most once per column set,
+ * and never over a sort the user picked in the meantime.
+ */
+let defaultPending = true
+function applyDefaultSort(): void {
+  const next = defaultSorting()
+  if (next.length === 0) return
+  sorting.value = next
+  defaultPending = false
+}
+applyDefaultSort()
+
 // New resource type (different column set): drop manual resize overrides and
-// re-apply the default sort.
+// re-arm the default sort. Clearing `sorting` here rather than resolving it is
+// what makes the blanked-columns case correct — the previous kind's sort must
+// not outlive it either way.
 watch(columnSetKey, () => {
   columnSizing.value = {}
-  sorting.value = defaultSorting()
+  sorting.value = []
+  defaultPending = true
+  applyDefaultSort()
+})
+
+// Declared after the reset watch so the two run in that order when a switch
+// brings its columns along in the same flush.
+watch(columnNamesKey, () => {
+  if (defaultPending) applyDefaultSort()
 })
 
 const table = useVueTable({
@@ -210,6 +238,10 @@ const table = useVueTable({
   },
   onSortingChange: (updater) => {
     sorting.value = typeof updater === "function" ? updater(sorting.value) : updater
+    // A header click is a decision: a default still pending (its column absent
+    // so far — a kind whose printer emits no Age, say) must not land on top of
+    // it if that column shows up in a later reload.
+    defaultPending = false
   },
   onColumnSizingChange: (updater) => {
     columnSizing.value = typeof updater === "function" ? updater(columnSizing.value) : updater
