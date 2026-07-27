@@ -160,22 +160,34 @@ Consequences worth planning for:
 
 ## Get started
 
-Deploy the published image with the bundled Helm chart. Images are built by
-CI for `linux/amd64` and `linux/arm64` and pushed to
+Install the Helm chart straight from the registry — no clone, no flags:
+
+```bash
+helm install kube-console oci://ghcr.io/n0madic/charts/kube-console \
+  --version 0.1.1 --namespace kube-console --create-namespace
+```
+
+Chart and image carry the **same** version: a `vX.Y.Z` tag publishes the chart
+as `X.Y.Z` with a matching `appVersion`, which is what the chart deploys unless
+`image.tag` says otherwise. To install a working copy instead — a local values
+change, an unreleased branch — point Helm at the directory, and override the tag
+when the image you want is not the one `appVersion` names:
+
+```bash
+helm install kube-console deploy/helm/kube-console -f my-values.yaml \
+  --set image.tag=master
+```
+
+Images are built by CI for `linux/amd64` and `linux/arm64` and pushed to
 `ghcr.io/n0madic/kube-console` — `vX.Y.Z` tags publish `X.Y.Z`, `X.Y` and
 `latest`, and every push to `master` publishes `master` plus a short-SHA tag.
 Release tags are kept forever; the short-SHA ones are pruned to the newest 10.
+Chart versions are kept forever as well.
+
+To build the image yourself:
 
 ```bash
-helm install kube-console deploy/helm/kube-console \
-  --set image.repository=ghcr.io/n0madic/kube-console \
-  --set image.tag=0.1.0
-```
-
-To build it yourself:
-
-```bash
-docker build -t ghcr.io/n0madic/kube-console:0.1.0 .
+docker build -t ghcr.io/n0madic/kube-console:0.1.1 .
 ```
 
 Both build stages run on the host architecture and cross-compile, so

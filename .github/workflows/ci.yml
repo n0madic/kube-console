@@ -109,6 +109,42 @@ jobs:
           # adding the attestation entries GHCR shows as "unknown/unknown".
           provenance: false
 
+  chart:
+    name: Chart
+    # After the image, and on release tags only: the chart's appVersion names
+    # an image tag, so publishing it before that image exists ships something
+    # installable and broken.
+    needs: [image]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+      - name: Log in to ghcr.io
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: echo "$GHCR_TOKEN" | helm registry login ghcr.io -u "$GHCR_USER" --password-stdin
+      # Pushed under `charts/`, never bare `oci://ghcr.io/n0madic`: `helm push`
+      # appends the chart name, so that would land in the *image* package —
+      # `0.1.2` as both a chart and an image manifest, and the cleanup job below
+      # walking two kinds of artifact. It also keeps that job's `packages:
+      # kube-console` an exact target; the chart package is never pruned, which
+      # is what a release chart wants. GHCR creates the package **private**:
+      # flip it to public once, by hand, or `helm install` answers 401.
+      #
+      # The git tag is the single source of truth for both versions. Chart.yaml
+      # keeps its own for `helm install deploy/helm/kube-console` from a clone.
+      - name: Package and push
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          helm package deploy/helm/kube-console \
+            --version "$version" --app-version "$version" --destination "$RUNNER_TEMP"
+          helm push "$RUNNER_TEMP/kube-console-$version.tgz" oci://ghcr.io/n0madic/charts
+
   cleanup:
     name: Registry cleanup
     needs: [image]
