@@ -26,7 +26,7 @@ const (
 // discovery, metrics, exec). Every adapter resolves the target cluster from the
 // X-Kube-Context header per request via the shared registry.
 func registerUI(ui chi.Router, d Deps) {
-	ui.Method("GET", "/contexts", handleContexts(d.Registry, d.Cfg.ClusterName, d.Logger))
+	ui.Method("GET", "/contexts", handleContexts(d.Registry, d.Cfg.ClusterName, d.Version, d.Logger))
 	ui.Method("GET", "/auth/mode", handleAuthMode(d.Registry))
 	ui.Method("POST", "/auth/verify", auth.NewHandler(d.Registry, d.Logger))
 	ui.Method("GET", "/discovery", discovery.NewHandler(d.Registry, d.Logger))
@@ -77,6 +77,13 @@ type contextsResponse struct {
 	// names next to it, and this response is already gated on a token the
 	// apiserver accepted.
 	ClusterName string `json:"clusterName,omitempty"`
+	// Version is the build serving this SPA: the git tag for a release, the
+	// short commit otherwise. It rides on this endpoint rather than on a public
+	// one for no security reason — /healthz already answers it unauthenticated
+	// — but because the surface that shows it (the sidebar footer) is behind
+	// the login anyway, and this response is already fetched once per session
+	// and cached for 5m, so it costs no request and no new route.
+	Version string `json:"version,omitempty"`
 }
 
 // handleContexts serves GET /api/ui/contexts: the kubeconfig context names and
@@ -87,7 +94,7 @@ type contextsResponse struct {
 // endpoint would otherwise hand the topology to anyone who sends the word
 // "Bearer". It costs one SelfSubjectReview per fetch, and the SPA fetches this
 // once per session (staleTime 5m).
-func handleContexts(reg *kube.Registry, clusterName string, logger *slog.Logger) http.HandlerFunc {
+func handleContexts(reg *kube.Registry, clusterName, version string, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token, ok := reg.RequireToken(w, r)
 		if !ok {
@@ -110,6 +117,7 @@ func handleContexts(reg *kube.Registry, clusterName string, logger *slog.Logger)
 			Contexts:    entries,
 			Default:     reg.DefaultName(),
 			ClusterName: clusterName,
+			Version:     version,
 		})
 	}
 }

@@ -16,10 +16,11 @@ const mockedDiscovery = vi.mocked(useDiscovery)
 
 const routerLinkStub = {
   RouterLink: { props: ["to"], template: "<a :data-to='to'><slot /></a>" },
-  // ClusterSelector and ClusterName pull in vue-query (contexts); both are
-  // exercised in their own specs, so stub them out here.
+  // ClusterSelector, ClusterName and AppVersion pull in vue-query (contexts);
+  // each is exercised in its own spec, so stub them out here.
   ClusterSelector: true,
   ClusterName: true,
+  AppVersion: true,
 }
 
 function mockDiscovery(over: Partial<Record<string, unknown>> = {}) {

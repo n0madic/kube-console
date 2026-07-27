@@ -147,8 +147,12 @@ func TestContextsReturnsNamesAndDefault(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
 		t.Fatal(err)
 	}
-	if len(raw) != 2 {
+	if len(raw) != 3 {
 		t.Errorf("response carries extra fields: %v", raw)
+	}
+	// The build, for the sidebar footer: server-global, like clusterName.
+	if raw["version"] != "test" {
+		t.Errorf("version = %v, want the Deps.Version this handler was built with", raw["version"])
 	}
 	// Unset --cluster-name must not put an empty label in the response: the SPA
 	// would then have to tell "" from absent to fall back to the context name.

@@ -94,6 +94,23 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,format=short
+      # What the binary reports (--version, the startup log, the sidebar
+      # footer), by the same rule the Makefile uses: the tag for a release, the
+      # short commit for everything else. Deliberately NOT metadata-action's
+      # `version` output, which is the *image tag* it chose — on a push to
+      # master that is the literal string `master` and on a PR it is `pr-N`, so
+      # a branch build carried no way back to a commit at all. The PR head sha,
+      # not github.sha's merge commit, matching the type=sha image tag.
+      - name: Build version
+        id: version
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "value=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${HEAD_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          fi
       - name: Build and push
         uses: docker/build-push-action@v7
         with:

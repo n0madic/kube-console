@@ -8,6 +8,7 @@ import { usePreferencesStore } from "@/stores/preferences"
 import { useUiStore } from "@/stores/ui"
 import { buildCatalog, matchesSearch } from "@/utils/resourceCatalog"
 
+import AppVersion from "./AppVersion.vue"
 import ClusterName from "./ClusterName.vue"
 import ClusterSelector from "./ClusterSelector.vue"
 import SidebarLink from "./SidebarLink.vue"
@@ -249,5 +250,9 @@ function rowClass(id: string): string {
         </div>
       </template>
     </nav>
+
+    <!-- Which build this is. Last, and outside the scrolling nav, so it stays
+         pinned to the bottom (the nav above is flex-1). -->
+    <AppVersion />
   </aside>
 </template>

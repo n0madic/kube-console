@@ -537,6 +537,30 @@ rather than lines in `Sidebar.vue`, like `ClusterSelector`, because it reads the
 contexts query and `Sidebar.spec` must not stand up vue-query (both are stubbed
 there).
 
+### Build version
+
+`main.version` (`-ldflags -X`), reported by `--version` (a `config.
+ErrVersionRequested` sentinel handled like `flag.ErrHelp`, returned **before**
+`validate` so it answers on a host with no cluster — the runtime image is
+distroless, so this is the only way to ask a container without HTTP), by the
+startup log line, by `/healthz`, and on screen in `layout/AppVersion.vue`, the
+sidebar footer. It rides to the SPA on `contextsResponse` beside `clusterName`:
+not for secrecy — `/healthz` answers it unauthenticated — but because the one
+surface showing it is behind the login anyway, and that response is already
+fetched once per session and cached 5m, so it costs no request and no route.
+Reference information, not operational, hence no TopBar twin the way
+`ClusterName` has one; it goes away with the sidebar. Absent (old backend, query
+unanswered) renders nothing rather than a placeholder.
+
+The string is **an exact tag, else the short commit** — never `git describe`'s
+`v0.1.1-4-gf72a678`, which names a release the build is not. The Makefile and
+the CI image job must agree on that rule, and `.git` is in `.dockerignore`, so
+the Dockerfile can only take it as a build arg. What CI must **not** pass is
+`docker/metadata-action`'s `version` output: that is the *image tag* it chose,
+which on a push to master is the literal string `master` and on a PR is `pr-N`
+— so every branch build's binary carried no way back to a commit. The PR head
+sha, not `github.sha`'s merge commit, matching the `type=sha` image tag.
+
 ### Cluster switcher
 
 `ClusterSelector.vue` (shown only when >1 context, same rule as the login

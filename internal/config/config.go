@@ -4,6 +4,7 @@
 package config
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -192,6 +193,14 @@ type Config struct {
 	LogFormat string // text|json
 }
 
+// ErrVersionRequested is returned by Load when --version was given: the caller
+// prints the build and exits 0, the same shape as flag.ErrHelp. Reported rather
+// than handled here because config has no version to print — it is injected into
+// the binary (main.version, -ldflags) and the process owns it. The runtime image
+// is distroless with no shell, so this flag is the only way to ask a container
+// what it is without going through HTTP.
+var ErrVersionRequested = errors.New("version requested")
+
 // Load parses configuration from the given command-line arguments and the
 // environment.
 func Load(args []string) (*Config, error) {
@@ -276,8 +285,14 @@ func Load(args []string) (*Config, error) {
 	proxies := fs.String("trusted-proxies", strings.Join(cfg.TrustedProxies, ","), "comma-separated CIDRs of reverse proxies whose X-Forwarded-For may be trusted for the client IP")
 	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: debug|info|warn|error")
 	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "log format: text|json")
+	showVersion := fs.Bool("version", false, "print the build version and exit")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
+	}
+	// Ahead of every other check: --version must answer on a host with no
+	// kubeconfig and no cluster, exactly as --help does.
+	if *showVersion {
+		return nil, ErrVersionRequested
 	}
 	cfg.AllowedOrigins = splitCSV(*origins)
 	cfg.TrustedProxies = splitCSV(*proxies)

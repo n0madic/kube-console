@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -87,6 +88,17 @@ func TestLoadLimitOverrides(t *testing.T) {
 
 // A typo in the proxy CIDRs must fail at startup: chi's XFF middleware panics
 // on an invalid prefix, and silently trusting nothing would be worse.
+// --version answers before validate, so it works on a host with no kubeconfig
+// and no cluster — exactly as --help does. Without that ordering the flag would
+// fail with "no kube-apiserver configured" precisely where it is most useful:
+// a distroless container, which has no shell to ask any other way.
+func TestLoadVersionFlagShortCircuits(t *testing.T) {
+	_, err := Load([]string{"--version"})
+	if !errors.Is(err, ErrVersionRequested) {
+		t.Fatalf("err = %v, want ErrVersionRequested", err)
+	}
+}
+
 func TestLoadRejectsInvalidTrustedProxy(t *testing.T) {
 	t.Setenv("KUBE_API_SERVER", "https://kubernetes.default.svc")
 	t.Setenv("KUBE_CONSOLE_TRUSTED_PROXIES", "10.0.0.0/8,not-a-cidr")

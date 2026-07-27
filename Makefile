@@ -1,4 +1,12 @@
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# The exact tag if HEAD carries one, else the short commit — never plain
+# `git describe`, whose v0.1.1-4-gf72a678 form names a release the build is not.
+# A build is either a release or a point on a branch, and the sha is what
+# identifies the second. `-dirty` marks an uncommitted tree, which only happens
+# locally: the Docker build has no .git (.dockerignore) and CI passes VERSION in.
+# Simple-expanded so the status walk runs once per make, not per use.
+GIT_DIRTY := $(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo -dirty)
+VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null \
+             || git rev-parse --short=7 HEAD 2>/dev/null || echo dev)$(GIT_DIRTY)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 # Some npm packages ship Go source (e.g. flatted/golang) without a go.mod, so a
 # bare ./... after `npm ci` pulls web/node_modules packages into build/vet/test.
@@ -42,8 +50,11 @@ run-dev: web-build
 run-dev-auth: web-build
 	go run ./cmd/kube-console --log-level debug --listen 127.0.0.1:8080 --use-kubeconfig-credentials
 
+# --build-arg, not just the tag: .git is in .dockerignore, so the build stage
+# cannot work the version out for itself and would otherwise embed `dev` in an
+# image tagged with the real one.
 docker-build:
-	docker build -t kube-console:$(VERSION) .
+	docker build --build-arg VERSION=$(VERSION) -t kube-console:$(VERSION) .
 
 helm-lint:
 	helm lint deploy/helm/kube-console

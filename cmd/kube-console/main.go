@@ -18,13 +18,21 @@ import (
 	"github.com/n0madic/kube-console/web"
 )
 
-// version is injected at build time via -ldflags "-X main.version=...".
+// version is injected at build time via -ldflags "-X main.version=...": the git
+// tag when HEAD carries one, else the short commit (see the Makefile and the CI
+// image job, which must agree). It is reported by --version, by the startup log
+// line, by /healthz, and on screen in the sidebar footer via GET
+// /api/ui/contexts.
 var version = "dev"
 
 func main() {
 	cfg, err := config.Load(os.Args[1:])
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(0)
+		}
+		if errors.Is(err, config.ErrVersionRequested) {
+			fmt.Println(version)
 			os.Exit(0)
 		}
 		fmt.Fprintln(os.Stderr, "kube-console:", err)

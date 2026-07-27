@@ -236,6 +236,7 @@ Flags take precedence over environment variables.
 | `--trusted-proxies` | `KUBE_CONSOLE_TRUSTED_PROXIES` | — | CIDRs of reverse proxies whose `X-Forwarded-For` may set the client IP (honored only for connections arriving from them) |
 | `--log-level` | `KUBE_CONSOLE_LOG_LEVEL` | `info` | `debug\|info\|warn\|error` |
 | `--log-format` | `KUBE_CONSOLE_LOG_FORMAT` | `text` | `text\|json` |
+| `--version` | — | — | print the build version and exit |
 
 The page title names the cluster the tab is on (`<cluster> · kube-console`) so
 several open consoles are tellable apart. It follows the active context, except
@@ -249,6 +250,20 @@ A configured `--cluster-name` also shows on the page itself, under the product
 name in the sidebar: a tab title is not visible while looking at the page. Only
 the configured name appears there — the active context is named by the cluster
 switcher right below it, which is hidden when there is only one.
+
+### Which build am I running?
+
+The version is the git tag when the build sits exactly on one (`v0.1.1`), and
+the short commit otherwise (`f72a678`) — a build is either a release or a point
+on a branch, and nothing in between needs a name. A locally built binary marks
+an uncommitted tree with `-dirty`. It shows in four places:
+
+- the sidebar footer, served with the context names like the cluster label;
+- `kube-console --version` — the runtime image is distroless with no shell, so
+  this is how a container answers without HTTP: `kubectl exec deploy/kube-console
+  -- kube-console --version`;
+- the startup log line (`kube-console listening … version=…`);
+- `GET /healthz`, which needs no token.
 
 Source resolution when `--api-server` is unset: an explicit `--kubeconfig`
 wins; otherwise, running in-cluster, the apiserver URL is derived from
