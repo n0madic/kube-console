@@ -133,8 +133,9 @@ jobs:
       # `0.1.2` as both a chart and an image manifest, and the cleanup job below
       # walking two kinds of artifact. It also keeps that job's `packages:
       # kube-console` an exact target; the chart package is never pruned, which
-      # is what a release chart wants. GHCR creates the package **private**:
-      # flip it to public once, by hand, or `helm install` answers 401.
+      # is what a release chart wants. Pushed with GITHUB_TOKEN the package
+      # inherits this repository's visibility, so it is anonymously installable
+      # with no manual step — under a private repo it would need a login.
       #
       # The git tag is the single source of truth for both versions. Chart.yaml
       # keeps its own for `helm install deploy/helm/kube-console` from a clone.

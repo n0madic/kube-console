@@ -39,8 +39,9 @@ docker build -t kube-console:dev .  # any --platform: both stages cross-compile 
   that would push chart manifests into the *image* package — `0.1.2` as both,
   and `cleanup` below walking two kinds of artifact — while the separate package
   keeps its `packages: kube-console` an exact target and leaves every chart
-  version unpruned. GHCR creates a new package private; the first push needs its
-  visibility flipped by hand or `helm install` answers 401.
+  version unpruned. Pushed with `GITHUB_TOKEN`, the package inherits the
+  repository's visibility — public here, verified by pulling `0.1.1` anonymously
+  — so `helm install oci://…` needs no login and no manual visibility flip.
 - A `cleanup` job prunes ghcr.io after every push that published. `sha-*` is
   the only tag family it deletes (newest 10 kept, `keep-n-tagged` scoped by
   `delete-tags`); release tags are `1.2.3`/`1.2` — the leading `v` is stripped
