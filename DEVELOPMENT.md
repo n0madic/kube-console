@@ -136,8 +136,11 @@ kubectl --context <your-context> create token <serviceaccount> -n <namespace> --
    write operations.
 3. A CRD with `additionalPrinterColumns` renders as a generic table with its
    custom columns.
-4. Generic YAML apply (server-side apply, `fieldManager=kube-console`) works;
-   dry-run validates without persisting.
+4. Generic YAML apply (server-side apply, `fieldManager=kube-console`) works
+   from the detail page's YAML tab; dry-run validates without persisting. A
+   dirty draft survives a tab switch and a Refresh (which says the object
+   changed on the server), and Cancel then reloads the object; returning to the
+   tab renders the editor at full width.
 5. Pod logs follow mode streams live output.
 6. Pod exec works for a user with `pods/exec` permission.
 7. Raw `/k8s/.../exec`, `/attach`, `/portforward`, `/proxy` are blocked
@@ -203,9 +206,15 @@ intentionally doesn't duplicate.
   `portforward`/`proxy` unreachable — known limitation, documented in
   README.
 - CodeMirror (`CodeMirrorEditor.vue`, ~110 kB gz) is imported via
-  `defineAsyncComponent` in YamlTab/EditYamlDialog/CreateResourceDialog so it
-  loads only when the YAML tab or an edit/create dialog opens — never on the
+  `defineAsyncComponent` in YamlTab/CreateResourceDialog so it
+  loads only when the YAML tab or the create dialog opens — never on the
   default Overview detail view. Keep it lazy (no static import) and keep the
   hand-picked extension set instead of `basicSetup` (which pulls autocomplete/
   lint/search we don't use). Code folding IS kept — it's cheap (rides on the
   already-bundled `@codemirror/language`) and useful on large manifests.
+- `CodeMirrorEditor` bakes `EditorState.readOnly` in at construction (only the
+  theme sits in a Compartment), so `readonly` is not reactive: the YAML tab
+  renders two `v-if`-split instances — editable draft and read-only full object
+  — instead of reconfiguring one. Reconfiguring would also swap the document
+  through the model watch, i.e. into the undo history, putting the full object
+  one Ctrl+Z away from replacing the draft.

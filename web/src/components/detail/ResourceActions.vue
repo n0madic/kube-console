@@ -3,7 +3,7 @@
 // manual CronJob run, suspend/resume, cordon/uncordon). Which ones appear comes
 // from the pure registry in utils/resourceActions; the shared dialog runs them.
 // No RBAC gating: a denied action returns the native Kubernetes 403 in the
-// dialog, same as Edit YAML and Delete.
+// dialog, same as the YAML tab's Apply and Delete.
 
 import { computed, ref } from "vue"
 

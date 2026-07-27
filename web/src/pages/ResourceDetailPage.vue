@@ -4,7 +4,6 @@ import { useRouter } from "vue-router"
 
 import type { ResourceRef } from "@/api/types"
 import DeleteConfirmDialog from "@/components/detail/DeleteConfirmDialog.vue"
-import EditYamlDialog from "@/components/detail/EditYamlDialog.vue"
 import OverviewTab from "@/components/detail/OverviewTab.vue"
 import ResourceActions from "@/components/detail/ResourceActions.vue"
 import YamlTab from "@/components/detail/YamlTab.vue"
@@ -37,6 +36,13 @@ const apiRef = computed<ResourceRef>(() => ({
 
 const objectNamespace = computed(() =>
   props.namespace === CLUSTER_SCOPE_SENTINEL ? undefined : props.namespace,
+)
+
+// Identity of the object on screen: the key of every tab that outlives a tab
+// switch, so navigating to another object remounts it (ending an exec session,
+// dropping an unsaved YAML draft).
+const objectKey = computed(() =>
+  [props.group, props.version, props.resource, props.namespace, props.name].join("/"),
 )
 
 const detail = useResourceObject(() => ({
@@ -76,15 +82,18 @@ watch(tabs, (newTabs) => {
   if (!newTabs.some((t) => t.id === activeTab.value)) activeTab.value = "overview"
 })
 
-// The terminal tab is mounted on first use and then only hidden, so its exec
-// session survives switching to another tab and back. It is keyed by the object
-// so navigating to another pod still remounts it (ending the old session).
+// The terminal and YAML tabs are mounted on first use and then only hidden, so
+// the terminal's exec session and the YAML tab's unsaved draft survive
+// switching to another tab and back. Both are keyed by the object, so
+// navigating elsewhere still remounts them (ending the old session, dropping
+// the old draft).
 const terminalMounted = ref(false)
+const yamlMounted = ref(false)
 watch(activeTab, (tab) => {
   if (tab === "terminal") terminalMounted.value = true
+  if (tab === "yaml") yamlMounted.value = true
 })
 
-const editOpen = ref(false)
 const deleteOpen = ref(false)
 
 function onDeleted(): void {
@@ -114,9 +123,6 @@ function onDeleted(): void {
         @changed="detail.refresh()"
       />
       <BaseButton :disabled="detail.loading.value" @click="detail.refresh()">Refresh</BaseButton>
-      <BaseButton :disabled="detail.object.value === null" @click="editOpen = true">
-        Edit YAML
-      </BaseButton>
       <BaseButton
         variant="danger"
         :disabled="detail.object.value === null"
@@ -141,7 +147,6 @@ function onDeleted(): void {
 
       <div class="min-h-0 flex-1 overflow-auto">
         <OverviewTab v-if="activeTab === 'overview'" :object="detail.object.value" />
-        <YamlTab v-else-if="activeTab === 'yaml'" :object="detail.object.value" class="h-full" />
         <PodEnvTab v-else-if="activeTab === 'env' && kind === 'Pod'" :object="detail.object.value" />
         <PodLogsTab
           v-else-if="activeTab === 'logs' && kind === 'Pod'"
@@ -156,26 +161,31 @@ function onDeleted(): void {
           v-else-if="activeTab === 'metrics' && kind === 'Node'"
           :object="detail.object.value"
         />
-        <!-- Deliberately outside the v-if chain: unlike the other tabs the
-             terminal owns a live exec session, so once opened it is only
-             hidden, never unmounted, while the pod page stays open. Leaving
-             the page (or switching pods) unmounts it and ends the session. -->
+        <!-- Deliberately outside the v-if chain: the YAML tab holds an
+             editable draft, so once opened it is only hidden, never unmounted,
+             while the page stays on this object. Navigating elsewhere changes
+             objectKey and remounts it, dropping the draft. -->
+        <YamlTab
+          v-if="yamlMounted"
+          v-show="activeTab === 'yaml'"
+          :key="objectKey"
+          :object="detail.object.value"
+          :resource-ref="apiRef"
+          class="h-full"
+          @applied="detail.refresh()"
+        />
+        <!-- Same reason, one step further: the terminal owns a live exec
+             session (and a shell running in the pod). Leaving the page (or
+             switching pods) unmounts it and ends the session. -->
         <PodTerminalTab
           v-if="terminalMounted && kind === 'Pod'"
           v-show="activeTab === 'terminal'"
-          :key="`${objectNamespace ?? ''}/${name}`"
+          :key="objectKey"
           :object="detail.object.value"
           :active="activeTab === 'terminal'"
           class="h-full"
         />
       </div>
-
-      <EditYamlDialog
-        v-model:open="editOpen"
-        :resource-ref="apiRef"
-        :object="detail.object.value"
-        @applied="detail.refresh()"
-      />
     </template>
 
     <DeleteConfirmDialog

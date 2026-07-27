@@ -857,7 +857,8 @@ fall through to "error". The two used to be three near-identical private
 helpers that disagreed by accident.
 
 Writes go through server-side apply (`fieldManager=kube-console`, force=false,
-dry-run supported) — never PUT. The exception is the narrow set of kind-specific
+dry-run supported) — never PUT. Two surfaces send one: the detail page's **YAML
+tab** and `CreateResourceDialog`. The exception is the narrow set of kind-specific
 actions (scale, rollout restart, suspend/resume, cordon/uncordon), which send
 targeted `PATCH`es like kubectl (`patchObject` in `api/k8s.ts`, merge or
 strategic-merge): `spec.replicas` and the restart annotation are usually owned
@@ -868,10 +869,15 @@ manual CronJob run `POST`s a Job (`createObject`).
 
 Generic tabs (Overview/YAML) + a kind registry in `ResourceDetailPage.vue`
 adding Pod (Env/Logs/Metrics/Terminal) and Node (Metrics) tabs. Every tab is
-`v-if`-swapped — **except Terminal**, which owns a live exec session (and a
-shell running in the pod): it sits outside that chain, mounts on first use, is
-then only hidden with `v-show` while the pod page stays open, and is `:key`ed by
-namespace/name so another pod still remounts it. `PodTerminalTab` takes `active`
+`v-if`-swapped — **except Terminal and YAML**, which each own something a
+remount would destroy: a live exec session (and a shell running in the pod),
+and an unsaved edit. Both sit outside that chain, mount on first use, are then
+only hidden with `v-show` while the page stays on this object, and are `:key`ed
+by `objectKey` — group/version/resource/namespace/name, the same five props the
+refresh watch keys on — so navigating elsewhere still remounts them (ending the
+session, dropping the draft). The terminal's old key was namespace/name, which
+`pods/foo` and `deployments/foo` share; only `kind === 'Pod'` saved it.
+`PodTerminalTab` takes `active`
 and refits + refocuses xterm on the way back — `TerminalView.fitNow()` is a
 no-op while the host has zero size, because under `display:none` FitAddon reads
 the declared "100%" as pixels and would push a ~2x5 resize upstream.
@@ -934,6 +940,32 @@ the tabs' toolbars by select index — `PodLogsTab`'s Tail select is found by
 label, since a single-container pod's picker is not the only thing that can move
 around it.
 
+The **YAML tab edits in place** (`YamlTab.vue`); there is no Edit YAML dialog —
+one document in two projections, behind an extra click and a modal, was the
+thing it replaced. What is edited is `toEditableYaml(object)`, the same
+apply-ready projection the dialog used to seed, so what is on screen is exactly
+what Apply sends; the full object as the API returned it (`status`,
+`managedFields`) is a **read-only** checkbox away, which is also where a 409
+sends you, since the conflict names field managers and those live in
+`metadata.managedFields`. Cancel/Dry run/Apply are gated on the draft being
+dirty — and on that checkbox being off, or Apply would send a draft that is not
+on screen and Cancel would destroy it out of sight. A rejected apply or dry run
+is shown in place (409 as the native conflict block, everything else as the
+error) and is cleared by the **next keystroke**: the verdict judged the text
+that was sent, not the one now on screen, and leaving it up until the next Apply
+made a stale banner outlive the edit that answered it. A refresh arriving under a
+**dirty** draft keeps the draft and says so in place, with Cancel then reloading
+the new version; a clean one is reseeded silently. Staleness is measured on the
+**editable projection**, never on object identity or `resourceVersion`:
+`useResourceObject` hands over a new object on every refresh and a status
+heartbeat moves `resourceVersion` without touching a byte of what the tab edits,
+so any other criterion cried "changed on the server" on every Refresh click.
+Both views are separate `v-if`-split `CodeMirrorEditor` instances rather than
+one reconfigured view — see the CodeMirror gotcha below. The draft lives in
+memory only, and nothing warns about losing it on navigation (there is no
+`beforeunload` or route guard anywhere in the app); the hook if that changes is
+`dirty`, lifted out of the tab.
+
 Header buttons come from a second registry, the pure `utils/resourceActions.ts`
 (`actionsFor` keyed `<apiVersion>/<Kind>`, same convention as
 `CHILDREN_BY_OWNER`; Suspend/Resume and Cordon/Uncordon resolve from the
@@ -941,7 +973,7 @@ object's current spec); `ResourceActions.vue` renders them and
 `ResourceActionDialog.vue` runs the selected one
 (confirm, `busy`, native 403 shown in place). Trigger-now builds the Job
 manifest exactly like `kubectl create job --from=cronjob/x`. No RBAC gating: a
-denial is the native Kubernetes 403, as with Edit YAML/Delete.
+denial is the native Kubernetes 403, as with the YAML tab's Apply/Delete.
 
 The Pod Env tab (`PodEnvTab.vue` + pure `utils/podEnv.ts`) flattens every
 container env var — inline, `valueFrom` (ConfigMap/Secret/field/resource) and
@@ -1649,9 +1681,21 @@ only ever ages pods *out*, so no answer must not mean "hide".
   `exec`/`attach`/`portforward`/`proxy` unreachable — known limitation,
   documented in README.
 - CodeMirror (`CodeMirrorEditor.vue`, ~110 kB gz) is imported via
-  `defineAsyncComponent` in YamlTab/EditYamlDialog/CreateResourceDialog so it
-  loads only when the YAML tab or an edit/create dialog opens — never on the
+  `defineAsyncComponent` in YamlTab/CreateResourceDialog so it
+  loads only when the YAML tab or the create dialog opens — never on the
   default Overview detail view. Keep it lazy (no static import) and keep the
   hand-picked extension set instead of `basicSetup` (which pulls autocomplete/
   lint/search we don't use). Code folding IS kept — cheap (rides on the
   already-bundled `@codemirror/language`) and useful on large manifests.
+- `CodeMirrorEditor` bakes `EditorState.readOnly` in at construction (only the
+  theme is in a Compartment), so `readonly` is **not** reactive: `YamlTab`
+  renders two `v-if`-split instances instead of reconfiguring one. A second
+  Compartment would not be enough — the two modes are two different documents,
+  and swapping the document goes through the model watch as a full text
+  replacement, i.e. into the undo history, leaving Ctrl+Z one keystroke from
+  turning the draft into the full object right before an Apply. Fixing *that*
+  means `Transaction.addToHistory.of(false)`, then getting it right in Cancel
+  and in the post-refresh reseed too — three subtle behaviours in a component
+  shared with `CreateResourceDialog`, to save one `EditorState.create` on a
+  rare toggle. The draft survives the switch either way: it lives in the tab's
+  ref, not in the view (only undo history, caret and scroll are lost).
