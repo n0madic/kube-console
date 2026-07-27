@@ -108,8 +108,21 @@ export function useContexts() {
     () => query.data.value,
     (data) => {
       if (data === undefined) return
+      // Nothing selected yet: adopt the backend's default. In token mode a
+      // login resolves the name (VerifyResponse.Context) and this never fires —
+      // the query is gated on a session for the active context, so an empty one
+      // gates it off. Under --use-kubeconfig-credentials there is no login at
+      // all, so the active context stayed "" for the whole run: every request
+      // was in fact served by this very default (an empty X-Kube-Context
+      // resolves to it), while the switcher sat on its "Select cluster"
+      // placeholder and the page title had no cluster to name — the UI could
+      // not say which cluster the data on screen came from.
+      if (auth.activeContext === "") {
+        if (data.default !== "") auth.setActiveContext(data.default)
+        return
+      }
       const names = data.contexts.map((c) => c.name)
-      if (auth.activeContext !== "" && !names.includes(auth.activeContext)) {
+      if (!names.includes(auth.activeContext)) {
         recoverFromUnknownContext(router, auth.activeContext, data.default)
       }
     },

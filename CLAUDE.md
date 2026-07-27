@@ -452,7 +452,16 @@ left over from a previous run in token mode would otherwise attach a stale
 bearer to every request that nothing in this mode can clear (Sign out is hidden,
 the 401 handler and `logout` are no-ops). No credential reaches sessionStorage;
 a cluster switch still persists the selected context *name* through the shared
-`setActiveContext`, which is a name, not a token. `identity` resolves from
+`setActiveContext`, which is a name, not a token. What *does* need saying is
+where the **first** name comes from: in token mode the login resolves it
+(`VerifyResponse.Context`), and this mode has no login, so the active context
+stayed `""` for the whole run — served correctly (an empty `X-Kube-Context`
+resolves to the default upstream) but unnamed, leaving the switcher on its
+"Select cluster" placeholder and the title with no cluster to name. Hence
+`useContexts`' reconcile watch **adopts `data.default` when the active context
+is empty**, in the same place that reconciles it against the list: in token mode
+that branch is unreachable, since the query is gated on a session for the active
+context and an empty one gates it off. `identity` resolves from
 `localIdentity`, filled by
 `useLocalIdentity` (a `["identity", ctx]` query called in `App.vue`, so `TopBar`
 keeps reading `auth.identity` and needs no vue-query of its own); `TopBar` hides

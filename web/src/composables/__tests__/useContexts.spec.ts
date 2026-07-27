@@ -67,6 +67,19 @@ describe("useContexts", () => {
     expect(contexts.value.map((c) => c.name)).toEqual(["alpha", "beta"])
   })
 
+  // Regression: with --use-kubeconfig-credentials nothing ever logs in, so no
+  // login response resolved a context name and the active one stayed "". Every
+  // request was served by the backend's default all along, but the switcher
+  // showed its "Select cluster" placeholder and the title named no cluster.
+  it("adopts the default when nothing is selected yet", async () => {
+    const auth = useAuthStore()
+    auth.setLocalAuth(true)
+    mountContexts()
+    await resolveContexts({ contexts: [{ name: "alpha" }, { name: "beta" }], default: "beta" })
+    expect(auth.activeContext).toBe("beta")
+    expect(push).not.toHaveBeenCalled()
+  })
+
   it("keeps an active context that still exists", async () => {
     const auth = useAuthStore()
     auth.setSession("beta", "tok-b", null, false)
