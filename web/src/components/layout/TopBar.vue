@@ -56,15 +56,21 @@ async function logout(): Promise<void> {
          whatever width is left instead of being sized by a breakpoint. -->
     <div class="ml-auto flex min-w-0 items-center gap-2 sm:gap-3">
       <ThemeToggle class="shrink-0" />
-      <!-- Sized by the room that is actually left, not by a breakpoint: it is
-           the only shrinkable item in this group, so it takes the slack and
-           truncates into it (capped, so it cannot crowd out the selector).
-           The one fixed rule is the phone floor — under 30rem the pressure
-           would fall on the cluster name instead, and which cluster this is
-           outranks who is signed into it. -->
+      <!-- Sized by the room that is actually left, and deliberately **not** by
+           a `max-w`: it is the only shrinkable item in this group, so it takes
+           the slack and truncates into it exactly when there is none. A cap
+           bounds the natural width instead of the shrunk one, so a 16rem one
+           truncated `system:serviceaccount:<ns>:<name>` (280px) on a 1600px
+           screen with a third of the row empty — measured, and the whole of
+           what it was for is already covered: shrinkage is distributed by base
+           width, this group is the wider of the two shrinkable columns and so
+           gives up ~2x what the selector does, and ClusterName is `shrink-0`
+           under its own cap. The one fixed rule is the phone floor — under
+           30rem the pressure would fall on the cluster name instead, and which
+           cluster this is outranks who is signed into it. -->
       <span
         v-if="identityLabel !== ''"
-        class="min-w-0 max-w-[16rem] truncate text-sm text-slate-500 max-[30rem]:hidden dark:text-slate-400"
+        class="min-w-0 truncate text-sm text-slate-500 max-[30rem]:hidden dark:text-slate-400"
         :title="identityLabel"
       >
         {{ identityLabel }}

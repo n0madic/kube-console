@@ -147,6 +147,21 @@ describe("TopBar sidebar toggle", () => {
     expect(label.classes()).toContain("truncate")
   })
 
+  // It truncates only when the row has run out, which is flex shrink's job — a
+  // `max-w` bounds the natural width instead and cut that same service account
+  // short on a 1600px screen with a third of the row empty. jsdom lays nothing
+  // out, so this pins the decision rather than the geometry (which is measured
+  // in a browser; see CLAUDE.md).
+  it("gives the identity no width cap to truncate against", () => {
+    const auth = useAuthStore()
+    auth.setSession("alpha", TOKEN_A, { username: "system:serviceaccount:kube-system:admin" }, false)
+
+    const label = mountBar().get("[title^='system:serviceaccount']")
+
+    expect(label.classes().filter((c) => c.startsWith("max-w-"))).toEqual([])
+    expect(label.classes()).toContain("min-w-0")
+  })
+
   // The cluster label lives in the sidebar, which hides itself on a narrow
   // viewport: without this, nothing on screen would name the cluster being
   // acted on.

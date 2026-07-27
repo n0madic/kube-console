@@ -1298,18 +1298,31 @@ What is left is a **shrink order**, not a set of breakpoints — the mistake wor
 not repeating was sizing the identity with `md:`/`sm:` cutoffs, which blanked it
 while a third of the row stood empty (that is what the kubeconfig mode looks
 like: no Sign out). Controls (toggle, theme, Sign out) are `shrink-0`; the
-identity is `min-w-0 truncate` capped at `16rem` and takes whatever room is
-left, with the whole value in a `title`; the namespace select shrinks after it.
+identity is `min-w-0 truncate` and takes whatever room is left, with the whole
+value in a `title`; the namespace select shrinks after it.
 `ClusterName` inline is `shrink-0` under a `max-w-[8rem] sm:max-w-[12rem]` cap
 instead — a bounded label, not a shrinking one, because shrinkage is
 distributed by content width and a long identity was crushing a four-letter
-cluster to "t..". The identity's one absolute rule is the phone floor
+cluster to "t..". The identity carries **no `max-w` of its own**, and must not
+be given one back: a cap bounds the *natural* width, not the shrunk one, so the
+`16rem` it used to have truncated `system:serviceaccount:kube-system:admin`
+(280px) at **every** width — measured unchanged from 1600px down — with a third
+of the row empty, while removing it costs the selector ≤6px at the narrow end
+where the flex algorithm was doing the work anyway. What the cap was for is
+already covered twice over: this group is the wider of the two shrinkable
+columns and so gives up ~2x what the selector does, and `ClusterName` is
+`shrink-0`. A shrink factor is no substitute either — `shrink-[4]` on the
+identity measured **byte-identical** at all nine widths, because it is the only
+shrinkable item *inside* its group and the selector's width is decided one level
+up. The identity's one absolute rule is the phone floor
 (`max-[30rem]:hidden`, which Tailwind v4 compiles to
 `@media not all and (width>=30rem)`): below that the pressure would fall on the
 cluster name, and which cluster this is outranks who is signed into it.
-Verified by rendering the row at 500–760px against the built CSS
-(`header.scrollWidth === clientWidth` throughout, identity truncating from 206px
-down to 88px), not by reading the classes. That button is deliberately **not** a one-option
+Verified by rendering the real row (real `NamespaceSelector`/`ThemeToggle`, not
+stubs) at 500–1600px against the built CSS, sidebar open and hidden — `header.
+scrollWidth === clientWidth` throughout, identity full to 800px and truncating
+to 107px at 500px — never by reading the classes. jsdom lays nothing out, so
+`TopBar.spec` can only pin the decision (`truncate`, and no `max-w-*`). That button is deliberately **not** a one-option
 radiogroup — only the current mode is on screen, so `aria-label`/`title` state
 both what is set and what a click will do ("Theme: Light theme. Switch to Dark
 theme"). Rendered with `v-if`/`v-else`, not by hiding one variant with CSS: two
