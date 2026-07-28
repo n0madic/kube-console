@@ -498,7 +498,8 @@ describe("ResourceTable", () => {
   it("sizes visible columns by their own data when a middle column is hidden", () => {
     // Regression: estimateColumnWidths was fed the visible subset but indexed
     // row.cells by visible position, so columns after a hidden non-trailing one
-    // inherited the wrong column's width.
+    // inherited the wrong column's width. "Middle" is empty in every row, so it
+    // is auto-hidden — the only way a column is hidden now.
     const longVal = "x".repeat(120)
     const wrapper = mount(ResourceTable, {
       props: {
@@ -508,23 +509,70 @@ describe("ResourceTable", () => {
           { name: "After", type: "string" },
         ],
         rows: [
-          { cells: ["a", longVal, "s"], object: { metadata: { name: "a", uid: "u1" } } },
-          { cells: ["b", longVal, "s"], object: { metadata: { name: "b", uid: "u2" } } },
+          { cells: ["a", "", longVal], object: { metadata: { name: "a", uid: "u1" } } },
+          { cells: ["b", "", longVal], object: { metadata: { name: "b", uid: "u2" } } },
         ],
         globalFilter: "",
-        hiddenColumns: ["Middle"],
       },
       global: { stubs },
     })
+    expect(wrapper.findAll('[role="columnheader"]').map((h) => h.text())).not.toContain("Middle")
     const after = wrapper
       .findAll('[role="columnheader"]')
       .find((h) => h.text().includes("After"))
     expect(after).toBeDefined()
     const width = parseFloat(/width:\s*([\d.]+)px/.exec(after!.attributes("style") ?? "")?.[1] ?? "0")
-    // "After" holds only "s"; its width must stay small, not inherit the hidden
-    // long "Middle" column's (which would clamp near COLUMN_MAX_PX = 380).
-    expect(width).toBeGreaterThan(0)
-    expect(width).toBeLessThan(120)
+    // "After" holds the long value; it must be sized by its own data (clamping
+    // near COLUMN_MAX_PX = 380), not by the hidden empty column beside it.
+    expect(width).toBeGreaterThan(200)
+  })
+
+  // Regression: column ids embedded the column's position, and ResourceListPage
+  // adds/removes the synthetic Namespace column as the namespace selector
+  // changes — with `resetKey` (the resource type) unchanged, so nothing resets
+  // or re-arms anything. Every id shifted under the applied sort, TanStack found
+  // no such column, and the table silently fell back to server order; manual
+  // column widths, keyed the same way, went with it.
+  it("keeps the sort when the Namespace column comes and goes", async () => {
+    const scopedColumns: K8sTableColumn[] = [
+      { name: "Name", type: "string" },
+      { name: "Age", type: "string" },
+    ]
+    const allNsColumns: K8sTableColumn[] = [{ name: "Namespace", type: "string" }, ...scopedColumns]
+    const scopedRows: K8sTableRow[] = [
+      { cells: ["old", "44d"], object: { metadata: { name: "old", uid: "u1" } } },
+      { cells: ["fresh", "30s"], object: { metadata: { name: "fresh", uid: "u2" } } },
+    ]
+    const allNsRows: K8sTableRow[] = scopedRows.map((r, i) => ({
+      cells: [`ns-${i}`, ...r.cells],
+      object: r.object,
+    }))
+
+    const wrapper = mount(ResourceTable, {
+      props: {
+        columns: allNsColumns,
+        rows: allNsRows,
+        globalFilter: "",
+        defaultSort: { column: "Age" },
+        resetKey: "/v1/pods",
+      },
+      global: { stubs },
+    })
+    const all = renderedCells(wrapper).map((c) => c.text())
+    expect(all.indexOf("fresh")).toBeLessThan(all.indexOf("old"))
+
+    // Pick a namespace: same resource type, Namespace column dropped, through a
+    // reload that blanks the columns first (what useResourceList really does).
+    await wrapper.setProps({ columns: [], rows: [] })
+    await wrapper.setProps({ columns: scopedColumns, rows: [...scopedRows] })
+    const scoped = renderedCells(wrapper).map((c) => c.text())
+    expect(scoped.indexOf("fresh")).toBeLessThan(scoped.indexOf("old"))
+
+    // And back to all namespaces, which shifts every index the other way.
+    await wrapper.setProps({ columns: [], rows: [] })
+    await wrapper.setProps({ columns: allNsColumns, rows: [...allNsRows] })
+    const again = renderedCells(wrapper).map((c) => c.text())
+    expect(again.indexOf("fresh")).toBeLessThan(again.indexOf("old"))
   })
 
   it("shows Loading, not 'No resources found', while an empty list loads", () => {

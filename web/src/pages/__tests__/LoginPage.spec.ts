@@ -1,7 +1,7 @@
 import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils"
 import { createPinia, setActivePinia } from "pinia"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { ref } from "vue"
+import { computed, ref } from "vue"
 
 import type { ContextInfo } from "@/api/types"
 
@@ -13,10 +13,14 @@ vi.mock("vue-router", () => ({
 }))
 vi.mock("@/api/ui", () => ({ verifyToken: vi.fn() }))
 // The contexts query is gated on being authenticated, so on this page it only
-// ever replays what the cache already holds (empty by default here).
+// ever replays what the cache already holds (empty by default here). The page
+// takes the *bare* query — useContexts() would mount the reconcile watch that
+// belongs to the cluster switcher — so that is what is faked here.
 const cachedContexts = ref<ContextInfo[]>([])
 vi.mock("@/composables/useContexts", () => ({
-  useContexts: () => ({ contexts: cachedContexts }),
+  useContextsQuery: () => ({
+    data: computed(() => ({ contexts: cachedContexts.value, default: "" })),
+  }),
 }))
 
 import { ApiError } from "@/api/http"

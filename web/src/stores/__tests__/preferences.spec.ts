@@ -20,12 +20,12 @@ describe("preferences eventsOnlyWarnings", () => {
 // The serializer is the localStorage allowlist — the guarantee that no token or
 // fetched object can ever reach storage. It must fail loudly if the key set
 // grows, and the sanitizer must keep dropping anything not on it (including
-// `defaultNamespace`, a removed field still sitting in existing browsers).
+// `defaultNamespace` and `hiddenColumns`, removed fields still sitting in
+// existing browsers).
 describe("preferences localStorage allowlist", () => {
   const ALLOWED_KEYS = [
     "theme",
     "pinnedResources",
-    "hiddenColumns",
     "tablePageSize",
     "eventsOnlyWarnings",
     "sidebarCollapsed",
@@ -49,7 +49,6 @@ describe("preferences localStorage allowlist", () => {
     expect(prefs).toEqual({
       theme: "dark",
       pinnedResources: ["core/v1/pods"],
-      hiddenColumns: { "core/v1/pods": ["Node"] },
       tablePageSize: 100,
       eventsOnlyWarnings: true,
       sidebarCollapsed: true,
@@ -62,6 +61,7 @@ describe("preferences localStorage allowlist", () => {
     const raw = serializePreferences(sanitizePreferences(stored))
     expect(Object.keys(JSON.parse(raw)).sort()).toEqual([...ALLOWED_KEYS].sort())
     expect(raw).not.toContain("defaultNamespace")
+    expect(raw).not.toContain("hiddenColumns")
     expect(raw).not.toContain("sentinel-must-not-persist")
   })
 

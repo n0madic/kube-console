@@ -13,25 +13,21 @@ import {
 import { Compartment, EditorState } from "@codemirror/state"
 import { oneDark } from "@codemirror/theme-one-dark"
 import { drawSelection, EditorView, highlightActiveLine, keymap, lineNumbers } from "@codemirror/view"
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
+import { onBeforeUnmount, onMounted, ref, watch } from "vue"
 
-import { usePreferencesStore } from "@/stores/preferences"
+import { useDarkMode } from "@/composables/useDarkMode"
 
 const props = withDefaults(defineProps<{ readonly?: boolean }>(), { readonly: false })
 const model = defineModel<string>({ required: true })
 
-const prefs = usePreferencesStore()
 const host = ref<HTMLElement | null>(null)
 let view: EditorView | null = null
 const themeCompartment = new Compartment()
 
-// Same formula as App.vue: explicit theme wins, "system" follows the OS.
-const isDark = computed(() => {
-  const theme = prefs.prefs.theme
-  if (theme === "dark") return true
-  if (theme === "light") return false
-  return window.matchMedia("(prefers-color-scheme: dark)").matches
-})
+// The app-wide signal, listener included: this used to read matchMedia inside a
+// computed of its own, which never fires again — so an OS theme flip left a
+// light editor inside a dark page (the watch below had nothing to react to).
+const isDark = useDarkMode()
 
 const lightTheme = EditorView.theme(
   {

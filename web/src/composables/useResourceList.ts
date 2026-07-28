@@ -235,6 +235,11 @@ export function useResourceList(
   async function nextPage(): Promise<void> {
     if (continueToken.value === "") return
     paged.value = true
+    // Every path that stops the stream must say so. The toolbar's badge is the
+    // only thing on screen distinguishing a live table from a static one, and
+    // refresh() is the only way back: without this the rows sat there looking
+    // live while no ADDED/MODIFIED/DELETED event could ever reach them.
+    watchDegraded.value = true
     watcher.stop()
     await load(continueToken.value)
   }
@@ -273,6 +278,7 @@ export function useResourceList(
     const opts = getOptions()
     const gen = ++loadGen
     paged.value = true // no watch while showing a synthetic result set
+    watchDegraded.value = true // ... and the toolbar has to say so (see nextPage)
     watcher.stop()
     loading.value = true
     error.value = null

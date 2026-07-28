@@ -129,7 +129,11 @@ handles them. The fences are `config.validate` **startup errors**, not warnings:
   its own name — same-origin, so CORS never applies and coder/websocket's
   origin check (Origin vs Host) passes. This is `kubectl proxy`'s
   `--accept-hosts`, and without it the whole mode is one visited site away from
-  handing over the cluster;
+  handing over the cluster. `SecurityHeaders` is mounted **ahead** of it: the
+  fence answers from its own wrapper and never reaches the handler below, so
+  mounted the other way round the one response written specifically for a
+  rebound attacker page was the one with no CSP, no nosniff and no
+  `frame-ancestors`;
 - a startup `WARN` in `server.Run`, and the Helm chart never exposes the flag.
 
 Mechanically: `Upstream.UseConfigCredentials` + `Upstream.RoundTripper(token)`
@@ -525,7 +529,9 @@ it. `document.title` is `<cluster> · kube-console`, set by `usePageTitle` (in
 context, except that names identifying no cluster (`default`,
 `kubernetes-admin@kubernetes`, … — `GENERIC_CONTEXTS`) yield a bare title.
 `usePageTitle` takes `useContextsQuery` (the bare query split out of
-`useContexts`) so the reconcile watch still runs only in the switcher.
+`useContexts`) so the reconcile watch still runs only in the switcher — as do
+`ClusterName`, `AppVersion` and the login page, which likewise only read the
+cached names.
 
 The same name is on screen as well, in `layout/ClusterName.vue` between the
 sidebar's product name and the switcher — a tab title is precisely what is not
@@ -860,10 +866,23 @@ emit the same names (`Name|Age`, ordinary for CRDs) are indistinguishable, so
 navigating between them reset nothing. The width memo stays keyed on the column
 names: it is about measured content, not about identity.
 
+Because `resetKey` is the *only* thing that resets, **column ids are the column's
+own name** (`columnIds`, a duplicate header getting a `#n` suffix), never its
+position. Sorting state and `columnSizing` are keyed by id, and
+`ResourceListPage` adds and removes the synthetic Namespace column as the
+namespace selector changes — same resource type, so nothing resets or re-arms.
+Positional ids therefore shifted under an already-applied sort, TanStack found no
+such column and silently applied none (pods stopped coming up newest first the
+moment a namespace was picked, and again on the way back), taking every
+drag-resized width with them. The `nonEmptySeen` memo is keyed by id for the same
+reason: by index, a Namespace column arriving carried each column's
+"has values" verdict onto its neighbour. The index survives only inside
+`columnDefs`' memo key, because `accessorFn` closes over it to read `row.cells`.
+
 **Resetting the sort and applying the default sort are two different moments**,
-and collapsing them cost the feature entirely: `defaultSort` names a column while
-the sort id is `<index>-<name>`, so it can only be resolved once the columns are
-there — and at both points it was asked for (mount, `resetKey` change) they are
+and collapsing them cost the feature entirely: `defaultSort` names a column that
+this kind's printer may not emit at all, so it can only be resolved once the
+columns are there — and at both points it was asked for (mount, `resetKey` change) they are
 blank, precisely because `load()` clears them ahead of every walk. It resolved to
 `[]`, i.e. **no sort at all**: pods stopped coming up newest first and every other
 kind stopped coming up by name. So the reset clears `sorting` and re-arms a
@@ -1732,3 +1751,12 @@ only ever ages pods *out*, so no answer must not mean "hide".
   shared with `CreateResourceDialog`, to save one `EditorState.create` on a
   rare toggle. The draft survives the switch either way: it lives in the tab's
   ref, not in the view (only undo history, caret and scroll are lost).
+- "Is the UI dark?" is **one composable**, `useDarkMode` (explicit preference,
+  else the OS), read by `App.vue` (which toggles `.dark` on `<html>`) and by
+  `CodeMirrorEditor` (whose theme Compartment watches it). `MediaQueryList.
+  matches` is not a reactive source, so a second copy of the rule that reads it
+  inside a `computed` never fires again: App.vue kept a `change` listener, the
+  editor did not, and with the default theme `system` an OS flip repainted the
+  page around an editor still on the light palette until the tab was remounted.
+  The `MediaQueryList` is per caller (the listener dies with the calling scope),
+  not a module singleton, so a spec can stub `matchMedia` before mounting.

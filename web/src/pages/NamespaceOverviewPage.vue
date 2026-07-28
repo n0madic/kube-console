@@ -91,6 +91,10 @@ watch(
 const scopeLabel = computed(() => (ui.namespace === "" ? "All namespaces" : ui.namespace))
 const cpuData = computed(() => cpuBuffer.value.toUplotData(METRICS_RANGE_SECONDS[range.value]))
 const memData = computed(() => memBuffer.value.toUplotData(METRICS_RANGE_SECONDS[range.value]))
+// Memoized like the data above (see NodeMetricsTab): a fresh labels() array per
+// render re-runs MetricsChart's per-series stats for nothing.
+const cpuLabels = computed(() => cpuBuffer.value.labels())
+const memLabels = computed(() => memBuffer.value.labels())
 </script>
 
 <template>
@@ -134,13 +138,13 @@ const memData = computed(() => memBuffer.value.toUplotData(METRICS_RANGE_SECONDS
           <MetricsChart
             title="Aggregate CPU usage"
             unit="cpu"
-            :labels="cpuBuffer.labels()"
+            :labels="cpuLabels"
             :data="cpuData"
           />
           <MetricsChart
             title="Aggregate memory usage"
             unit="memory"
-            :labels="memBuffer.labels()"
+            :labels="memLabels"
             :data="memData"
           />
         </div>

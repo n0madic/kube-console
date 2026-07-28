@@ -288,6 +288,50 @@ describe("useResourceList.searchAllByName", () => {
   })
 })
 
+// Regression: both paths below stop the live watch, and only refresh() ever
+// restarts it — but neither marked the list degraded, so the toolbar's badge
+// (the one thing on screen that distinguishes a live table from a static one)
+// stayed hidden while no watch event could arrive.
+describe("useResourceList watch degradation", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockedWalk.mockReset()
+  })
+
+  it("marks the watch degraded after paging forward, and live again after refresh", async () => {
+    mockedWalk.mockImplementation(walkOf(["a", "b"], "more"))
+    const list = setupList()
+    await list.refresh()
+    // A capped collection is already degraded — page forward from a complete one.
+    mockedWalk.mockImplementation(walkOf(["a", "b"], ""))
+    await list.refresh()
+    expect(list.watchDegraded.value).toBe(false)
+
+    // Only a continue token makes nextPage() do anything, so hand one back.
+    mockedWalk.mockImplementation(walkOf(["a", "b"], "more"))
+    await list.refresh()
+    expect(list.hasNextPage.value).toBe(true)
+    await list.nextPage()
+    expect(list.paged.value).toBe(true)
+    expect(list.watchDegraded.value).toBe(true)
+
+    mockedWalk.mockImplementation(walkOf(["a", "b"], ""))
+    await list.refresh()
+    expect(list.watchDegraded.value).toBe(false)
+    list.stopWatch()
+  })
+
+  it("marks the watch degraded during a server-wide name scan", async () => {
+    mockedWalk.mockImplementation(walkOf(["x-api", "x-db"], "more"))
+    const list = setupList()
+    await list.refresh()
+
+    await list.searchAllByName("api")
+    expect(list.searchQuery.value).toBe("api")
+    expect(list.watchDegraded.value).toBe(true)
+  })
+})
+
 describe("useResourceList watch upserts", () => {
   beforeEach(() => {
     // Sessions (and with them the active context) live in sessionStorage, which

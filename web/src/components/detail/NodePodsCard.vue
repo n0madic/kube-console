@@ -37,7 +37,13 @@ async function load(): Promise<void> {
   rows.value = []
   errorText.value = null
   truncated.value = false
-  if (nodeName === undefined || nodeName === "") return
+  if (nodeName === undefined || nodeName === "") {
+    // This call already bumped loadId, so an in-flight load's `finally` will be
+    // skipped by the id guard: clearing the flag is now this call's job, or the
+    // card sits on "Loading..." with nothing left to end it.
+    loading.value = false
+    return
+  }
   loading.value = true
   try {
     // maxPages 3 × 500 covers even high --max-pods nodes (EKS up to ~737).

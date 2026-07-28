@@ -260,5 +260,12 @@ export function useClusterSummary() {
     },
   )
 
+  // `start` is the app-facing entry point, and the only one ClusterSummaryCards
+  // uses. `refresh`/`stop` are the loop's own moving parts, exposed for the spec
+  // — which has to drive an in-flight refresh past a stop() and two overlapping
+  // refreshes past the seq guard, neither reachable through the loop, whose
+  // in-flight guard exists precisely to prevent them. A component must NOT call
+  // refresh() directly: it stamps no cadence, so it polls beside the still-armed
+  // timer (see the context watch above, which restarts instead).
   return { data, available, refresh, start, stop: loop.stop }
 }

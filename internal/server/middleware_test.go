@@ -741,6 +741,48 @@ func TestLoopbackHostGuardFollowsTheRegistry(t *testing.T) {
 	}
 }
 
+// Regression: RequireLoopbackHost was mounted *ahead* of SecurityHeaders, and
+// it answers from its own wrapper without ever reaching the handler below — so
+// the one response written specifically for a rebound attacker page was the one
+// response with no CSP, no nosniff and no frame-ancestors on it.
+func TestRebindingRejectionCarriesSecurityHeaders(t *testing.T) {
+	h := NewHandler(Deps{
+		Cfg: &config.Config{MaxBodyBytes: 4 << 20, MaxExecSessions: 1},
+		Registry: kube.NewRegistryFromUpstreams("default", map[string]*kube.Upstream{
+			"default": {
+				BaseURL:              mustParseURL(t, "https://apiserver.example"),
+				Transport:            http.DefaultTransport,
+				UseConfigCredentials: true,
+			},
+		}),
+		Logger:  slog.New(slog.DiscardHandler),
+		Version: "test",
+		DistFS:  testDist,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Host = "evil.example"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-loopback Host = %d, want 403", rec.Code)
+	}
+	want := map[string]string{
+		"X-Content-Type-Options": "nosniff",
+		"X-Frame-Options":        "DENY",
+		"Referrer-Policy":        "no-referrer",
+	}
+	for name, value := range want {
+		if got := rec.Header().Get(name); got != value {
+			t.Errorf("%s on the 403 = %q, want %q", name, got, value)
+		}
+	}
+	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors 'none'") {
+		t.Errorf("CSP on the 403 = %q, want frame-ancestors 'none'", csp)
+	}
+}
+
 func mustParseURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	u, err := url.Parse(raw)

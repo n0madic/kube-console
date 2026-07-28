@@ -6,14 +6,19 @@ import { ApiError } from "@/api/http"
 import { verifyToken } from "@/api/ui"
 import BaseButton from "@/components/ui/BaseButton.vue"
 import ContextListbox from "@/components/ui/ContextListbox.vue"
-import { useContexts } from "@/composables/useContexts"
+import { useContextsQuery } from "@/composables/useContexts"
 import { useAuthStore } from "@/stores/auth"
 import { contextItems } from "@/utils/contextItems"
 
 const auth = useAuthStore()
 const router = useRouter()
 const route = useRoute()
-const { contexts } = useContexts()
+// The bare query: this page only reads the cached names. The reconcile watch in
+// useContexts() ends sessions, reassigns the active context and routes — it
+// belongs to the switcher alone, and mounting it here would run that recovery
+// twice for one list change.
+const contextsQuery = useContextsQuery()
+const contexts = computed(() => contextsQuery.data.value?.contexts ?? [])
 
 const token = ref("")
 const error = ref<string | null>(null)

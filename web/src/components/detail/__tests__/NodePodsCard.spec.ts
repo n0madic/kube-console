@@ -97,6 +97,32 @@ describe("NodePodsCard", () => {
     expect(mockedTable).toHaveBeenCalledTimes(2)
   })
 
+  // Regression: the nameless-object branch returned after bumping loadId, so
+  // the in-flight load's `finally` was skipped by the id guard and nothing was
+  // left to clear `loading` — the card stayed on "Loading..." for good, with
+  // hasContent keeping the empty section on screen.
+  it("does not strand 'Loading...' when a nameless object supersedes a load", async () => {
+    let settle: (() => void) | undefined
+    mockedTable.mockReturnValue(
+      new Promise((resolve) => {
+        settle = () => resolve({ table: podTable, truncated: false })
+      }),
+    )
+    const wrapper = mountFor(node)
+    await flushPromises()
+    expect(wrapper.text()).toContain("Loading...")
+
+    // A refresh that hands over an object without a name (a stub, a partially
+    // decoded response) while the first scan is still in flight.
+    await wrapper.setProps({ object: { apiVersion: "v1", kind: "Node", metadata: {} } })
+    await flushPromises()
+    settle?.()
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain("Loading...")
+    expect(wrapper.find("section").exists()).toBe(false)
+  })
+
   it("renders nothing when the node has no pods", async () => {
     mockedTable.mockResolvedValue({
       table: { kind: "Table", columnDefinitions: [], rows: [] },

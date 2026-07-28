@@ -10,7 +10,6 @@ import { ref, watch, type WatchSource } from "vue"
 export interface Reveal<T> {
   isRevealed: (item: T) => boolean
   toggle: (item: T) => void
-  reset: () => void
 }
 
 export function useReveal<T>(keyOf: (item: T) => string, resetOn?: WatchSource): Reveal<T> {
@@ -32,7 +31,10 @@ export function useReveal<T>(keyOf: (item: T) => string, resetOn?: WatchSource):
     revealed.value = new Set()
   }
 
+  // Clearing is the `resetOn` watch's job alone — both consumers pass a source
+  // (the detail object's uid) and neither ever cleared by hand, so an exported
+  // reset() was one more way to do a thing that already happens by itself.
   if (resetOn !== undefined) watch(resetOn, reset)
 
-  return { isRevealed, toggle, reset }
+  return { isRevealed, toggle }
 }

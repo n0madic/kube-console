@@ -25,7 +25,6 @@ const props = defineProps<{
   columns: K8sTableColumn[]
   rows: K8sTableRow[]
   globalFilter: string
-  hiddenColumns?: string[]
   /**
    * Sort applied when the column set (resource type) changes. Ascending only:
    * every caller's default is ascending (the age columns hold relative ages, so
@@ -64,6 +63,30 @@ const columnNamesKey = computed(() => props.columns.map((c) => c.name).join("|")
 // What "a different thing is being listed" means — see the resetKey prop.
 const columnSetKey = computed(() => props.resetKey ?? columnNamesKey.value)
 
+/**
+ * Column ids: the column's own name, never its position. ResourceListPage
+ * inserts and removes the synthetic Namespace column as the namespace selector
+ * changes, which shifts every index while `resetKey` — the resource type, and
+ * the only thing that resets anything here — stays the same. With positional
+ * ids the stored sort and every drag-resized width then named columns that no
+ * longer existed and were silently discarded: TanStack applies no sort at all
+ * for an unknown id, and nothing re-arms an already-applied default, so pods
+ * stopped coming up newest first the moment a namespace was picked (and again
+ * on the way back to all-namespaces).
+ *
+ * A printer emitting the same header twice gets a suffixed id, so ids stay
+ * unique whatever the server sends.
+ */
+const columnIds = computed(() => {
+  const used = new Set<string>()
+  return props.columns.map((col) => {
+    let id = col.name
+    for (let n = 2; used.has(id); n++) id = `${col.name}#${n}`
+    used.add(id)
+    return id
+  })
+})
+
 // Columns that carry no information ("<none>"/empty in every row, e.g.
 // Nominated Node / Readiness Gates on pods) are hidden automatically.
 //
@@ -73,20 +96,27 @@ const columnSetKey = computed(() => props.resetKey ?? columnNamesKey.value)
 // has shown a value it stays visible (no layout jumps), and only
 // still-hidden columns are rescanned. The memo is reset when the column set
 // (resource type) changes.
-let nonEmptySeen = new Set<number>()
+//
+// Keyed by column id rather than by index, for the same reason the ids
+// themselves are: the Namespace column shifts every position without changing
+// the resource type, which used to carry each column's verdict over onto its
+// neighbour.
+let nonEmptySeen = new Set<string>()
 watch(columnSetKey, () => {
   nonEmptySeen = new Set()
 })
 const emptyColumnNames = computed(() => {
   if (props.rows.length === 0) return new Set<string>()
+  const ids = columnIds.value
   const empty = new Set<string>()
   props.columns.forEach((col, index) => {
-    if (col.name === "Name" || nonEmptySeen.has(index)) return
+    const id = ids[index] as string
+    if (col.name === "Name" || nonEmptySeen.has(id)) return
     const hasValue = props.rows.some((row) => {
       const text = cellText(row.cells[index]).trim()
       return text !== "" && text !== "<none>"
     })
-    if (hasValue) nonEmptySeen.add(index) // benign memo write, monotonic
+    if (hasValue) nonEmptySeen.add(id) // benign memo write, monotonic
     else empty.add(col.name)
   })
   return empty
@@ -95,10 +125,7 @@ const emptyColumnNames = computed(() => {
 const visibleColumns = computed(() =>
   props.columns
     .map((col, index) => ({ col, index }))
-    .filter(
-      ({ col }) =>
-        !(props.hiddenColumns ?? []).includes(col.name) && !emptyColumnNames.value.has(col.name),
-    ),
+    .filter(({ col }) => !emptyColumnNames.value.has(col.name)),
 )
 
 // Default widths follow the longest value per column and the full header
@@ -126,9 +153,10 @@ const defaultWidths = computed(() => {
     cachedWidths = estimateColumnWidths(props.columns, props.rows)
   }
   const widths = cachedWidths
+  const ids = columnIds.value
   const byId = new Map<string, number>()
-  visibleColumns.value.forEach(({ col, index }) => {
-    byId.set(`${index}-${col.name}`, widths[index] as number)
+  visibleColumns.value.forEach(({ index }) => {
+    byId.set(ids[index] as string, widths[index] as number)
   })
   return byId
 })
@@ -146,25 +174,29 @@ let cachedDefs: ColumnDef<K8sTableRow, string>[] = []
 let cachedDefsKey = ""
 const columnDefs = computed<ColumnDef<K8sTableRow, string>[]>(() => {
   const widths = defaultWidths.value
+  const ids = columnIds.value
+  // The index is part of the key even though it is no longer part of the id:
+  // accessorFn closes over it to read row.cells, so a def built for a shifted
+  // column must not be reused.
   const key = JSON.stringify(
     visibleColumns.value.map(({ col, index }) => [
       index,
-      col.name,
-      widths.get(`${index}-${col.name}`),
+      ids[index],
+      widths.get(ids[index] as string),
       col.description ?? "",
     ]),
   )
   if (key === cachedDefsKey) return cachedDefs
   cachedDefsKey = key
   cachedDefs = visibleColumns.value.map(({ col, index }) => ({
-    id: `${index}-${col.name}`,
+    id: ids[index] as string,
     header: col.name,
     accessorFn: (row: K8sTableRow) => cellText(row.cells[index]),
     cell: (info) => info.getValue(),
     // Ages ("5m", "44d") and numbers must sort numerically, not as strings.
     sortingFn: (rowA, rowB, columnId) =>
       compareTableValues(rowA.getValue<string>(columnId), rowB.getValue<string>(columnId)),
-    size: widths.get(`${index}-${col.name}`) ?? 150,
+    size: widths.get(ids[index] as string) ?? 150,
     minSize: 50,
     maxSize: 900,
     meta: { description: col.description ?? "" },
@@ -177,16 +209,16 @@ function defaultSorting(): SortingState {
   if (wanted === undefined) return []
   const match = props.columns.findIndex((c) => c.name === wanted.column)
   if (match < 0) return []
-  return [{ id: `${match}-${wanted.column}`, desc: false }]
+  return [{ id: columnIds.value[match] as string, desc: false }]
 }
 
 const sorting = ref<SortingState>([])
 const columnSizing = ref<ColumnSizingState>({})
 
 /**
- * The default sort names a column but the sort id is `<index>-<name>`, so it can
- * only be applied once the columns have actually arrived — and at both moments
- * it is asked for, they usually have not: useResourceList blanks `columns`
+ * The default sort names a column that may not be in this kind's column set at
+ * all, so it can only be applied once the columns have actually arrived — and at
+ * both moments it is asked for, they usually have not: useResourceList blanks `columns`
  * before every walk, so the first mount and every resource-type switch resolve
  * it against an empty list, where it silently means "no sort at all". So it
  * stays *pending* until the named column shows up, at most once per column set,

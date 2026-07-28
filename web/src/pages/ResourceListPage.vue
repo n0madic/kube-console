@@ -95,11 +95,6 @@ const displayRows = computed(() =>
   showNamespaceColumn.value ? withNamespaceCells(list.rows.value) : list.rows.value,
 )
 
-const hiddenColumns = computed(() => {
-  const key = discoveryEntry.value?.id ?? ""
-  return prefsStore.prefs.hiddenColumns[key] ?? []
-})
-
 // Default sort: events newest first ("Last Seen" holds relative ages, so
 // ascending age = newest on top); pods newest first the same way (ascending
 // "Age"); everything else by Name — this also keeps rows inserted by watch
@@ -209,7 +204,6 @@ const eventObjectLink = computed(() => {
       :columns="displayColumns"
       :rows="displayRows"
       :global-filter="filter"
-      :hidden-columns="hiddenColumns"
       :default-sort="defaultSort"
       :reset-key="`${props.group}/${props.version}/${props.resource}`"
       :loading="list.loading.value"

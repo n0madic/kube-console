@@ -72,6 +72,12 @@ watch(
 
 const cpuData = computed(() => cpuBuffer.value.toUplotData(METRICS_RANGE_SECONDS[range.value]))
 const memData = computed(() => memBuffer.value.toUplotData(METRICS_RANGE_SECONDS[range.value]))
+// Memoized like the data above (PodMetricsTab does the same): labels() builds a
+// fresh array per call, and MetricsChart's `stats` depends on that identity — so
+// called inline in the template it re-walked every series on every unrelated
+// re-render (a Range change, a theme toggle).
+const cpuLabels = computed(() => cpuBuffer.value.labels())
+const memLabels = computed(() => memBuffer.value.labels())
 </script>
 
 <template>
@@ -89,8 +95,8 @@ const memData = computed(() => memBuffer.value.toUplotData(METRICS_RANGE_SECONDS
           {{ polling.error.value }}
         </span>
       </div>
-      <MetricsChart title="CPU usage" unit="cpu" :labels="cpuBuffer.labels()" :data="cpuData" />
-      <MetricsChart title="Memory usage" unit="memory" :labels="memBuffer.labels()" :data="memData" />
+      <MetricsChart title="CPU usage" unit="cpu" :labels="cpuLabels" :data="cpuData" />
+      <MetricsChart title="Memory usage" unit="memory" :labels="memLabels" :data="memData" />
     </template>
   </div>
 </template>

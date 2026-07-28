@@ -11,6 +11,11 @@ import { useDiscovery } from "@/composables/useDiscovery"
 import { resourceDetailRoute } from "@/router"
 import type { FieldNode, GroupNode, ItemsNode, ObjectRef, TableCell } from "@/utils/fieldTree"
 import { LONG_VALUE_CHARS } from "@/utils/fieldTree"
+// The neutral end of the status palette, shared with ResourceTable and
+// ResourceMiniTable: all three complete the same nullable statusTextClass
+// answer, and three copies of the literal is how a repaint leaves one view on
+// the old color.
+import { NEUTRAL_TEXT_CLASS } from "@/utils/statusColors"
 
 const props = withDefaults(
   defineProps<{
@@ -139,7 +144,7 @@ function cellKey(nodeKey: string, row: TableCell[], ci: number): string {
             <span
               v-else
               class="break-all font-mono text-xs"
-              :class="node.statusClass ?? 'text-slate-700 dark:text-slate-300'"
+              :class="node.statusClass ?? NEUTRAL_TEXT_CLASS"
             >{{ node.text }}</span>
             <span v-if="node.suffix !== ''" class="ml-1.5 text-xs text-slate-400">{{ node.suffix }}</span>
           </template>
@@ -150,7 +155,8 @@ function cellKey(nodeKey: string, row: TableCell[], ci: number): string {
             >{{ node.text }}</pre>
             <span
               v-else
-              class="break-all font-mono text-xs text-slate-700 dark:text-slate-300"
+              class="break-all font-mono text-xs"
+              :class="NEUTRAL_TEXT_CLASS"
             >{{ node.text.slice(0, LONG_VALUE_CHARS) }}…</span>
             <button
               type="button"
@@ -210,7 +216,7 @@ function cellKey(nodeKey: string, row: TableCell[], ci: number): string {
                   v-for="(cell, ci) in row"
                   :key="ci"
                   class="break-all py-1 pr-3 font-mono"
-                  :class="cell.statusClass ?? 'text-slate-700 dark:text-slate-300'"
+                  :class="cell.statusClass ?? NEUTRAL_TEXT_CLASS"
                 >
                   <template v-if="!cell.long">{{ cell.text }}</template>
                   <template v-else>

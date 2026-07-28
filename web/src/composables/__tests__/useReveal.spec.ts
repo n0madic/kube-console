@@ -36,24 +36,20 @@ describe("useReveal", () => {
     expect(reveal.isRevealed("b")).toBe(false)
   })
 
-  it("reset() clears everything", () => {
-    const reveal = useInHost<string>((k) => k)
-    reveal.toggle("a")
-    reveal.toggle("b")
-    reveal.reset()
-    expect(reveal.isRevealed("a")).toBe(false)
-    expect(reveal.isRevealed("b")).toBe(false)
-  })
-
-  it("auto-resets when the resetOn source changes", async () => {
+  // The only way to clear: there is no exported reset(), because every consumer
+  // passes a resetOn source and none ever cleared by hand.
+  it("auto-resets every revealed item when the resetOn source changes", async () => {
     const uid = ref("obj-1")
     const reveal = useInHost<string>((k) => k, uid)
     reveal.toggle("a")
+    reveal.toggle("b")
     expect(reveal.isRevealed("a")).toBe(true)
+    expect(reveal.isRevealed("b")).toBe(true)
 
     uid.value = "obj-2" // e.g. navigating to a different object
     await Promise.resolve()
     expect(reveal.isRevealed("a")).toBe(false)
+    expect(reveal.isRevealed("b")).toBe(false)
   })
 
   it("keys by keyOf, so distinct items with the same key share state", () => {

@@ -47,6 +47,12 @@ func NewHandler(d Deps) http.Handler {
 	// same statusWriter before the deferred log records the status.
 	r.Use(RequestLogger(d.Logger))
 	r.Use(Recoverer(d.Logger))
+	// Ahead of RequireLoopbackHost, so that the one response this server writes
+	// specifically *for* an attacker's page carries them too: the fence answers
+	// from its own wrapper and never reaches the handler below it, so mounted
+	// second it served its 403 with no CSP, no nosniff and no frame-ancestors —
+	// on the endpoint whose entire purpose is DNS-rebinding defence.
+	r.Use(SecurityHeaders)
 	// The credential carve-out's second fence, and the one the listen address
 	// cannot provide: without it, DNS rebinding turns any page the developer
 	// visits into a full-privilege client of this port. See RequireLoopbackHost.
@@ -65,7 +71,6 @@ func NewHandler(d Deps) http.Handler {
 	if d.Registry.UsesConfigCredentials() {
 		r.Use(RequireLoopbackHost)
 	}
-	r.Use(SecurityHeaders)
 	// A client that stops reading must not be able to hold a handler, its
 	// in-flight slot and its upstream connection open forever. Per-write, not
 	// per-response: an idle watch performs no write and is never affected.
