@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { isStatusColumn, statusSeverity, statusTextClass } from "@/utils/statusColors"
+import { cellTextClass, isStatusColumn, statusColumnKind, statusSeverity, statusTextClass } from "@/utils/statusColors"
 
 // statusSeverity is the classification itself; statusTextClass is one mapping of
 // it. Callers needing another presentation (eventHelpers tints whole rows) read
@@ -160,6 +160,37 @@ describe("statusTextClass", () => {
   it("leaves neutral values unstyled", () => {
     for (const value of ["Running", "Active", "Completed", "1/1", "5d", "api-server-1", "", "True", "False"]) {
       expect(statusTextClass(value), value).toBeNull()
+    }
+  })
+})
+
+// A CronJob's SUSPEND cell is a boolean whose "True" is the notable state, the
+// opposite polarity of every status column — hence a kind of its own rather
+// than "true" added to the warning statuses, which would also light up a field
+// tree's healthy `ready: true`.
+describe("warn-when-true columns", () => {
+  it("classifies suspend columns as their own kind", () => {
+    for (const name of ["Suspend", "SUSPEND", "suspend", "suspended"]) {
+      expect(statusColumnKind(name), name).toBe("warn-when-true")
+    }
+    expect(statusColumnKind("Status")).toBe("status")
+    expect(statusColumnKind("Name")).toBeNull()
+    // Not every column merely containing the word: only the boolean itself.
+    expect(statusColumnKind("Suspend Reason")).toBe("status")
+  })
+
+  it("marks True amber and leaves False neutral", () => {
+    for (const value of ["True", "true", "TRUE"]) {
+      expect(cellTextClass("warn-when-true", value), value).toBe("text-amber-600 dark:text-amber-400")
+    }
+    for (const value of ["False", "false", "", "unknown"]) {
+      expect(cellTextClass("warn-when-true", value), value).toBeNull()
+    }
+  })
+
+  it("reads status columns exactly as statusTextClass does", () => {
+    for (const value of ["Failed", "Pending", "Running", "True", "False", ""]) {
+      expect(cellTextClass("status", value), value).toBe(statusTextClass(value))
     }
   })
 })

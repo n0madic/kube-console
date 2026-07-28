@@ -33,6 +33,29 @@ export function isStatusColumn(columnName: string): boolean {
   return STATUS_COLUMN_RE.test(columnName)
 }
 
+// Columns holding a boolean whose "True" is the notable state: a CronJob's
+// SUSPEND column ("True" = the schedule fires no jobs), and the `suspend` field
+// of a CronJob/Job spec in the field tree. "False" is the ordinary state and
+// stays neutral. This is a *kind* of its own rather than "true" added to
+// WARNING_STATUSES because every other status column has the opposite polarity
+// — a field tree's `ready: true` is healthy, not a warning — and the value
+// alone cannot tell the two apart.
+const WARN_WHEN_TRUE_COLUMN_RE = /^\s*suspend(ed)?\s*$/i
+
+/** How a column's cells are read: as status words, or as an inverted boolean. */
+export type StatusColumnKind = "status" | "warn-when-true"
+
+/**
+ * The rule a column's cells are classified by, or null when its values are not
+ * statuses at all. Resolved from the column name alone, so callers on a hot path
+ * (ResourceTable, once per column set) can keep the answer instead of asking per
+ * cell.
+ */
+export function statusColumnKind(columnName: string): StatusColumnKind | null {
+  if (WARN_WHEN_TRUE_COLUMN_RE.test(columnName)) return "warn-when-true"
+  return isStatusColumn(columnName) ? "status" : null
+}
+
 /** How alarming a status value reads. */
 export type StatusSeverity = "error" | "warning"
 
@@ -86,5 +109,21 @@ export const NEUTRAL_TEXT_CLASS = "text-slate-700 dark:text-slate-300"
  */
 export function statusTextClass(value: string): string | null {
   const severity = statusSeverity(value)
+  return severity === null ? null : SEVERITY_TEXT_CLASS[severity]
+}
+
+/** "True" (however cased) is the notable state; anything else is neutral. */
+function warnWhenTrueSeverity(value: string): StatusSeverity | null {
+  return value.trim().toLowerCase() === "true" ? "warning" : null
+}
+
+/**
+ * The text color class for a cell of a column already classified by
+ * `statusColumnKind`, or null for neutral values. Split from `statusTextClass`
+ * because the polarity of a boolean column is a property of the column, not of
+ * the value.
+ */
+export function cellTextClass(kind: StatusColumnKind, value: string): string | null {
+  const severity = kind === "warn-when-true" ? warnWhenTrueSeverity(value) : statusSeverity(value)
   return severity === null ? null : SEVERITY_TEXT_CLASS[severity]
 }

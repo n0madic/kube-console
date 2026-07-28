@@ -842,8 +842,9 @@ itself. Without the memo every scroll frame allocated an array per rendered row
 and a wrapper per cell for a route that is `null` on every list but events —
 and, per cell, re-derived the status class: a regex test, plus on status columns
 a `split(",")` and a handful of substring scans per part, ~240 times a frame.
-Whether a column carries statuses depends on the column alone, so `isStatusColumn`
-is resolved into a `statusColumnIds` set per column set, never per cell. The
+Whether a column carries statuses — and by which rule its cells are read — depends
+on the column alone, so `statusColumnKind` is resolved into a `statusColumnKinds`
+map per column set, never per cell (`cellTextClass(kind, value)` per cell). The
 neutral fallback is baked **into** that one class string, per the Tailwind order
 rule below — a static color utility beside a conditional one lets stylesheet
 order pick the winner — and it is `NEUTRAL_TEXT_CLASS` from `statusColors.ts`,
@@ -1729,6 +1730,17 @@ only ever ages pods *out*, so no answer must not mean "hide".
   `SEVERITY_TEXT_CLASS.warning`, and two copies of it meant a repaint left two
   columns of the same table in different colors. The neutral end of the same
   mapping is `NEUTRAL_TEXT_CLASS`, exported beside it.
+  Which rule a column is read by is `statusColumnKind` (`"status" |
+  "warn-when-true" | null`), and the cell color is `cellTextClass(kind, value)` —
+  the three renderers (`ResourceTable`, `ResourceMiniTable`, `fieldTree`) all go
+  through that pair. The second kind is the CronJob **SUSPEND** column (and the
+  `suspend` field of a CronJob/Job spec in the field tree): a boolean of the
+  *opposite* polarity, where `True` means the schedule fires nothing and is
+  colored amber while `False` stays neutral. It has to be a kind rather than
+  `"true"` added to `WARNING_STATUSES`, because the value alone cannot tell the
+  polarities apart — a field tree's `ready: true` is healthy. Anchored on the
+  column name (`^suspend(ed)?$`), so `Suspend Reason` is still an ordinary
+  status column.
 - The gateway blocklist makes objects literally named
   `exec`/`attach`/`portforward`/`proxy` unreachable — known limitation,
   documented in README.

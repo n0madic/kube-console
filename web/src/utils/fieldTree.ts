@@ -9,7 +9,7 @@
 //   other object array            → titled collapsible items
 //   nested object                 → collapsible group
 
-import { isStatusColumn, statusTextClass } from "@/utils/statusColors"
+import { cellTextClass, statusColumnKind } from "@/utils/statusColors"
 import { formatRelativeAge } from "@/utils/units"
 
 /**
@@ -145,7 +145,8 @@ function formatScalar(value: Scalar): string {
 }
 
 function leafStatusClass(key: string, text: string): string | null {
-  return isStatusColumn(key) ? statusTextClass(text) : null
+  const kind = statusColumnKind(key)
+  return kind === null ? null : cellTextClass(kind, text)
 }
 
 function isLongText(text: string): boolean {

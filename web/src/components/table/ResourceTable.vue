@@ -17,7 +17,8 @@ import type { RouteLocationRaw } from "vue-router"
 
 import type { K8sTableColumn, K8sTableRow } from "@/api/types"
 import { estimateColumnWidths, SAMPLE_ROWS } from "@/utils/columnWidths"
-import { isStatusColumn, NEUTRAL_TEXT_CLASS, statusTextClass } from "@/utils/statusColors"
+import type { StatusColumnKind } from "@/utils/statusColors"
+import { cellTextClass, NEUTRAL_TEXT_CLASS, statusColumnKind } from "@/utils/statusColors"
 import { cellText } from "@/utils/tableCells"
 import { compareTableValues } from "@/utils/tableSort"
 
@@ -298,17 +299,19 @@ function cellRoute(cell: Cell<K8sTableRow, unknown>, value: string): RouteLocati
   return props.cellLink(cell.row.original, String(cell.column.columnDef.header ?? ""), value)
 }
 
-// Whether a column carries statuses depends on the column alone, so it is
-// resolved once per column set instead of once per rendered cell (a regex test
-// per cell, ~240 per scroll frame). Derived from columnDefs, whose identity is
-// content-keyed above and is what the cell-view memo below invalidates on.
-const statusColumnIds = computed(() => {
-  const ids = new Set<string>()
+// Whether a column carries statuses — and by which rule its cells are read —
+// depends on the column alone, so it is resolved once per column set instead of
+// once per rendered cell (a regex test per cell, ~240 per scroll frame).
+// Derived from columnDefs, whose identity is content-keyed above and is what the
+// cell-view memo below invalidates on.
+const statusColumnKinds = computed(() => {
+  const kinds = new Map<string, StatusColumnKind>()
   for (const def of columnDefs.value) {
     const header = typeof def.header === "string" ? def.header : ""
-    if (def.id !== undefined && isStatusColumn(header)) ids.add(def.id)
+    const kind = statusColumnKind(header)
+    if (def.id !== undefined && kind !== null) kinds.set(def.id, kind)
   }
-  return ids
+  return kinds
 })
 
 interface CellView {
@@ -351,14 +354,15 @@ watch([() => props.cellLink, columnDefs], () => {
 function cellViews(row: Row<K8sTableRow>): CellView[] {
   const cached = cellViewCache.get(row)
   if (cached !== undefined) return cached
-  const statusIds = statusColumnIds.value
+  const kinds = statusColumnKinds.value
   const views = row.getVisibleCells().map((cell) => {
     const text = String(cell.getValue() ?? "")
+    const kind = kinds.get(cell.column.id)
     return {
       cell,
       route: cellRoute(cell, text),
       text,
-      class: (statusIds.has(cell.column.id) ? statusTextClass(text) : null) ?? NEUTRAL_TEXT_CLASS,
+      class: (kind === undefined ? null : cellTextClass(kind, text)) ?? NEUTRAL_TEXT_CLASS,
     }
   })
   cellViewCache.set(row, views)

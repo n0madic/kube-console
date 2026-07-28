@@ -272,6 +272,39 @@ describe("ResourceTable", () => {
     expect(classesByText.get("Ready,SchedulingDisabled")).toContain("text-amber-600")
   })
 
+  it("colors a suspended CronJob's Suspend cell amber and leaves False neutral", () => {
+    // The SUSPEND column is a boolean of the opposite polarity to every status
+    // column: True means the schedule fires nothing, False is the ordinary
+    // state. The Ready column beside it pins that the True/False pair is read
+    // per column, not per value.
+    const wrapper = mountTable(
+      [
+        { name: "Name", type: "string" },
+        { name: "Suspend", type: "string" },
+        { name: "Ready", type: "string" },
+      ],
+      [
+        {
+          cells: ["backup", "True", "0/1"],
+          object: { metadata: { name: "backup", uid: "u1" } },
+        },
+        {
+          cells: ["report", "False", "1/1"],
+          object: { metadata: { name: "report", uid: "u2" } },
+        },
+      ],
+    )
+    const cells = renderedCells(wrapper)
+    const suspended = cells.find((c) => c.text() === "True")
+    const running = cells.find((c) => c.text() === "False")
+    expect(suspended).toBeDefined()
+    expect(suspended!.classes()).toContain("text-amber-600")
+    expect(suspended!.classes()).not.toContain("text-slate-700")
+    expect(running).toBeDefined()
+    expect(running!.classes()).toContain("text-slate-700")
+    expect(running!.classes()).not.toContain("text-amber-600")
+  })
+
   it("gives every cell exactly one text color utility, never two competing ones", () => {
     // Tailwind resolves by stylesheet order, not class order, so the neutral
     // fallback must be baked into the same single class expression.
