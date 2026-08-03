@@ -282,6 +282,13 @@ export interface ApplyOptions {
 /**
  * Server-side apply of a YAML manifest. Never falls back to PUT; conflicts
  * surface as the native Kubernetes 409 Status.
+ *
+ * `force` defaults to **true** (`kubectl apply --server-side
+ * --force-conflicts`): objects created by client-side `kubectl apply` have
+ * every field they sent owned by `kubectl-client-side-apply`, so an edit to any
+ * one of them — an Ingress annotation, a replica count — conflicted on every
+ * Apply with no way past it from the UI. The cost is that Apply takes ownership
+ * of the fields it sets away from whoever held them.
  */
 export async function serverSideApply(
   ref: ResourceRef,
@@ -292,7 +299,7 @@ export async function serverSideApply(
 ): Promise<K8sObject> {
   const params = new URLSearchParams()
   params.set("fieldManager", "kube-console")
-  params.set("force", opts.force === true ? "true" : "false")
+  params.set("force", opts.force === false ? "false" : "true")
   if (opts.dryRun === true) params.set("dryRun", "All")
   const path = `${resourcePath(ref, { namespace, name })}?${params.toString()}`
   return apiJson<K8sObject>(path, {

@@ -346,7 +346,7 @@ describe("eventsFor", () => {
 })
 
 describe("serverSideApply", () => {
-  it("PATCHes apply-patch+yaml with fieldManager=kube-console and force=false", async () => {
+  it("PATCHes apply-patch+yaml with fieldManager=kube-console and force=true", async () => {
     const mock = stubFetch({ kind: "Deployment" })
     await serverSideApply(
       { group: "apps", version: "v1", resource: "deployments" },
@@ -358,11 +358,23 @@ describe("serverSideApply", () => {
     const init = mock.mock.calls[0]?.[1] as RequestInit
     expect(url).toContain("/k8s/apis/apps/v1/namespaces/prod/deployments/api?")
     expect(url).toContain("fieldManager=kube-console")
-    expect(url).toContain("force=false")
+    expect(url).toContain("force=true")
     expect(url).not.toContain("dryRun")
     expect(init.method).toBe("PATCH")
     expect(new Headers(init.headers).get("Content-Type")).toBe("application/apply-patch+yaml")
     expect(init.body).toBe("kind: Deployment\n")
+  })
+
+  it("honours an explicit force=false", async () => {
+    const mock = stubFetch({ kind: "Deployment" })
+    await serverSideApply(
+      { group: "apps", version: "v1", resource: "deployments" },
+      "prod",
+      "api",
+      "kind: Deployment\n",
+      { force: false },
+    )
+    expect(mock.mock.calls[0]?.[0] as string).toContain("force=false")
   })
 
   it("adds dryRun=All when requested", async () => {

@@ -35,7 +35,9 @@ authorization model of its own.
   readable field tree (with a toggle to hide server-added noise) plus a
   Details card for kinds that keep their content outside `spec` (Events,
   StorageClasses, RBAC rules, …), a YAML tab
-  with view/edit through server-side apply (dry-run supported), related
+  with view/edit through server-side apply (dry-run supported; applies with
+  `--force-conflicts` semantics, so editing a field owned by another field
+  manager takes ownership of it), related
   objects (owners, children, Service→Pods, Ingress→backends) and recent
   events.
 - **Pods**: environment variables resolved from `valueFrom`/`envFrom`

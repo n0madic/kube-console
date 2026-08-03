@@ -909,14 +909,24 @@ nothing") for everything that renders, and `scalarCellText` (objects → `""`) f
 fall through to "error". The two used to be three near-identical private
 helpers that disagreed by accident.
 
-Writes go through server-side apply (`fieldManager=kube-console`, force=false,
+Writes go through server-side apply (`fieldManager=kube-console`, **force=true**,
 dry-run supported) — never PUT. Two surfaces send one: the detail page's **YAML
-tab** and `CreateResourceDialog`. The exception is the narrow set of kind-specific
-actions (scale, rollout restart, suspend/resume, cordon/uncordon), which send
-targeted `PATCH`es like kubectl (`patchObject` in `api/k8s.ts`, merge or
-strategic-merge): `spec.replicas` and the restart annotation are usually owned
-by another field manager, so SSA with `force=false` would 409 on every click. A
-manual CronJob run `POST`s a Job (`createObject`).
+tab** and `CreateResourceDialog`. `force` is `kubectl apply --server-side
+--force-conflicts`, and it is the default (owner decision) because the common
+cluster is not on SSA at all: an object created by client-side `kubectl apply`
+has every field it sent owned by `kubectl-client-side-apply`, so changing any one
+of them — an Ingress annotation — 409'd on every Apply, and the UI offers no
+per-apply force. The trade is that Apply takes those fields' ownership, so a
+GitOps controller reverts them on its next sync. `ApplyOptions.force` still
+exists and an explicit `false` is honoured. `YamlTab`'s 409 block stays: force
+resolves *ownership* conflicts, not every 409 — a manifest carrying
+`metadata.resourceVersion` still fails the optimistic-concurrency check, which
+`toEditableYaml` strips but `CreateResourceDialog`'s pasted YAML does not. The exception is
+the narrow set of kind-specific actions (scale, rollout restart, suspend/resume,
+cordon/uncordon), which send targeted `PATCH`es like kubectl (`patchObject` in
+`api/k8s.ts`, merge or strategic-merge): they predate this default and stay
+targeted, since a full-object apply is the wrong shape for one field. A manual
+CronJob run `POST`s a Job (`createObject`).
 
 ### Detail pages
 
