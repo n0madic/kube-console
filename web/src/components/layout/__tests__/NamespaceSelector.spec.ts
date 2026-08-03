@@ -12,9 +12,13 @@ vi.mock("@/composables/useDiscovery", () => ({ useDiscovery: vi.fn() }))
 const state = vi.hoisted(() => ({
   data: undefined as unknown,
   isError: undefined as unknown,
+  options: undefined as Record<string, unknown> | undefined,
 }))
 vi.mock("@tanstack/vue-query", () => ({
-  useQuery: () => ({ data: state.data, isError: state.isError }),
+  useQuery: (options: Record<string, unknown>) => {
+    state.options = options
+    return { data: state.data, isError: state.isError }
+  },
 }))
 
 let mockRoute: { name: string; params: Record<string, string> }
@@ -147,6 +151,28 @@ describe("NamespaceSelector", () => {
     const marker = wrapper.findAll("option").find((o) => o.text().includes("not listed"))
     expect(marker).toBeDefined()
     expect(marker?.attributes("disabled")).toBeDefined()
+  })
+
+  // Regression: the selector is mounted for the whole session and window-focus
+  // refetching is off app-wide, so without an interval a namespace created
+  // after the first fetch stayed invisible until a reload or a cluster switch.
+  it("polls for namespaces created after the first fetch", () => {
+    mockRoute = { name: "overview", params: {} }
+    mockDiscovery(undefined)
+    mount(NamespaceSelector)
+    const interval = state.options?.refetchInterval as (q: unknown) => number | false
+    expect(typeof interval).toBe("function")
+    expect(interval({ state: { status: "success" } })).toBeGreaterThan(0)
+  })
+
+  // A namespace-scoped token's 403 is not retried once; an interval must not
+  // reinstate that request every minute for as long as the tab stays open.
+  it("stops polling once the list has failed", () => {
+    mockRoute = { name: "overview", params: {} }
+    mockDiscovery(undefined)
+    mount(NamespaceSelector)
+    const interval = state.options?.refetchInterval as (q: unknown) => number | false
+    expect(interval({ state: { status: "error" } })).toBe(false)
   })
 
   it("shows no truncation marker for a complete list", () => {

@@ -28,6 +28,14 @@ const clusterScoped = computed(() => {
   return entry !== undefined && entry.namespaced === false
 })
 
+// The selector lives in the TopBar, so it is mounted for the whole session and
+// nothing ever remounts this query: without an interval a namespace created
+// after the first fetch (by anyone, this app included) never appeared until a
+// reload or a cluster switch, and `refetchOnWindowFocus` is off app-wide. The
+// list is small and changes rarely, so one poll a minute — the same number as
+// the staleTime it replaces the effect of — is the whole freshness budget.
+const NAMESPACES_REFRESH_MS = 60 * 1000
+
 // Namespace listing may be forbidden for the user; fall back to manual input.
 // Keyed by the active context so switching clusters refetches the new cluster's
 // namespaces (and drives the reconciliation below). Gated on a real session so
@@ -36,7 +44,13 @@ const query = useQuery({
   queryKey: computed(() => ["namespaces", auth.activeContext]),
   queryFn: () => fetchNamespaces(),
   enabled: computed(() => auth.isAuthenticated),
-  staleTime: 60 * 1000,
+  staleTime: NAMESPACES_REFRESH_MS,
+  // Stop polling once the list has failed: a namespace-scoped token gets a 403
+  // that no amount of retrying resolves, and `retry: false` says as much for
+  // the first attempt — an interval would reinstate exactly that loop, once a
+  // minute, for as long as the tab stays open. A context switch or a reload
+  // re-arms it, which is when the verdict can actually have changed.
+  refetchInterval: (q) => (q.state.status === "error" ? false : NAMESPACES_REFRESH_MS),
   retry: false,
 })
 

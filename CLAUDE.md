@@ -1271,6 +1271,16 @@ metrics loop, so a plain `v-model` fired all three per keystroke and requested
 `k`, `ku`, `kub`, … against the apiserver. The `BaseSelect` branch never had the
 problem: a `<select>` emits once per pick.
 
+Its namespace query carries a **60s `refetchInterval`**, and that is the only
+thing keeping the list fresh: the selector lives in the TopBar, so it is mounted
+for the whole session and nothing remounts the query, `refetchOnWindowFocus` is
+off app-wide (`main.ts`), and the key changes only on a context switch — so a
+namespace created afterwards, by anyone including this app, was invisible until a
+reload. The interval is a **function** returning `false` once the query is in
+error, so the 403 a namespace-scoped token gets (deliberately `retry: false`,
+which is what shows the free-text input) is not reissued every minute for as long
+as the tab stays open.
+
 Shared value UX in `components/ui/`: `RevealButton.vue` (eye toggle) and
 `ExpandableValue.vue` (truncate/expand), used by SecretDataPanel,
 ConfigMapDataPanel and PodEnvTab; base64 decode is `utils/base64.ts`.
