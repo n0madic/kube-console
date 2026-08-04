@@ -411,6 +411,10 @@ describe("url builders", () => {
     ).toBe(
       "/k8s/api/v1/namespaces/prod/pods/api-1/log?container=app&tailLines=500&timestamps=true&follow=true",
     )
+    // What a dropped follow stream reconnects with: a window instead of a tail.
+    expect(logsUrl("prod", "api-1", { container: "app", sinceSeconds: 7, follow: true })).toBe(
+      "/k8s/api/v1/namespaces/prod/pods/api-1/log?container=app&sinceSeconds=7&follow=true",
+    )
   })
 
   it("builds watch URLs with bookmarks and resourceVersion", () => {

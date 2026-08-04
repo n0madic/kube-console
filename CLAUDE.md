@@ -1093,6 +1093,43 @@ escape hatch for logs too big for the viewer: never a tail, never followed,
 through `apiFetch` (the endpoint needs the bearer, so a plain link cannot work)
 and `utils/download.ts`.
 
+**A followed stream reconnects itself**, and the same absent cursor decides how.
+`follow=true` is a request that is not supposed to end, but the connection is
+long-lived and idle by nature, so anything between the browser and the kubelet
+reaps it — an ingress `proxy_read_timeout`, a load balancer, the kubelet's own
+`--streaming-connection-idle-timeout` — and the viewer used to answer that with
+`Log stream failed.` and stop for good, minutes or hours into a tab nobody
+touched. So `start(url, { resume })` takes a **resume builder, supplied only
+when Follow is on** (`PodLogsTab.resumeUrl`), and the composable loops:
+`runOnce` reads one connection and reports `ended` / `aborted` / a failure,
+and `start` decides. Four rules make that safe:
+
+- **only a failure reconnects.** A clean end is how the endpoint says there is
+  no more log to follow (the container terminated, `previous=true` reached the
+  end of a finished one) — retrying would re-read the same log forever.
+- **a status the apiserver chose is final** (`isFatal`, 4xx): pod gone, no such
+  container, RBAC. A dropped connection or a 5xx from a restarting apiserver is
+  worth another try.
+- **the resume window is measured, not parsed.** There is no offset and no
+  continue token, so the reconnect asks for `sinceSeconds` since the last line
+  *arrived* (`lastLineAt`, stamped in `append`). Wall-clock on arrival needs
+  neither `timestamps=true` nor a clock shared with the node — what goes
+  upstream is a duration the node subtracts from its own now — and it errs
+  toward duplicating the last fraction of a second (transport latency sits
+  inside the window) rather than leaving a hole. It replaces `tailLines`, since
+  the buffer already holds everything up to there; nothing received yet (null)
+  repeats the original request.
+- **the first retry is immediate**, then 1s doubling to 15s, reset by any
+  connection that lived ≥10s — the common cause reconnects at once, and an idle
+  timeout fires again after the same quiet interval, not sooner. `stop()`
+  resolves a pending wait (`cancelRetry`) instead of leaving `start` suspended
+  on a timer nobody awaits.
+
+The drop is stated in place, never as an error: `reconnecting` holds the message
+being retried (one ref rather than a boolean beside `error`, since the tab must
+say both that the stream dropped and why), the indicator reads `●
+reconnecting…`, and `error` stays reserved for a failure waiting will not fix.
+
 Chunks merge into the buffer on a 50ms window (`flush`), not per chunk — a bulk
 load arrives as hundreds of chunks and each merge re-renders. The window bounds
 how *often* a merge happens, not what it costs, so the merge itself appends **in

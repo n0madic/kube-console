@@ -391,6 +391,9 @@ export async function eventsFor(obj: K8sObject): Promise<K8sObjectList> {
 export interface LogsOptions {
   container?: string
   tailLines?: number
+  /** Only lines written in the last N seconds. The endpoint has no cursor, so
+   * this is what a dropped follow stream resumes with. */
+  sinceSeconds?: number
   timestamps?: boolean
   previous?: boolean
   follow?: boolean
@@ -403,6 +406,7 @@ export function logsUrl(namespace: string, pod: string, opts: LogsOptions = {}):
     params.set("container", opts.container)
   }
   if (opts.tailLines !== undefined) params.set("tailLines", String(opts.tailLines))
+  if (opts.sinceSeconds !== undefined) params.set("sinceSeconds", String(opts.sinceSeconds))
   if (opts.timestamps === true) params.set("timestamps", "true")
   if (opts.previous === true) params.set("previous", "true")
   if (opts.follow === true) params.set("follow", "true")

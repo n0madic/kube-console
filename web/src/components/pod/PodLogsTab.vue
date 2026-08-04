@@ -40,6 +40,24 @@ function currentUrl(): string | null {
   })
 }
 
+// URL a dropped follow stream reconnects with. `sinceSeconds` is the window the
+// composable measured from the last line it received — the log endpoint has no
+// cursor — and it replaces the tail: the buffer already holds everything up to
+// there. Nothing received yet (null) means the original request still describes
+// what is wanted.
+function resumeUrl(sinceSeconds: number | null): string | null {
+  if (sinceSeconds === null) return currentUrl()
+  const meta = props.object.metadata
+  if (meta?.namespace === undefined || meta.name === undefined) return null
+  return logsUrl(meta.namespace, meta.name, {
+    container: container.value,
+    sinceSeconds,
+    timestamps: timestamps.value,
+    previous: previous.value,
+    follow: true,
+  })
+}
+
 // URL the stream was last started with, so the option watcher can tell a real
 // change from the echo of a change the mount / pod-change path already acted on.
 let startedUrl: string | null = null
@@ -48,7 +66,8 @@ function restart(): void {
   const url = currentUrl()
   if (url === null) return
   startedUrl = url
-  void stream.start(url)
+  // Only a followed stream reconnects: an unfollowed read ends by design.
+  void stream.start(url, follow.value ? { resume: resumeUrl } : {})
 }
 
 const downloading = ref(false)
@@ -146,7 +165,13 @@ watch([container, tailLines, timestamps, previous, follow], () => {
           :class="downloading ? 'animate-spin' : ''"
         />
       </BaseButton>
-      <span v-if="stream.running.value" class="text-xs text-green-600 dark:text-green-400">
+      <span
+        v-if="stream.reconnecting.value !== null"
+        class="text-xs text-amber-600 dark:text-amber-400"
+      >
+        ● reconnecting…
+      </span>
+      <span v-else-if="stream.running.value" class="text-xs text-green-600 dark:text-green-400">
         ● streaming
       </span>
     </div>
@@ -157,6 +182,15 @@ watch([container, tailLines, timestamps, previous, follow], () => {
       class="rounded-md bg-red-50 px-3 py-2 text-sm text-red-800 dark:bg-red-950 dark:text-red-200"
     >
       {{ message }}
+    </p>
+
+    <!-- A dropped follow stream is not an error the user has to act on: say
+         what happened, in place, while the reconnect runs. -->
+    <p
+      v-if="stream.reconnecting.value !== null"
+      class="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-950 dark:text-amber-200"
+    >
+      {{ stream.reconnecting.value }} Reconnecting…
     </p>
 
     <p

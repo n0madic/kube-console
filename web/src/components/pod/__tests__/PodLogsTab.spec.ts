@@ -6,6 +6,7 @@ import type { K8sObject } from "@/api/types"
 
 const startSpy = vi.hoisted(() => vi.fn())
 const truncated = vi.hoisted(() => ({ value: false }))
+const reconnecting = vi.hoisted(() => ({ value: null as string | null }))
 // The version counter of the stream last created, so a test can bump it the way
 // a flush does — the composable appends in place and this is its only signal.
 const held = vi.hoisted(() => ({ version: { value: 0 } }))
@@ -22,6 +23,7 @@ vi.mock("@/composables/useLogsStream", () => ({
       linesVersion,
       running: ref(false),
       error: ref<string | null>(null),
+      reconnecting,
       truncated,
       start: startSpy,
       stop: vi.fn(),
@@ -61,6 +63,7 @@ describe("PodLogsTab", () => {
     fetchSpy.mockReset()
     saveSpy.mockReset()
     truncated.value = false
+    reconnecting.value = null
   })
 
   it("restarts the log stream for the new pod on an in-place pod change", async () => {
@@ -132,6 +135,49 @@ describe("PodLogsTab", () => {
     held.version.value++
     await nextTick()
     expect(viewer.props("version")).toBe(1)
+  })
+
+  // A followed stream that drops is reconnected, not reported: the endpoint has
+  // no cursor, so the resume window is the seconds since the last line arrived.
+  it("resumes a dropped follow stream from the last line instead of the tail", async () => {
+    mount(PodLogsTab, { props: { object: pod("u1", "pod-a", "app") } })
+    await nextTick()
+    const started = startSpy.mock.calls.at(-1)
+    const resume = (started?.[1] as { resume?: (s: number | null) => string | null }).resume!
+
+    const url = resume(42)
+    expect(url).toContain("/pods/pod-a/log")
+    expect(url).toContain("container=app")
+    expect(url).toContain("sinceSeconds=42")
+    expect(url).toContain("follow=true")
+    // The buffer already holds everything up to the window, so a tail on top of
+    // it would only re-deliver lines that are on screen.
+    expect(url).not.toContain("tailLines")
+    // Nothing received yet: the original request still describes what is wanted.
+    expect(resume(null)).toBe(started?.[0])
+  })
+
+  it("does not reconnect a stream that is not followed", async () => {
+    const wrapper = mount(PodLogsTab, { props: { object: pod("u1", "pod-a", "app") } })
+    await nextTick()
+    const follow = wrapper
+      .findAll("label")
+      .find((l) => l.text().includes("Follow"))!
+      .get("input[type=checkbox]")
+
+    await follow.setValue(false)
+
+    const opts = startSpy.mock.calls.at(-1)?.[1] as { resume?: unknown }
+    expect(opts.resume).toBeUndefined()
+  })
+
+  it("states a reconnect in place rather than as a failure", async () => {
+    reconnecting.value = "Log stream failed."
+    const wrapper = mount(PodLogsTab, { props: { object: pod("u1", "pod-a", "app") } })
+    await nextTick()
+
+    expect(wrapper.text()).toContain("Log stream failed. Reconnecting…")
+    expect(wrapper.text()).toContain("● reconnecting")
   })
 
   it("warns when the viewer dropped the start of the log", async () => {

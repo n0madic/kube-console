@@ -38,7 +38,12 @@ function streamResponse(chunks: string[]): Response {
 }
 
 /** Response whose body the test feeds one chunk at a time. */
-function manualResponse(): { resp: Response; push: (text: string) => void; close: () => void } {
+function manualResponse(): {
+  resp: Response
+  push: (text: string) => void
+  close: () => void
+  fail: (e: unknown) => void
+} {
   let ctrl!: ReadableStreamDefaultController<Uint8Array>
   const body = new ReadableStream<Uint8Array>({
     start(c) {
@@ -49,6 +54,9 @@ function manualResponse(): { resp: Response; push: (text: string) => void; close
     resp: new Response(body),
     push: (text) => ctrl.enqueue(encoder.encode(text)),
     close: () => ctrl.close(),
+    // How a connection reaped mid-stream reaches the reader: the body errors,
+    // never a clean done.
+    fail: (e) => ctrl.error(e),
   }
 }
 
@@ -306,6 +314,89 @@ describe("useLogsStream", () => {
     expect(stream.lines.value).toEqual(["fresh-line"])
     expect(stream.error.value).toBeNull()
     expect(stream.running.value).toBe(false)
+  })
+
+  // The bug this covers: a followed stream left open in a background tab is
+  // eventually dropped by whatever sits between the browser and the kubelet (an
+  // ingress read timeout, a load balancer, --streaming-connection-idle-timeout),
+  // and the viewer answered with "Log stream failed." and stopped for good.
+  it("reconnects a dropped follow stream and resumes from the last line", async () => {
+    const feed = manualResponse()
+    mockedFetch.mockResolvedValueOnce(feed.resp)
+    mockedFetch.mockResolvedValueOnce(streamResponse(["b\n"]))
+    const stream = useInHost()
+    const resume = vi.fn((sinceSeconds: number | null) => `/url?sinceSeconds=${sinceSeconds}`)
+    // Sync flush: `reconnecting` is transient by design and a default watcher
+    // would only ever see the value it settles on.
+    const seen: (string | null)[] = []
+    watch(stream.reconnecting, (v) => seen.push(v), { flush: "sync" })
+
+    const done = stream.start("/url?follow=true", { resume })
+    feed.push("a\n")
+    await nextFlush(stream.linesVersion)
+    feed.fail(new TypeError("Failed to fetch"))
+    await done
+
+    // The reconnect continues the same buffer instead of replacing it.
+    expect(stream.lines.value).toEqual(["a", "b"])
+    expect(stream.error.value).toBeNull()
+    expect(resume).toHaveBeenCalledTimes(1)
+    // A whole-second window measured from the last line that arrived, padded so
+    // the seam duplicates a line rather than losing one.
+    expect(resume.mock.calls[0]?.[0]).toBeGreaterThanOrEqual(1)
+    expect(mockedFetch.mock.calls[1]?.[0]).toBe(`/url?sinceSeconds=${resume.mock.calls[0]?.[0]}`)
+    // The drop was stated while it was being retried, and is over now.
+    expect(seen).toContain("Log stream failed.")
+    expect(stream.reconnecting.value).toBeNull()
+  })
+
+  it("does not reconnect after a clean end of stream", async () => {
+    // How the endpoint says there is no more log to follow — the container
+    // terminated, or previous=true reached the end of a finished one. Retrying
+    // would re-read the same log forever.
+    mockedFetch.mockResolvedValueOnce(streamResponse(["only\n"]))
+    const stream = useInHost()
+    const resume = vi.fn(() => "/resume")
+
+    await stream.start("/url?follow=true", { resume })
+
+    expect(resume).not.toHaveBeenCalled()
+    expect(mockedFetch).toHaveBeenCalledTimes(1)
+    expect(stream.error.value).toBeNull()
+    expect(stream.running.value).toBe(false)
+  })
+
+  it("does not reconnect a failure the apiserver decided", async () => {
+    mockedFetch.mockRejectedValue(new ApiError(404, 'pods "p" not found'))
+    const stream = useInHost()
+    const resume = vi.fn(() => "/resume")
+
+    await stream.start("/url?follow=true", { resume })
+
+    expect(resume).not.toHaveBeenCalled()
+    expect(mockedFetch).toHaveBeenCalledTimes(1)
+    expect(stream.error.value).toBe('pods "p" not found')
+    expect(stream.reconnecting.value).toBeNull()
+  })
+
+  it("stop() ends a pending reconnect instead of leaving it armed", async () => {
+    // Two failures in a row, so the loop is inside the backoff wait (the first
+    // retry is immediate, the second is a second away) when stop() lands.
+    mockedFetch.mockRejectedValue(new TypeError("Failed to fetch"))
+    const stream = useInHost()
+    const done = stream.start("/url?follow=true", { resume: () => "/resume" })
+    for (let i = 0; i < 100 && mockedFetch.mock.calls.length < 2; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    expect(mockedFetch).toHaveBeenCalledTimes(2)
+
+    stream.stop()
+    await done
+
+    expect(mockedFetch).toHaveBeenCalledTimes(2)
+    expect(stream.running.value).toBe(false)
+    expect(stream.reconnecting.value).toBeNull()
+    expect(stream.error.value).toBeNull()
   })
 
   it("stop() aborts without reporting an error", async () => {
