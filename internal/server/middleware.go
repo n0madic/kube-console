@@ -84,9 +84,15 @@ func isLoopbackHost(host string) bool {
 	return err == nil && ip.IsLoopback()
 }
 
-// RequestLogger logs method, path, status and duration. It never logs
-// headers, bodies or query strings: for /k8s/* and /api/ui/* the query may
-// contain sensitive selectors and the headers carry the user token.
+// RequestLogger logs method, path, status, duration and the client address. It
+// never logs headers, bodies or query strings: for /k8s/* and /api/ui/* the
+// query may contain sensitive selectors and the headers carry the user token.
+//
+// The client address is httpx.ClientAddr — the same resolution the limiters
+// key on, so it is X-Forwarded-For derived only for --trusted-proxies peers and
+// is the connection's own address everywhere else. That resolution is stored by
+// httpx.ClientIPResolver, which is therefore mounted *above* this middleware:
+// the value lives on a derived request's context, invisible from outside it.
 func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -103,6 +109,9 @@ func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 					"path", r.URL.Path,
 					"status", status,
 					"duration_ms", time.Since(start).Milliseconds(),
+					// Named as the exec bridge names it, so one key answers
+					// "where did this come from" across the whole log.
+					"client", httpx.ClientAddr(r),
 				)
 			}()
 			next.ServeHTTP(sw, r)

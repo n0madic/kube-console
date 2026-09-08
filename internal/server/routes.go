@@ -40,8 +40,14 @@ func NewHandler(d Deps) http.Handler {
 		d.ShutdownCtx = context.Background()
 	}
 	r := chi.NewRouter()
-	// RequestLogger is outermost and logs from a defer, so the line survives
-	// even http.ErrAbortHandler — the one panic Recoverer deliberately
+	// Resolves the client IP once for every consumer downstream: the request
+	// log immediately below, then the rate limiter and the exec handshake gate.
+	// It only annotates the context, so nothing is served from out here — and
+	// RequestLogger reads the resolved value off the request it is handed, which
+	// is why the resolver has to sit above it rather than beside the limiters.
+	r.Use(httpx.ClientIPResolver(d.Cfg.TrustedProxies))
+	// RequestLogger sits outside Recoverer and logs from a defer, so the line
+	// survives even http.ErrAbortHandler — the one panic Recoverer deliberately
 	// re-panics, and how every stream the ReverseProxy aborts ends. For
 	// ordinary panics Recoverer, nested inside, converts them into a 500 on the
 	// same statusWriter before the deferred log records the status.
@@ -80,9 +86,6 @@ func NewHandler(d Deps) http.Handler {
 	// response headers go out, so a slow-dripped POST to an /api adapter or the
 	// SPA fallback holds a connection just as well as one to the gateway.
 	r.Use(bodyReadDeadline(d.Cfg.BodyReadTimeout))
-	// Resolves the client IP once for every limiter downstream (rate limit,
-	// exec handshakes).
-	r.Use(httpx.ClientIPResolver(d.Cfg.TrustedProxies))
 
 	r.Get("/healthz", handleHealthz(d.Version))
 	// Readiness probes the default context; a single reachable apiserver is

@@ -73,7 +73,15 @@ func peerIn(remoteAddr string, prefixes []netip.Prefix) bool {
 // ClientIP returns the resolved client IP for r, canonicalized for use as a
 // limiter key: IPv6 is bucketed by /64, since a single client typically
 // controls a whole /64 and could otherwise rotate within it for a fresh bucket
-// per request.
+// per request. Anything naming the caller rather than keying a bucket — the
+// request log — wants ClientAddr instead, which is the same resolution without
+// that masking.
+func ClientIP(r *http.Request) string {
+	return httprate.CanonicalizeIP(ClientAddr(r))
+}
+
+// ClientAddr returns the resolved client IP for r as it was resolved, with no
+// limiter canonicalization applied.
 //
 // The RemoteAddr fallback runs when the resolver stored nothing. Off-proxy
 // connections never land here — ClientIPFromRemoteAddr always stores the TCP
@@ -84,7 +92,7 @@ func peerIn(remoteAddr string, prefixes []netip.Prefix) bool {
 // address then collapses everyone behind it onto one shared bucket, which is
 // the fail-closed choice: a shared budget can be exhausted, but never steered
 // by a client-supplied header.
-func ClientIP(r *http.Request) string {
+func ClientAddr(r *http.Request) string {
 	ip := middleware.GetClientIP(r.Context())
 	if ip == "" {
 		var err error
@@ -92,5 +100,5 @@ func ClientIP(r *http.Request) string {
 			ip = r.RemoteAddr
 		}
 	}
-	return httprate.CanonicalizeIP(ip)
+	return ip
 }

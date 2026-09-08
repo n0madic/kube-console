@@ -387,7 +387,14 @@ the second Accept variant meaningful: only a failed round trip skips it, while a
 status, an unparsable body or a plain `APIGroupList` are exactly what the retry
 is for.
 
-**Logs never contain headers, bodies or query strings** (RequestLogger).
+**Logs never contain headers, bodies or query strings** (RequestLogger). The one
+value derived from a header is the `client` address, and only for a peer inside
+`--trusted-proxies`: it is `httpx.ClientAddr`, the same resolution the limiters
+key on minus the IPv6 /64 masking `ClientIP` applies (the log names a caller,
+not a bucket), and chi stores only a parsed IP, so nothing client-written is
+echoed. `ClientIPResolver` is therefore mounted **above** `RequestLogger` in
+`routes.go` and not beside the limiters: the resolution lives on a derived
+request's context, invisible to a middleware wrapped around it.
 
 **Frontend token storage.** Bearer tokens live in tab-scoped `sessionStorage`
 (`kube-console.session.v1`, absolute 8h TTL — a deliberate relaxation of the

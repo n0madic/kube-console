@@ -791,3 +791,67 @@ func mustParseURL(t *testing.T, raw string) *url.URL {
 	}
 	return u
 }
+
+// The resolved client address reaches the request log, which is only true while
+// httpx.ClientIPResolver is mounted *above* RequestLogger: the resolution lives
+// on a derived request's context, so a resolver mounted beside the limiters
+// would leave the log line with nothing but RemoteAddr. Wiring the middlewares
+// by hand would pass either way, so this goes through NewHandler.
+func TestRequestLoggerLogsResolvedClientAddress(t *testing.T) {
+	handlerFor := func(buf *bytes.Buffer, trusted []string) http.Handler {
+		base, _ := url.Parse("http://127.0.0.1:1")
+		return NewHandler(Deps{
+			Cfg: &config.Config{
+				MaxBodyBytes:    4 << 20,
+				MaxExecSessions: 1,
+				TrustedProxies:  trusted,
+			},
+			Registry: kube.NewRegistryFromUpstreams("default", map[string]*kube.Upstream{
+				"default": {BaseURL: base, Transport: http.DefaultTransport},
+			}),
+			Logger:  slog.New(slog.NewTextHandler(buf, nil)),
+			Version: "test",
+			DistFS:  testDist,
+		})
+	}
+
+	// No trusted proxies: a client-supplied X-Forwarded-For must not be able to
+	// write someone else's address into the audit line.
+	var untrusted bytes.Buffer
+	req := httptest.NewRequest(http.MethodGet, "/api/ui/nothing-here", nil)
+	req.RemoteAddr = "203.0.113.7:5555"
+	req.Header.Set("X-Forwarded-For", "198.51.100.9")
+	handlerFor(&untrusted, nil).ServeHTTP(httptest.NewRecorder(), req)
+
+	if !strings.Contains(untrusted.String(), "client=203.0.113.7") {
+		t.Errorf("log should name the peer address: %s", untrusted.String())
+	}
+	if strings.Contains(untrusted.String(), "198.51.100.9") {
+		t.Errorf("log took a spoofed X-Forwarded-For: %s", untrusted.String())
+	}
+
+	// Behind a declared proxy the peer is the ingress for everyone, so the
+	// forwarded client is what the line is for.
+	var trusted bytes.Buffer
+	req = httptest.NewRequest(http.MethodGet, "/api/ui/nothing-here", nil)
+	req.RemoteAddr = "10.0.0.5:5555"
+	req.Header.Set("X-Forwarded-For", "198.51.100.9")
+	handlerFor(&trusted, []string{"10.0.0.0/8"}).ServeHTTP(httptest.NewRecorder(), req)
+
+	if !strings.Contains(trusted.String(), "client=198.51.100.9") {
+		t.Errorf("log should name the forwarded client: %s", trusted.String())
+	}
+}
+
+// The log names the caller, so an IPv6 address is logged whole rather than
+// masked to the /64 the rate limiter buckets by.
+func TestClientAddrKeepsFullIPv6(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "[2001:db8::dead:beef]:5555"
+	if got := httpx.ClientAddr(req); got != "2001:db8::dead:beef" {
+		t.Errorf("ClientAddr = %q, want the full address", got)
+	}
+	if got := httpx.ClientIP(req); got != "2001:db8::" {
+		t.Errorf("ClientIP = %q, want the /64 limiter key", got)
+	}
+}
