@@ -7,10 +7,12 @@ import type { K8sObject } from "@/api/types"
 import AppIcon from "@/components/ui/AppIcon.vue"
 import BaseButton from "@/components/ui/BaseButton.vue"
 import BaseSelect from "@/components/ui/BaseSelect.vue"
+import IconButton from "@/components/ui/IconButton.vue"
 import PopoverMenu from "@/components/ui/PopoverMenu.vue"
 import { useLogSearch } from "@/composables/useLogSearch"
 import { MAX_LINES, useLogsStream } from "@/composables/useLogsStream"
 import { saveBlob } from "@/utils/download"
+import { isFindShortcut } from "@/utils/findShortcut"
 import { defaultContainerName } from "@/utils/podHelpers"
 
 import ContainerSelect from "./ContainerSelect.vue"
@@ -30,13 +32,6 @@ const wrap = ref(false)
 
 const stream = useLogsStream()
 
-// The previous/next match buttons: the bare shape RevealButton uses rather
-// than BaseButton's padded one — they belong to the search field, not to the
-// toolbar's button row, and the padded shape read as two more toolbar buttons.
-const ICON_BUTTON_CLASS =
-  "rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-800 " +
-  "disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent " +
-  "dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
 
 // Searches the buffer, not the DOM: the viewer is virtualized, so the
 // browser's Find sees a sliver of the log. The query deliberately survives a
@@ -56,8 +51,11 @@ const matchSummary = computed(() => {
 
 // All three prevent the default — Escape in particular: AppShell's drawer
 // handler and the pickers key on defaultPrevented, and an unprevented Escape
-// from here would also dismiss the sidebar drawer on a narrow viewport.
+// from here would also dismiss the sidebar drawer on a narrow viewport. Not
+// during IME composition, though: there Enter confirms and Escape cancels the
+// candidate, and neither is meant for the search.
 function onSearchKeydown(e: KeyboardEvent): void {
+  if (e.isComposing) return
   switch (e.key) {
     case "Enter":
       e.preventDefault()
@@ -72,12 +70,9 @@ function onSearchKeydown(e: KeyboardEvent): void {
 }
 
 // Ctrl/Cmd+F goes to the field while this tab is mounted — it is v-else-if'd in
-// ResourceDetailPage, so the listener exists only while Logs is open. Matched
-// on the physical key like the browser's own Find: `e.key` is "а" on a
-// Russian layout and "F" under CapsLock.
+// ResourceDetailPage, so the listener exists only while Logs is open.
 function onWindowKeydown(e: KeyboardEvent): void {
-  if (e.defaultPrevented || !(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) return
-  if (e.code !== "KeyF") return
+  if (e.defaultPrevented || !isFindShortcut(e)) return
   e.preventDefault()
   searchField.value?.focus()
   searchField.value?.select()
@@ -239,6 +234,12 @@ watch([container, tailLines, timestamps, previous, follow], () => {
       <span v-else-if="stream.running.value" class="text-xs text-green-600 dark:text-green-400">
         ● streaming{{ search.active.value !== null ? " (scroll paused)" : "" }}
       </span>
+      <!-- Unlike the other options behind the gear, Previous changes *what* is
+           shown — the last instance's log, not this one's — so it is stated on
+           the row while it is on, where the checkbox used to be visible. -->
+      <span v-if="previous" class="text-xs text-amber-600 dark:text-amber-400">
+        previous instance
+      </span>
       <!-- The search group takes whatever the options leave and gives it to
            the field (flex-1 between its min and max widths), so a narrower
            row squeezes the field before it wraps the group; the basis is the
@@ -256,32 +257,31 @@ watch([container, tailLines, timestamps, previous, follow], () => {
           class="min-w-[5rem] max-w-36 flex-1 rounded-md border border-slate-300 bg-white px-2 py-1 text-sm focus:border-blue-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
           @keydown="onSearchKeydown"
         />
+        <!-- Always in the DOM (empty rather than absent): a live region only
+             announces changes to an element that already exists, and this is
+             how Enter's "3 / 128" reaches a screen reader with the focus
+             staying in the field. -->
         <span
-          v-if="matchSummary !== ''"
+          role="status"
+          aria-live="polite"
           class="whitespace-nowrap text-xs tabular-nums text-slate-500 dark:text-slate-400"
         >
           {{ matchSummary }}
         </span>
-        <button
-          type="button"
-          :class="ICON_BUTTON_CLASS"
+        <IconButton
+          name="chevron-up"
           :disabled="matchCount === 0"
           title="Previous match"
           aria-label="Previous match"
           @click="search.prev"
-        >
-          <AppIcon name="chevron-up" class="h-4 w-4" />
-        </button>
-        <button
-          type="button"
-          :class="ICON_BUTTON_CLASS"
+        />
+        <IconButton
+          name="chevron-down"
           :disabled="matchCount === 0"
           title="Next match"
           aria-label="Next match"
           @click="search.next"
-        >
-          <AppIcon name="chevron-down" class="h-4 w-4" />
-        </button>
+        />
         <label class="flex items-center gap-1.5 whitespace-nowrap">
           <input v-model="search.filter.value" type="checkbox" /> Filter
         </label>

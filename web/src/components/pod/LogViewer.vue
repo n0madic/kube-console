@@ -166,9 +166,12 @@ watch(
 
 // A jump is an event: with one match Enter goes 0 → 0, and after scrolling
 // away to read context a second Enter must still re-center it, so this fires
-// on the counter rather than on the position.
+// on the counter rather than on the position. And on the filter: toggling it
+// moves the selected hit to another row (`at` in the filtered list, `matches
+// [at]` in the full one) while the follow scroll is paused for it, so nothing
+// else would bring the view back onto it.
 watch(
-  () => props.jumpSeq,
+  [() => props.jumpSeq, () => props.filter],
   () => {
     const at = props.activeMatch
     if (at === null || at === undefined) return

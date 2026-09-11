@@ -1207,8 +1207,20 @@ by the physical `code === "KeyF"` (`e.key` is `"а"` on a Russian layout and
 `ResourceDetailPage`, so the listener exists only while Logs is open. The
 field's Enter/Shift+Enter/Escape all `preventDefault()`: `AppShell`'s drawer
 handler keys on `defaultPrevented`, so an unprevented Escape would also dismiss
-the sidebar drawer on a narrow viewport. The query survives a stream restart on
-purpose; the composable rescans the new array on its own.
+the sidebar drawer on a narrow viewport — and all three are ignored during IME
+composition (`e.isComposing`), where Enter confirms and Escape cancels the
+candidate. The shortcut match is `utils/findShortcut.ts`, bound the way the
+browser binds Find: by the character when the layout produces a Latin letter
+(Colemak's physical KeyF types "t", so `code === "KeyF"` alone hijacked Ctrl+T
+and missed the real Ctrl+F on KeyE), by the physical key only when it does not
+(`"а"` on a Russian layout). The match counter is a `role="status"`
+`aria-live` region that stays in the DOM when empty — a live region announces
+changes to an element that exists, and the focus stays in the field on Enter.
+Toggling Filter also re-centers the selected hit (it moves to another row while
+the follow scroll is paused for it), and Previous — the one option behind the
+gear that changes *what* is shown — is stated on the row while it is on. The
+query survives a stream restart on purpose; the composable rescans the new
+array on its own.
 
 **Wrap** (off by default, render-only — hence deliberately absent from the
 `restart` watch) switches rows to `whitespace-pre-wrap` and measured heights
@@ -1391,10 +1403,18 @@ with the container and tail selects, the reload/download buttons, the status
 and the search group, four checkboxes pushed the row onto a second line at
 ordinary widths. It owns only open/close (trigger toggles; a click outside or
 Escape dismisses, Escape consumed with `preventDefault` and focus returned to
-the trigger — the same drawer rule `ContextListbox` follows). The search
-group's previous/next buttons are the bare `RevealButton` shape rather than
-`BaseButton` — they belong to the field, not to the toolbar's button row —
-and the search field is `flex-1`
+the trigger — the same drawer rule `ContextListbox` follows). Its trigger is
+`aria-haspopup="dialog"`, not `"true"` (= menu): the panel holds form
+controls, not menuitems. The outside-click dismissal of all three hand-built
+popups (`ContextListbox`, `EditableCombobox`, `PopoverMenu`) is the one
+`composables/useDismissOnOutside.ts` — it was a copy in each, and whatever
+changes there (a `pointerdown` for touch, portals) must change in all of them
+at once; Escape stays in each control's own keydown switch, where it competes
+with that control's arrow keys and Enter. `components/ui/IconButton.vue` is
+the bare icon-only button (a glyph with a hover tint, no border) for controls
+that belong to a value or a field rather than to a button row: `RevealButton`
+and the search field's previous/next are both it, toolbar buttons stay
+`BaseButton`. The search field is `flex-1`
 between a min and a max width inside a `basis-[17rem]` group, so a narrower
 row squeezes the field before it wraps the group. The field paints its own
 focus border (`focus:border-blue-500 focus:outline-none`, like the login

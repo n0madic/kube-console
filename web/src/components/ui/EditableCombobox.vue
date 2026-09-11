@@ -6,9 +6,10 @@
 // So it is built by hand, following ARIA's editable-combobox pattern: the
 // input owns the focus and the popup is pointed at with aria-activedescendant.
 
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId } from "vue"
+import { computed, nextTick, ref, useId } from "vue"
 
 import AppIcon from "@/components/ui/AppIcon.vue"
+import { useDismissOnOutside } from "@/composables/useDismissOnOutside"
 
 export interface ComboboxOption {
   /** Text put into the field when the option is picked. */
@@ -138,12 +139,7 @@ function onKeydown(event: KeyboardEvent): void {
   }
 }
 
-function onDocumentPointerDown(event: MouseEvent): void {
-  if (root.value !== null && !root.value.contains(event.target as Node)) close()
-}
-
-onMounted(() => document.addEventListener("mousedown", onDocumentPointerDown))
-onBeforeUnmount(() => document.removeEventListener("mousedown", onDocumentPointerDown))
+useDismissOnOutside(root, close)
 </script>
 
 <template>

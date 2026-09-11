@@ -4,9 +4,10 @@
 // discretion, which is unhelpful for long context names.
 // Owners: ClusterSelector (sidebar) and LoginPage.
 
-import { computed, onBeforeUnmount, onMounted, ref, useId } from "vue"
+import { computed, ref, useId } from "vue"
 
 import AppIcon from "@/components/ui/AppIcon.vue"
+import { useDismissOnOutside } from "@/composables/useDismissOnOutside"
 import type { ContextItem } from "@/utils/contextItems"
 
 const props = defineProps<{
@@ -96,12 +97,7 @@ function onKeydown(event: KeyboardEvent): void {
   }
 }
 
-function onDocumentPointerDown(event: MouseEvent): void {
-  if (root.value !== null && !root.value.contains(event.target as Node)) close()
-}
-
-onMounted(() => document.addEventListener("mousedown", onDocumentPointerDown))
-onBeforeUnmount(() => document.removeEventListener("mousedown", onDocumentPointerDown))
+useDismissOnOutside(root, close)
 </script>
 
 <template>

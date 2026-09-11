@@ -294,6 +294,34 @@ describe("PodLogsTab search", () => {
     expect(wrapper.text()).not.toContain("1 / 1")
   })
 
+  // During IME composition Enter confirms and Escape cancels the candidate;
+  // neither is meant for the search.
+  it("leaves Enter and Escape alone during IME composition", async () => {
+    const wrapper = await mountWithLines(["error"])
+    await typeQuery(wrapper, "error")
+
+    const enter = keydown({ key: "Enter", isComposing: true })
+    searchField(wrapper).element.dispatchEvent(enter)
+    await nextTick()
+    expect(enter.defaultPrevented).toBe(false)
+    expect(wrapper.text()).not.toContain("1 / 1")
+
+    const esc = keydown({ key: "Escape", isComposing: true })
+    searchField(wrapper).element.dispatchEvent(esc)
+    await nextTick()
+    expect(esc.defaultPrevented).toBe(false)
+    expect((searchField(wrapper).element as HTMLInputElement).value).toBe("error")
+  })
+
+  it("announces the match count through a live region", async () => {
+    const wrapper = await mountWithLines(["error"])
+    const status = wrapper.get("[role=status]")
+    expect(status.attributes("aria-live")).toBe("polite")
+    await typeQuery(wrapper, "error")
+    await searchField(wrapper).trigger("keydown", { key: "Enter" })
+    expect(status.text()).toBe("1 / 1")
+  })
+
   it("intercepts Ctrl/Cmd+F while mounted and focuses the field", async () => {
     const wrapper = await mountWithLines(["error"])
     // By physical key: e.key is "а" on a Russian layout and "F" under
@@ -308,6 +336,10 @@ describe("PodLogsTab search", () => {
     const shifted = keydown({ key: "F", code: "KeyF", ctrlKey: true, shiftKey: true })
     window.dispatchEvent(shifted)
     expect(shifted.defaultPrevented).toBe(false)
+    // Colemak: the physical KeyF types "t", and Ctrl+T is the browser's.
+    const colemak = keydown({ key: "t", code: "KeyF", ctrlKey: true })
+    window.dispatchEvent(colemak)
+    expect(colemak.defaultPrevented).toBe(false)
 
     wrapper.unmount()
     // Gone with the tab: the listener must not outlive the mount.
@@ -328,6 +360,14 @@ describe("PodLogsTab search", () => {
     expect(viewer.props("filter")).toBe(true)
     expect(viewer.props("query")?.source).toBe("error")
     expect(startSpy).not.toHaveBeenCalled()
+  })
+
+  // Previous changes what is shown, and its checkbox now sits behind the gear.
+  it("states on the row that the previous instance's log is shown", async () => {
+    const wrapper = await mountWithLines(["error"])
+    expect(wrapper.text()).not.toContain("previous instance")
+    await (await checkbox(wrapper, "Previous")).setValue(true)
+    expect(wrapper.text()).toContain("previous instance")
   })
 
   it("states that the follow scroll is paused while a match is selected", async () => {

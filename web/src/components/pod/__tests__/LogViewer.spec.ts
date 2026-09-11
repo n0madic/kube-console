@@ -293,6 +293,22 @@ describe("LogViewer search", () => {
 
   // Typing a query changes `matches` without a flush; a followed-but-finished
   // stream must not jump to its end while the user reads higher up.
+  // Toggling the filter moves the selected hit to another row while the follow
+  // scroll is paused for it; nothing else would bring the view back onto it.
+  it("re-centers the active match when the filter is toggled", async () => {
+    const all = Array.from({ length: 100 }, (_, i) => (i === 80 ? "error" : `ok ${i}`))
+
+    async function scrolls(activeMatch: number | null): Promise<number> {
+      const { wrapper, scrollTo } = mountWith({ lines: all, query, matches: [80], activeMatch })
+      scrollTo.mockClear()
+      await wrapper.setProps({ filter: true })
+      await nextTick()
+      return scrollTo.mock.calls.length
+    }
+
+    expect(await scrolls(0)).toBeGreaterThan(await scrolls(null))
+  })
+
   it("does not auto-scroll a followed stream when only the matches change", async () => {
     const all = Array.from({ length: 100 }, (_, i) => `c${i}`)
 

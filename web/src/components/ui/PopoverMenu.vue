@@ -7,10 +7,11 @@
 // drawer handler keys on `defaultPrevented` and would otherwise close the
 // sidebar drawer under it — the same rule `ContextListbox` follows.
 
-import { onBeforeUnmount, onMounted, ref, useId } from "vue"
+import { ref, useId } from "vue"
 
 import AppIcon from "@/components/ui/AppIcon.vue"
 import BaseButton from "@/components/ui/BaseButton.vue"
+import { useDismissOnOutside } from "@/composables/useDismissOnOutside"
 import type { IconName } from "@/utils/icons"
 
 defineProps<{
@@ -40,20 +41,18 @@ function onKeydown(e: KeyboardEvent): void {
   ;(trigger.value?.$el as HTMLElement | undefined)?.focus()
 }
 
-function onDocumentPointerDown(event: MouseEvent): void {
-  if (root.value !== null && !root.value.contains(event.target as Node)) close()
-}
-
-onMounted(() => document.addEventListener("mousedown", onDocumentPointerDown))
-onBeforeUnmount(() => document.removeEventListener("mousedown", onDocumentPointerDown))
+useDismissOnOutside(root, close)
 </script>
 
 <template>
   <div ref="root" class="relative" @keydown="onKeydown">
     <!-- BaseButton, so the trigger matches the buttons it stands beside. -->
+    <!-- haspopup "dialog", not "true" (= menu): the panel holds form controls,
+         not menuitems, and a screen reader announcing "menu button" would
+         expect arrow-key navigation over items that are not there. -->
     <BaseButton
       ref="trigger"
-      aria-haspopup="true"
+      aria-haspopup="dialog"
       :aria-expanded="open"
       :aria-controls="open ? panelId : undefined"
       :title="icon === undefined ? undefined : label"
