@@ -1162,6 +1162,54 @@ capped like the visible one (a hidden tab keeps streaming while its timers are
 throttled), and a finished stream flushes synchronously so `running=false` never
 leaves lines staged.
 
+**Search** is buffer-side, never the DOM's: the list is virtualized, so the
+browser's Ctrl+F sees ~100 rows of a 200k-line buffer. `composables/
+useLogSearch.ts` owns the query (150ms debounce), the ascending `matches`
+(line indices, a **new array** per update), the `active` position and a
+`jumpSeq` counter; the matching itself is the pure `utils/logSearch.ts`
+(case-insensitive substring, compiled to an `i` regex rather than
+`toLowerCase().includes` — Unicode case folding can change the string length
+and shift the highlight offsets). It is **incremental**: `useLogsStream`
+exposes `dropped`, the count of lines trimmed from the head of the visible
+buffer since `start()` (counted in `flush()` only — what `append` trims from
+staging never reached `lines`), so a flush at the cap shifts the cached
+indices by the delta and scans only the appended tail instead of rescanning
+200k lines every 50ms. A new query or a new array identity (a restart) is a
+full rescan that resets `active`. `LogViewer` takes the verdicts as props and
+owns the one thing needing the virtualizer: `scrollToIndex` on `jumpSeq`,
+which is an **event**, not a state read — with one match Enter goes 0 → 0,
+and after scrolling away a second Enter must still re-center it. In filter
+mode the rows *are* the matches; `data-index` stays the virtualizer's item
+index (virtual-core's `measureElement` finds the measured item through it)
+and the line index goes on `data-line`. Highlighting is `segmentLine`: the
+tokens (or one plain piece) cut at the hit boundaries, so the text stays
+byte-identical and it is still no `v-html`; a plain-text `<mark>` carries
+`text-inherit` because the UA stylesheet paints `mark` black. `filtering`
+(checkbox **and** a compiled query) is what the viewer receives, since Filter
+with an empty field would render an empty log. A selected match **pauses the
+follow auto-scroll** (the stream keeps running; the status reads `● streaming
+(scroll paused)`), and Esc clears it — the query being **cleared** is itself
+a source of the follow watch, so a quiet stream goes back to its end at once
+rather than on whatever line arrives next. Only the clearing: refining the
+query after Enter also drops the selection (a full rescan), and re-anchoring on
+that would yank the view away mid-typing, so a `matches`/`activeMatch` change
+alone never scrolls — the next flush resumes the follow. Both scroll watches are **`flush: "post"`**: a scroll is clamped to
+the scroll element's laid-out height, which is the spacer div `totalSize`
+sizes in the render, so the pre-flush watcher the follow used to be scrolled
+before that render and was clamped to the *previous* height — a 500-line tail
+loaded in one flush stayed at the top, measured against a real apiserver
+(pre-existing, fixed with this feature). Enter/Shift+Enter **settle** a pending
+debounce first (`settle()`, with the scan watch `flush: "sync"` so `matches`
+is current for the same call): Enter straight after typing means "search for
+this now", not "walk the previous query's matches". Ctrl/Cmd+F is intercepted on `window`
+by the physical `code === "KeyF"` (`e.key` is `"а"` on a Russian layout and
+`"F"` under CapsLock) and scoped by the tab's mount — it is `v-else-if` in
+`ResourceDetailPage`, so the listener exists only while Logs is open. The
+field's Enter/Shift+Enter/Escape all `preventDefault()`: `AppShell`'s drawer
+handler keys on `defaultPrevented`, so an unprevented Escape would also dismiss
+the sidebar drawer on a narrow viewport. The query survives a stream restart on
+purpose; the composable rescans the new array on its own.
+
 **Wrap** (off by default, render-only — hence deliberately absent from the
 `restart` watch) switches rows to `whitespace-pre-wrap` and measured heights
 (`measureElement`; the ref forwards `null` too, the virtualizer's unobserve
@@ -1334,6 +1382,24 @@ reload. The interval is a **function** returning `false` once the query is in
 error, so the 403 a namespace-scoped token gets (deliberately `retry: false`,
 which is what shows the free-text input) is not reissued every minute for as long
 as the tab stays open.
+
+`components/ui/PopoverMenu.vue` is a `BaseButton` dropping a panel of
+controls below itself, for settings read often but changed rarely: the Logs
+toolbar keeps Timestamps/Previous/Follow/Wrap behind one gear button
+(`icon="cog-6-tooth"`, the label then lives in `title`/`aria-label`) because,
+with the container and tail selects, the reload/download buttons, the status
+and the search group, four checkboxes pushed the row onto a second line at
+ordinary widths. It owns only open/close (trigger toggles; a click outside or
+Escape dismisses, Escape consumed with `preventDefault` and focus returned to
+the trigger — the same drawer rule `ContextListbox` follows). The search
+group's previous/next buttons are the bare `RevealButton` shape rather than
+`BaseButton` — they belong to the field, not to the toolbar's button row —
+and the search field is `flex-1`
+between a min and a max width inside a `basis-[17rem]` group, so a narrower
+row squeezes the field before it wraps the group. The field paints its own
+focus border (`focus:border-blue-500 focus:outline-none`, like the login
+page): the UA focus ring of a `search` input is a double ring that reads as a
+rendering glitch on the dark theme.
 
 Shared value UX in `components/ui/`: `RevealButton.vue` (eye toggle) and
 `ExpandableValue.vue` (truncate/expand), used by SecretDataPanel,

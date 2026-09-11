@@ -125,6 +125,37 @@ describe("useLogsStream", () => {
     expect(stream.lines.value).toEqual(["short"])
   })
 
+  // `dropped` is what lets a consumer keep line indices across a head trim
+  // (shift by the delta) instead of rescanning the buffer on every flush. It
+  // counts only lines that were on screen and then trimmed: staging drops in
+  // append() never reached the visible buffer, so they are not counted.
+  it("counts lines trimmed from the head of the visible buffer", async () => {
+    const feed = manualResponse()
+    mockedFetch.mockResolvedValue(feed.resp)
+    const stream = useInHost()
+    const done = stream.start("/url")
+    expect(stream.dropped.value).toBe(0)
+
+    const first = MAX_LINES - 10
+    feed.push(joinedLines("line-", 0, first))
+    await nextFlush(stream.linesVersion)
+    expect(stream.dropped.value).toBe(0)
+
+    feed.push(joinedLines("line-", first, 25))
+    await nextFlush(stream.linesVersion)
+    expect(stream.lines.value).toHaveLength(MAX_LINES)
+    expect(stream.dropped.value).toBe(15)
+    expect(stream.lines.value[0]).toBe("line-15")
+
+    feed.close()
+    await done
+
+    // A restart starts a fresh buffer, so the count starts over with it.
+    mockedFetch.mockResolvedValue(streamResponse(["x\n"]))
+    await stream.start("/url")
+    expect(stream.dropped.value).toBe(0)
+  }, 15000)
+
   it("batches chunks into one buffer update but shows everything when done", async () => {
     const chunks = Array.from({ length: 50 }, (_, i) => `line-${i}\n`)
     mockedFetch.mockResolvedValue(streamResponse(chunks))

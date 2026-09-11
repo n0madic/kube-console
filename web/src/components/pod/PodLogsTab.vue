@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue"
+import { computed, onMounted, onUnmounted, ref, watch } from "vue"
 
 import { apiFetch, messageFromError } from "@/api/http"
 import { logsUrl } from "@/api/k8s"
@@ -7,6 +7,8 @@ import type { K8sObject } from "@/api/types"
 import AppIcon from "@/components/ui/AppIcon.vue"
 import BaseButton from "@/components/ui/BaseButton.vue"
 import BaseSelect from "@/components/ui/BaseSelect.vue"
+import PopoverMenu from "@/components/ui/PopoverMenu.vue"
+import { useLogSearch } from "@/composables/useLogSearch"
 import { MAX_LINES, useLogsStream } from "@/composables/useLogsStream"
 import { saveBlob } from "@/utils/download"
 import { defaultContainerName } from "@/utils/podHelpers"
@@ -27,6 +29,61 @@ const follow = ref(true)
 const wrap = ref(false)
 
 const stream = useLogsStream()
+
+// The previous/next match buttons: the bare shape RevealButton uses rather
+// than BaseButton's padded one — they belong to the search field, not to the
+// toolbar's button row, and the padded shape read as two more toolbar buttons.
+const ICON_BUTTON_CLASS =
+  "rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-800 " +
+  "disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent " +
+  "dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+
+// Searches the buffer, not the DOM: the viewer is virtualized, so the
+// browser's Find sees a sliver of the log. The query deliberately survives a
+// restart — the composable rescans on its own when the array is replaced.
+const search = useLogSearch(stream.lines, stream.linesVersion, stream.dropped)
+const searchField = ref<HTMLInputElement | null>(null)
+
+const matchCount = computed(() => search.matches.value.length)
+const matchSummary = computed(() => {
+  if (search.compiled.value === null) return ""
+  const n = matchCount.value
+  if (n === 0) return "No matches"
+  const at = search.active.value
+  if (at !== null) return `${at + 1} / ${n}`
+  return n === 1 ? "1 match" : `${n} matches`
+})
+
+// All three prevent the default — Escape in particular: AppShell's drawer
+// handler and the pickers key on defaultPrevented, and an unprevented Escape
+// from here would also dismiss the sidebar drawer on a narrow viewport.
+function onSearchKeydown(e: KeyboardEvent): void {
+  switch (e.key) {
+    case "Enter":
+      e.preventDefault()
+      if (e.shiftKey) search.prev()
+      else search.next()
+      break
+    case "Escape":
+      e.preventDefault()
+      search.clear()
+      break
+  }
+}
+
+// Ctrl/Cmd+F goes to the field while this tab is mounted — it is v-else-if'd in
+// ResourceDetailPage, so the listener exists only while Logs is open. Matched
+// on the physical key like the browser's own Find: `e.key` is "а" on a
+// Russian layout and "F" under CapsLock.
+function onWindowKeydown(e: KeyboardEvent): void {
+  if (e.defaultPrevented || !(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) return
+  if (e.code !== "KeyF") return
+  e.preventDefault()
+  searchField.value?.focus()
+  searchField.value?.select()
+}
+onMounted(() => window.addEventListener("keydown", onWindowKeydown))
+onUnmounted(() => window.removeEventListener("keydown", onWindowKeydown))
 
 function currentUrl(): string | null {
   const meta = props.object.metadata
@@ -123,7 +180,7 @@ watch([container, tailLines, timestamps, previous, follow], () => {
 
 <template>
   <div class="flex h-full min-h-0 flex-col gap-2">
-    <div class="flex flex-wrap items-center gap-3 text-sm">
+    <div class="flex flex-wrap items-center gap-2 text-sm">
       <ContainerSelect v-model="container" :object="object" />
       <label class="flex items-center gap-1.5">
         <span class="text-slate-500 dark:text-slate-400">Tail</span>
@@ -135,18 +192,24 @@ watch([container, tailLines, timestamps, previous, follow], () => {
           <option value="all">All</option>
         </BaseSelect>
       </label>
-      <label class="flex items-center gap-1.5">
-        <input v-model="timestamps" type="checkbox" /> Timestamps
-      </label>
-      <label class="flex items-center gap-1.5">
-        <input v-model="previous" type="checkbox" /> Previous
-      </label>
-      <label class="flex items-center gap-1.5">
-        <input v-model="follow" type="checkbox" /> Follow
-      </label>
-      <label class="flex items-center gap-1.5">
-        <input v-model="wrap" type="checkbox" /> Wrap
-      </label>
+      <!-- Set once, then left alone for the life of the tab: they sit behind
+           one button rather than taking four slots of a row that also has to
+           hold the search. Follow's state stays visible through the streaming
+           indicator. -->
+      <PopoverMenu label="Log options" icon="cog-6-tooth">
+        <label class="flex items-center gap-1.5">
+          <input v-model="timestamps" type="checkbox" /> Timestamps
+        </label>
+        <label class="flex items-center gap-1.5">
+          <input v-model="previous" type="checkbox" /> Previous
+        </label>
+        <label class="flex items-center gap-1.5">
+          <input v-model="follow" type="checkbox" /> Follow
+        </label>
+        <label class="flex items-center gap-1.5">
+          <input v-model="wrap" type="checkbox" /> Wrap
+        </label>
+      </PopoverMenu>
       <!-- Icon-only: the label lives in title/aria-label. -->
       <BaseButton title="Reload logs" aria-label="Reload logs" @click="restart">
         <AppIcon name="arrow-path" class="h-4 w-4" />
@@ -171,9 +234,58 @@ watch([container, tailLines, timestamps, previous, follow], () => {
       >
         ● reconnecting…
       </span>
+      <!-- A selected match pauses the follow scroll (the stream keeps running),
+           and a paused follow must be stated rather than look frozen. -->
       <span v-else-if="stream.running.value" class="text-xs text-green-600 dark:text-green-400">
-        ● streaming
+        ● streaming{{ search.active.value !== null ? " (scroll paused)" : "" }}
       </span>
+      <!-- The search group takes whatever the options leave and gives it to
+           the field (flex-1 between its min and max widths), so a narrower
+           row squeezes the field before it wraps the group; the basis is the
+           width at which wrapping is preferable to a field too small to read.
+           The field paints its own focus border like the login page: the UA
+           focus ring of a `search` input is a double ring that reads as a
+           rendering glitch on the dark theme. -->
+      <div class="ml-auto flex min-w-0 flex-1 basis-[17rem] items-center justify-end gap-1.5">
+        <input
+          ref="searchField"
+          v-model="search.query.value"
+          type="search"
+          aria-label="Search log"
+          placeholder="Search…"
+          class="min-w-[5rem] max-w-36 flex-1 rounded-md border border-slate-300 bg-white px-2 py-1 text-sm focus:border-blue-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+          @keydown="onSearchKeydown"
+        />
+        <span
+          v-if="matchSummary !== ''"
+          class="whitespace-nowrap text-xs tabular-nums text-slate-500 dark:text-slate-400"
+        >
+          {{ matchSummary }}
+        </span>
+        <button
+          type="button"
+          :class="ICON_BUTTON_CLASS"
+          :disabled="matchCount === 0"
+          title="Previous match"
+          aria-label="Previous match"
+          @click="search.prev"
+        >
+          <AppIcon name="chevron-up" class="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          :class="ICON_BUTTON_CLASS"
+          :disabled="matchCount === 0"
+          title="Next match"
+          aria-label="Next match"
+          @click="search.next"
+        >
+          <AppIcon name="chevron-down" class="h-4 w-4" />
+        </button>
+        <label class="flex items-center gap-1.5 whitespace-nowrap">
+          <input v-model="search.filter.value" type="checkbox" /> Filter
+        </label>
+      </div>
     </div>
 
     <p
@@ -209,6 +321,11 @@ watch([container, tailLines, timestamps, previous, follow], () => {
         :version="stream.linesVersion.value"
         :follow="follow"
         :wrap="wrap"
+        :query="search.compiled.value"
+        :matches="search.matches.value"
+        :filter="search.filtering.value"
+        :active-match="search.active.value"
+        :jump-seq="search.jumpSeq.value"
       />
     </div>
   </div>

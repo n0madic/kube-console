@@ -80,6 +80,12 @@ export function useLogsStream() {
   // Set once the head of the log had to be dropped. With "All" the user is
   // explicitly asking for the beginning, so trimming it silently would lie.
   const truncated = ref(false)
+  // Lines removed from the head of `lines` since the last start(). Consumers
+  // holding line indices (search hits) shift them by the delta instead of
+  // rescanning the whole buffer on every flush once it sits at the cap. Only
+  // trims of the visible buffer count: what `append` trims from staging never
+  // reached `lines`.
+  const dropped = ref(0)
 
   let controller: AbortController | null = null
   // Monotonic id of the current stream. Every start()/stop() bumps it, so a
@@ -131,7 +137,9 @@ export function useLogsStream() {
     // far past the engine's argument limit.
     for (const line of pending) buffer.push(line)
     pending = []
+    const before = buffer.length
     trim(buffer)
+    dropped.value += before - buffer.length
     linesVersion.value++
   }
 
@@ -155,6 +163,7 @@ export function useLogsStream() {
   // the previous pod's lines on screen until the next flush bumped it.
   function reset(): void {
     lines.value = []
+    dropped.value = 0
     linesVersion.value++
   }
 
@@ -283,5 +292,5 @@ export function useLogsStream() {
 
   onBeforeUnmount(stop)
 
-  return { lines, linesVersion, running, error, reconnecting, truncated, start, stop }
+  return { lines, linesVersion, dropped, running, error, reconnecting, truncated, start, stop }
 }

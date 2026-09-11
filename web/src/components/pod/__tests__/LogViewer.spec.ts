@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import { nextTick } from "vue"
 
 import LogViewer from "@/components/pod/LogViewer.vue"
+import { compileQuery } from "@/utils/logSearch"
 
 // Give the virtualizer a real viewport in jsdom. getBoundingClientRect covers
 // the initial mount; virtual-core measures the attached scroll element with
@@ -152,6 +153,30 @@ describe("LogViewer", () => {
     expect(texts).toEqual(["b2", "b3", "b4"])
   })
 
+  // A scroll is clamped to the scroll element's laid-out height, which is the
+  // spacer div sized by the virtualizer in the render. A pre-flush watcher
+  // scrolled before that render, so the request was clamped to the previous
+  // height: a 500-line tail loaded in one flush stayed at the top (measured
+  // against a real apiserver). The spy captures the spacer height at the
+  // moment of each scroll, which is what jsdom can observe of the ordering.
+  it("scrolls only after the spacer has grown to the new line count", async () => {
+    const live = Array.from({ length: 100 }, (_, i) => `d${i}`)
+    const wrapper = mount(LogViewer, { props: { lines: live, version: 0, follow: true } })
+    const heights: string[] = []
+    ;(wrapper.element as HTMLElement).scrollTo = (() => {
+      heights.push((wrapper.element.firstElementChild as HTMLElement).style.height)
+    }) as unknown as HTMLElement["scrollTo"]
+
+    for (let i = 100; i < 150; i++) live.push(`d${i}`)
+    await wrapper.setProps({ version: 1 })
+    await nextTick()
+
+    // The virtualizer scrolls on its own as well (see the follow tests); the
+    // follow scroll is the last one, and it must see the grown spacer.
+    expect(heights.length).toBeGreaterThan(0)
+    expect(heights.at(-1)).toBe("3000px")
+  })
+
   it("follows an in-place append", async () => {
     const first = Array.from({ length: 100 }, (_, i) => `c${i}`)
 
@@ -170,5 +195,172 @@ describe("LogViewer", () => {
     expect(await scrollsAfterInPlaceAppend(true)).toBeGreaterThan(
       await scrollsAfterInPlaceAppend(false),
     )
+  })
+})
+
+describe("LogViewer search", () => {
+  const query = compileQuery("err")!
+
+  function mountWith(props: Record<string, unknown>) {
+    const wrapper = mount(LogViewer, {
+      props: { lines, version: 0, follow: false, ...props },
+    })
+    const scrollTo = vi.fn()
+    ;(wrapper.element as HTMLElement).scrollTo = scrollTo as unknown as HTMLElement["scrollTo"]
+    return { wrapper, scrollTo }
+  }
+
+  it("marks hits without changing the rendered text", () => {
+    const plain = "an ERROR and an error"
+    const { wrapper } = mountWith({ lines: [plain], query, matches: [0] })
+    const row = wrapper.get("[data-index='0']")
+    const marks = row.findAll("mark")
+    expect(marks.map((m) => m.text())).toEqual(["ERR", "err"])
+    expect(row.text()).toBe(plain)
+    // A plain-text mark must not take the UA stylesheet's black text.
+    expect(marks[0]?.classes()).toContain("text-inherit")
+  })
+
+  it("marks hits inside a JSON row and keeps the token color", () => {
+    const json = '{"level":"error","msg":"boom"}'
+    const { wrapper } = mountWith({ lines: [json], query, matches: [0] })
+    const row = wrapper.get("[data-index='0']")
+    const mark = row.get("mark")
+    expect(mark.text()).toBe("err")
+    expect(mark.classes()).toContain("text-red-400")
+    expect(row.text()).toBe(json)
+    // The rest of the token is still colored.
+    expect(row.findAll("span").some((s) => s.classes().includes("text-red-400"))).toBe(true)
+  })
+
+  it("renders no marks without a query", () => {
+    const { wrapper } = mountWith({ lines: ["error"], query: null, matches: [] })
+    expect(wrapper.findAll("mark")).toHaveLength(0)
+    expect(wrapper.get("[data-index='0']").findAll("span")).toHaveLength(0)
+  })
+
+  it("renders only matching lines in filter mode, keyed as the virtualizer expects", () => {
+    const all = ["ok 0", "error 1", "ok 2", "error 3", "error 4"]
+    const { wrapper } = mountWith({ lines: all, query, matches: [1, 3, 4], filter: true })
+    const rows = wrapper.findAll("[data-index]")
+    // data-index is the virtualizer's item index (measureElement reads it);
+    // data-line is the position in the buffer.
+    expect(rows.map((r) => r.attributes("data-index"))).toEqual(["0", "1", "2"])
+    expect(rows.map((r) => r.attributes("data-line"))).toEqual(["1", "3", "4"])
+    expect(rows.map((r) => r.text())).toEqual(["error 1", "error 3", "error 4"])
+  })
+
+  it("highlights the active match row", () => {
+    const all = ["error 0", "error 1"]
+    const { wrapper } = mountWith({ lines: all, query, matches: [0, 1], activeMatch: 1 })
+    expect(wrapper.get("[data-line='1']").classes()).toContain("bg-sky-900/60")
+    expect(wrapper.get("[data-line='0']").classes()).not.toContain("bg-sky-900/60")
+  })
+
+  it("scrolls to the active match on every jump, even to the same one", async () => {
+    const all = Array.from({ length: 100 }, (_, i) => (i === 80 ? "error" : `ok ${i}`))
+    const { wrapper, scrollTo } = mountWith({ lines: all, query, matches: [80], activeMatch: 0, jumpSeq: 0 })
+    scrollTo.mockClear()
+
+    // Relative counts: virtual-core may scroll more than once per request
+    // (it re-adjusts after measuring), so what is asserted is that each bump
+    // produced a scroll, not how many calls one scroll takes.
+    await wrapper.setProps({ jumpSeq: 1 })
+    await nextTick()
+    const afterFirst = scrollTo.mock.calls.length
+    expect(afterFirst).toBeGreaterThan(0)
+
+    await wrapper.setProps({ jumpSeq: 2 })
+    await nextTick()
+    expect(scrollTo.mock.calls.length).toBeGreaterThan(afterFirst)
+  })
+
+  it("scrolls to the visible row of the active match in filter mode", async () => {
+    const all = Array.from({ length: 100 }, (_, i) => (i % 10 === 0 ? "error" : `ok ${i}`))
+    const matches = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90]
+    const { wrapper, scrollTo } = mountWith({ lines: all, query, matches, filter: true, activeMatch: 9, jumpSeq: 0 })
+    scrollTo.mockClear()
+    await wrapper.setProps({ jumpSeq: 1 })
+    await nextTick()
+    // Ten visible rows fit in the viewport, so the scroll target is near 0 for
+    // the filtered list, whereas line 90 unfiltered sits well below the fold.
+    expect(scrollTo.mock.calls.length).toBeGreaterThan(0)
+    for (const call of scrollTo.mock.calls) {
+      const top = (call[0] as { top?: number } | undefined)?.top ?? 0
+      expect(top).toBeLessThan(100)
+    }
+  })
+
+  // Typing a query changes `matches` without a flush; a followed-but-finished
+  // stream must not jump to its end while the user reads higher up.
+  it("does not auto-scroll a followed stream when only the matches change", async () => {
+    const all = Array.from({ length: 100 }, (_, i) => `c${i}`)
+
+    // Relative, like the follow tests above: the virtualizer scrolls on its
+    // own either way, and only the follow watcher would add to that.
+    async function scrolls(follow: boolean): Promise<number> {
+      const { wrapper, scrollTo } = mountWith({ lines: all, follow, query: null, matches: [] })
+      scrollTo.mockClear()
+      await wrapper.setProps({ query: compileQuery("c1")!, matches: [1, 10, 11] })
+      await nextTick()
+      return scrollTo.mock.calls.length
+    }
+
+    expect(await scrolls(true)).toBe(await scrolls(false))
+  })
+
+  // Esc ends the pause; on a quiet stream nothing else would re-anchor the
+  // view until the next line arrived.
+  it("returns a followed stream to its end when the query is cleared", async () => {
+    const all = Array.from({ length: 100 }, (_, i) => (i === 1 ? "error" : `c${i}`))
+
+    async function scrolls(follow: boolean): Promise<number> {
+      const { wrapper, scrollTo } = mountWith({ lines: all, follow, query, matches: [1], activeMatch: 0 })
+      scrollTo.mockClear()
+      await wrapper.setProps({ query: null, matches: [], activeMatch: null })
+      await nextTick()
+      return scrollTo.mock.calls.length
+    }
+
+    expect(await scrolls(true)).toBeGreaterThan(await scrolls(false))
+  })
+
+  // Refining the query after Enter also drops the selection (a full rescan),
+  // but that is mid-typing, not a resume: the view must stay where it is.
+  it("does not re-anchor when a refined query drops the selection", async () => {
+    const all = Array.from({ length: 100 }, (_, i) => (i === 1 ? "error" : `c${i}`))
+
+    async function scrolls(follow: boolean): Promise<number> {
+      const { wrapper, scrollTo } = mountWith({ lines: all, follow, query, matches: [1], activeMatch: 0 })
+      scrollTo.mockClear()
+      await wrapper.setProps({ query: compileQuery("erro")!, matches: [1], activeMatch: null })
+      await nextTick()
+      return scrollTo.mock.calls.length
+    }
+
+    expect(await scrolls(true)).toBe(await scrolls(false))
+  })
+
+  it("does not auto-scroll a followed stream while a match is active", async () => {
+    const first = Array.from({ length: 100 }, (_, i) => `c${i}`)
+
+    async function scrolls(activeMatch: number | null): Promise<number> {
+      const live = [...first]
+      const { wrapper, scrollTo } = mountWith({
+        lines: live,
+        follow: true,
+        query: compileQuery("c1")!,
+        matches: [1],
+        activeMatch,
+      })
+      scrollTo.mockClear()
+      live.push("c100")
+      await wrapper.setProps({ version: 1 })
+      await nextTick()
+      expect(rowTexts(wrapper).length).toBeGreaterThan(0)
+      return scrollTo.mock.calls.length
+    }
+
+    expect(await scrolls(null)).toBeGreaterThan(await scrolls(0))
   })
 })

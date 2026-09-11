@@ -43,8 +43,9 @@ authorization model of its own.
 - **Pods**: environment variables resolved from `valueFrom`/`envFrom`
   references, live log streaming (follow mode reconnecting by itself when the
   connection is dropped by an idle timeout, tail from 100 lines up to the
-  whole log, download to a file, optional line wrapping, and automatic syntax
-  coloring of JSON-lines output), a CPU/memory chart, and a
+  whole log, search and filter within the loaded log — Ctrl/Cmd+F, Enter to
+  jump between hits — download to a file, optional line wrapping, and
+  automatic syntax coloring of JSON-lines output), a CPU/memory chart, and a
   browser terminal for `exec` whose session lives as long as the pod page is
   open — switching to another tab only hides it.
 - **Nodes**: CPU/memory charts and Cordon/Uncordon.
