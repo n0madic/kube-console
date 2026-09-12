@@ -138,7 +138,7 @@ export interface ContextsResponse {
   // Operator-set display label for the page title (--cluster-name), absent
   // unless configured. Server-global: it applies to every context.
   clusterName?: string
-  // The backend build serving this SPA: a git tag (`v0.1.1`) for a release, a
+  // The backend build serving this SPA: a git tag for a release, a
   // short commit (`f72a678`) for a branch build. Server-global like
   // clusterName, and optional so an older backend simply renders nothing.
   version?: string

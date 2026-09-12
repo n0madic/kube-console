@@ -20,11 +20,11 @@ function mountVersion(data: Partial<ContextsResponse> | undefined) {
 
 describe("AppVersion", () => {
   it("shows a release tag", () => {
-    const wrapper = mountVersion({ version: "v0.1.1" })
+    const wrapper = mountVersion({ version: "v0.1.2" })
 
-    expect(wrapper.text()).toContain("v0.1.1")
+    expect(wrapper.text()).toContain("v0.1.2")
     // Truncated in a 16rem sidebar, so the whole string stays reachable.
-    expect(wrapper.get("[title]").attributes("title")).toBe("v0.1.1")
+    expect(wrapper.get("[title]").attributes("title")).toBe("v0.1.2")
   })
 
   // A build off a branch is identified by its commit, not by the last tag that

@@ -168,7 +168,7 @@ Install the Helm chart straight from the registry — no clone, no flags:
 
 ```bash
 helm install kube-console oci://ghcr.io/n0madic/charts/kube-console \
-  --version 0.1.1 --namespace kube-console --create-namespace
+  --version 0.1.2 --namespace kube-console --create-namespace
 ```
 
 Chart and image carry the **same** version: a `vX.Y.Z` tag publishes the chart
@@ -191,7 +191,7 @@ Chart versions are kept forever as well.
 To build the image yourself:
 
 ```bash
-docker build -t ghcr.io/n0madic/kube-console:0.1.1 .
+docker build -t ghcr.io/n0madic/kube-console:0.1.2 .
 ```
 
 Both build stages run on the host architecture and cross-compile, so
@@ -257,7 +257,7 @@ switcher right below it, which is hidden when there is only one.
 
 ### Which build am I running?
 
-The version is the git tag when the build sits exactly on one (`v0.1.1`), and
+The version is the git tag when the build sits exactly on one (`v0.1.2`), and
 the short commit otherwise (`f72a678`) — a build is either a release or a point
 on a branch, and nothing in between needs a name. A locally built binary marks
 an uncommitted tree with `-dirty`. It shows in four places:
