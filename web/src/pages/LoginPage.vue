@@ -156,7 +156,7 @@ async function submit(): Promise<void> {
         autocomplete="off"
         spellcheck="false"
         placeholder="eyJhbGciOi..."
-        class="mb-4 w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-sm focus:border-blue-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800"
+        class="mb-4 w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-sm dark:border-slate-600 dark:bg-slate-800"
       />
 
       <p v-if="error !== null" class="mb-4 rounded-md bg-red-50 px-3 py-2 text-sm text-red-800 dark:bg-red-950 dark:text-red-200">

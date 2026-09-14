@@ -8,3 +8,20 @@
 :root {
   color-scheme: light dark;
 }
+
+/* Form controls paint their own focus: the UA focus ring — a thick blue
+   outline, doubled on `search` inputs, drawn by Chrome on a plain click for
+   selects and text fields — reads as a rendering glitch on the dark theme,
+   and it crept back on every new control that forgot its `focus:` utilities.
+   So the rule lives here, once, and deliberately *outside* Tailwind's layers:
+   an unlayered declaration wins over every layer, which is what lets it beat
+   the `dark:border-slate-600` utility the controls carry — inside `@layer
+   base` it would lose to that and leave the dark theme with no focus mark at
+   all. Checkboxes and radios keep the UA ring: it is their only indicator and
+   shows on keyboard focus only. Buttons never draw one on a click. */
+input:where(:not([type="checkbox"], [type="radio"])):focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--color-blue-500);
+}

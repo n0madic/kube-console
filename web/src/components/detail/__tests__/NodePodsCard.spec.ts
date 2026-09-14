@@ -42,7 +42,9 @@ function mountFor(object: K8sObject) {
 const node: K8sObject = { apiVersion: "v1", kind: "Node", metadata: { name: "node-1", uid: "u1" } }
 
 describe("NodePodsCard", () => {
-  beforeEach(() => mockedTable.mockReset())
+  beforeEach(() => {
+    mockedTable.mockReset()
+  })
 
   it("queries pods on the node via the spec.nodeName field selector", async () => {
     mockedTable.mockResolvedValue({ table: podTable, truncated: false })

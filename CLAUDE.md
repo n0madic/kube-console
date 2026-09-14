@@ -938,7 +938,12 @@ CronJob run `POST`s a Job (`createObject`).
 ### Detail pages
 
 Generic tabs (Overview/YAML) + a kind registry in `ResourceDetailPage.vue`
-adding Pod (Env/Logs/Metrics/Terminal) and Node (Metrics) tabs. Every tab is
+adding Pod (Env/Logs/Metrics/Terminal) and Node (Metrics) tabs, plus a
+**Logs** tab on every pod owner — Deployment, ReplicaSet, StatefulSet,
+DaemonSet, Job, Service (`POD_OWNERS` in `utils/ownedPods.ts`, keyed
+`<apiVersion>/<Kind>` like the action registry; no CronJob, whose many Jobs
+each have their own tab, and no Node) — shown only while the object resolves
+to **≥1 pod**: no tab means nothing to stream. Every tab is
 `v-if`-swapped — **except Terminal and YAML**, which each own something a
 remount would destroy: a live exec session (and a shell running in the pod),
 and an unsaved edit. Both sit outside that chain, mount on first use, are then
@@ -951,6 +956,50 @@ session, dropping the draft). The terminal's old key was namespace/name, which
 and refits + refocuses xterm on the way back — `TerminalView.fitNow()` is a
 no-op while the host has zero size, because under `display:none` FitAddon reads
 the declared "100%" as pixels and would push a ~2x5 resize upstream.
+
+The workload Logs tab is `WorkloadLogsTab.vue`: `PodLogsTab` unchanged, with
+a `WorkloadPodSelect` (a `BaseSelect`, `ContainerSelect`'s rules: one pod
+locks it with a title rather than hiding it; a truncated scan appends the
+disabled `__truncated__` marker as `NamespaceSelector` does; **width-capped
+and ellipsized** at `max-w-[14rem]` with the full `name · Status` in its
+`title` — plus the lock reason when locked, since the select is what the
+pointer lands on, not the caption — because a native select is as wide as
+its longest option and `<name>-<hash>-<id> · CrashLoopBackOff` at ~330px
+pushed the log toolbar's search group onto a second line at ordinary laptop
+widths) rendered into its
+new `leading` slot ahead of the Container picker. The pods come from the
+page's **one** resolution, `useOwnedPods` (`api/ownedPods.ts` does the walk:
+one ownerReferences hop, two through ReplicaSets for a Deployment, a Service's
+`spec.selector` with ownership ignored), which the page also `provide`s to
+`RelatedResourcesCard` under `OWNED_PODS_KEY` — the first provide/inject in
+the repo, because the card sits under the Overview tab and the alternative
+was a second cluster walk (two, for a Deployment) per page load. There is no
+pod watch and no log merging: the list is recomputed only when the page hands
+over a new object (Refresh, apply, action). The pick is by **name** — kept
+when the pod is still listed, else the default, newest Running then newest
+(`defaultPodName`) — and the picked pod is fetched in full (`getObject`; Table
+rows carry metadata only, and `ContainerSelect` needs the spec) on every
+list change, kept name included: a StatefulSet pod keeps its name across a
+recreation and `PodLogsTab` restarts on the **uid**, so the re-GET is what
+makes the new instance stream. A failed GET keeps the previous pod mounted
+with the error beside it (the `loadedKey` rule again — a 404 on a deleted pod
+must not unmount the stream being read). Two consequences to keep in mind:
+the tab is `v-else-if`-swapped, so Overview→Logs→Overview→Logs remounts it and
+the pick falls back to the default (accepted, as `PodLogsTab` restarts on a
+remount); and `useOwnedPods` **keeps the previous result across a same-uid
+refresh** (during the load and on failure) precisely because the page's
+`watch(tabs)` bounces to Overview the moment the active tab id disappears —
+a Refresh click on the Logs tab would otherwise throw the user out. A
+different uid, or no object, clears it at once, and a scale-to-zero that
+leaves no pod removes the tab on the next refresh, by spec. The page reads
+that rule through **one** computed (`ownedPods`: the result when it holds ≥1
+pod, else `null`) for both the tab list and the template — two predicates on
+the raw result agreed only by luck of flush order. The accepted cost of an
+owner-kind page is that the walk runs on **every** `detail.refresh()`, tab
+regardless: an Apply from the YAML tab of a Deployment is two collection
+walks the card alone never paid while Overview was not mounted. Resolving
+lazily by visible tab would need the tab's existence to stop depending on the
+result, which is the owner's "no tab means nothing to stream" rule.
 
 Its Command field is `components/ui/EditableCombobox.vue` — **one** editable
 input with a popup of suggestions, never an `<input list>` (a datalist filters
@@ -1251,16 +1300,26 @@ resources render as compact tables via the **Table API** (`listAllAsTable` walks
 continue tokens; `utils/miniTable.ts` `tableToMini` keeps the server's
 priority-0 columns — universal, no per-kind field hardcoding — and drops the
 Name column into a link; `ResourceMiniTable.vue` renders with list-page status
-coloring). `RelatedResourcesCard.vue`: owner children (narrowed by the parent's
-`spec.selector` server-side, then filtered by `ownerReferences.uid`
-client-side), Service→Pods, and Ingress→Backend Services as a link list (names
-from the spec, objects not fetched). A Deployment also lists its Pods
-(grandchildren) by collecting owned ReplicaSet uids from the first hop and
-matching pods against that set, so a foreign overlapping selector is excluded.
-`NodePodsCard.vue` (Node Overview) uses the `spec.nodeName` field selector
-cluster-wide → needs cluster list-pods RBAC. Both cards guard stale overlapping
-loads with a request-id and surface `truncated` when the bounded scan caps
-out.
+coloring). `RelatedResourcesCard.vue`: the pod-owner groups — ReplicaSet/StatefulSet/
+DaemonSet/Job→Pods (narrowed by the parent's `spec.selector` server-side, then
+filtered by `ownerReferences.uid` client-side), Deployment→ReplicaSets plus
+its Pods (grandchildren: the owned ReplicaSet uids from the first hop matched
+against the pods, so a foreign overlapping selector is excluded) and
+Service→Pods — arrive **injected** from the page's `useOwnedPods`
+(`OWNED_PODS_KEY`; the walk and its stale-response guard live in
+`api/ownedPods.ts`/`useOwnedPods`), so the card no longer re-reads the cluster
+on every mount of the Overview: its tables are as fresh as the object the page
+last handed over. No provider means no owner groups, never a fallback walk of
+its own. What the card still loads itself is CronJob→Jobs (a bounded full
+walk, no selector guarantee — a direct branch, since the owner registry it
+used to be one entry of now lives in `utils/ownedPods.ts`, where the next
+pod owner belongs) and Ingress→Backend Services as a link list (names from
+the spec, objects not fetched); `ownedBy` is shared from `utils/ownedPods.ts`,
+so the card and the walk cannot disagree on what "owned" means; own and
+injected loading/error are merged, `Loading...` winning over stale tables. `NodePodsCard.vue` (Node
+Overview) uses the `spec.nodeName` field selector cluster-wide → needs cluster
+list-pods RBAC. Both cards guard stale overlapping loads with a request-id
+and surface `truncated` when the bounded scan caps out.
 
 They — and `EventsCard` — reload on the **object's identity** (`watch(() =>
 props.object)`), not on `metadata.uid`: the detail object has no watch stream
@@ -1356,6 +1415,20 @@ order — would win) and is always `aria-hidden`, so every icon-only control
 carries its own `title`/`aria-label` (Reload/Download in `PodLogsTab`,
 `RevealButton`, `ThemeToggle`). `GaugeCard`'s SVG is a chart, not an icon, and
 stays inline.
+
+**Form controls never show the UA focus ring.** One unlayered rule in
+`web/src/style.css` — `input:where(:not([type="checkbox"], [type="radio"]))
+:focus, select:focus, textarea:focus { outline: none; border-color: blue-500 }`
+— paints the focus as a border-color change on every text field, select and
+textarea. It sits *outside* Tailwind's `@layer`s on purpose: an unlayered
+declaration wins over every layer, which is what lets it beat the
+`dark:border-slate-600` utility the controls carry; inside `@layer base` it
+would lose to that and the dark theme would show no focus at all. Do not put
+`focus:border-blue-500 focus:outline-none` on individual controls (that is
+the per-element rule that kept being forgotten — Chrome draws the thick ring
+on a plain click for selects and text fields, and it came back on every new
+`<select>`/`<input>`), and do not "fix" a new control's ring locally: if it
+shows one, the global rule is what is broken.
 
 Every `<select>` in the app is `components/ui/BaseSelect.vue` (generic over the
 model type — callers bind strings, numbers and `"all" | number`): a native
@@ -1838,6 +1911,18 @@ only ever ages pods *out*, so no answer must not mean "hide".
   `--use-kubeconfig-credentials` run, say) otherwise fails the whole package on
   `validate`, with messages about a test's own setup that it never made. By
   prefix, not by a list, so a new setting cannot bring it back.
+- Frontend hook callbacks take a **block body** — `beforeEach(() => {
+  mock.mockReset() })`, never `beforeEach(() => mock.mockReset())`: vitest 4
+  invokes a function returned from a hook as that test's cleanup, and a mock
+  *is* a function, so the one-liner called the mocked API once more after
+  every test. Invisible while the mock resolved, a spurious "unhandled
+  rejection" failure the day a test made it reject. Block bodies everywhere,
+  not just where the callee returns something today.
+- `src/__tests__/focusStyles.spec.ts` pins the focus rule above: no `.vue`
+  may carry `focus:border-*`/`focus:outline-*`. It does not assert on
+  `style.css` itself — vitest hands every `.css` import, `?raw` included, to
+  its own CSS handling, which yields `""`, and the tsconfig has no node types
+  to read it off disk.
 - Frontend: vitest + jsdom. `web/src/test/setup.ts` polyfills localStorage/
   sessionStorage (Node ≥22 shadows jsdom's), ResizeObserver (needed by
   @tanstack/vue-virtual) and matchMedia (uPlot calls it at import time, so any

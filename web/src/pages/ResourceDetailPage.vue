@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue"
+import { computed, onMounted, provide, ref, watch } from "vue"
 import { useRouter } from "vue-router"
 
 import type { ResourceRef } from "@/api/types"
@@ -12,8 +12,10 @@ import PodEnvTab from "@/components/pod/PodEnvTab.vue"
 import PodLogsTab from "@/components/pod/PodLogsTab.vue"
 import PodMetricsTab from "@/components/pod/PodMetricsTab.vue"
 import PodTerminalTab from "@/components/pod/PodTerminalTab.vue"
+import WorkloadLogsTab from "@/components/pod/WorkloadLogsTab.vue"
 import BaseButton from "@/components/ui/BaseButton.vue"
 import BaseTabs from "@/components/ui/BaseTabs.vue"
+import { OWNED_PODS_KEY, useOwnedPods } from "@/composables/useOwnedPods"
 import { useResourceObject } from "@/composables/useResourceObject"
 import { resourceListRoute } from "@/router"
 import { CLUSTER_SCOPE_SENTINEL } from "@/utils/k8sNames"
@@ -59,6 +61,20 @@ watch(
 
 const kind = computed(() => detail.object.value?.kind ?? "")
 
+// The pods a workload owns, resolved once per object handed over and shared
+// with the Related resources card under the Overview tab (provide/inject
+// rather than a prop through OverviewTab): one cluster walk serves both the
+// Logs tab below and the card's Pods/ReplicaSets groups.
+const owned = useOwnedPods(() => detail.object.value)
+provide(OWNED_PODS_KEY, owned.state)
+// The one rule for the workload Logs tab: a result with at least one pod.
+// Both the tab list and the template read this — a second predicate on the
+// raw result would agree with it only by luck of flush order.
+const ownedPods = computed(() => {
+  const result = owned.state.value.result
+  return result !== null && (result.pods.rows?.length ?? 0) > 0 ? result : null
+})
+
 const tabs = computed(() => {
   const base = [
     { id: "overview", label: "Overview" },
@@ -73,6 +89,12 @@ const tabs = computed(() => {
     )
   } else if (kind.value === "Node") {
     base.push({ id: "metrics", label: "Metrics" })
+  } else if (ownedPods.value !== null) {
+    // A workload's Logs tab exists only while it resolves to at least one pod:
+    // no tab means nothing to stream. useOwnedPods keeps the previous result
+    // across a same-object refresh, or the tab would vanish under the user and
+    // the watch below would bounce them to Overview on every Refresh click.
+    base.push({ id: "logs", label: "Logs" })
   }
   return base
 })
@@ -151,6 +173,12 @@ function onDeleted(): void {
         <PodLogsTab
           v-else-if="activeTab === 'logs' && kind === 'Pod'"
           :object="detail.object.value"
+          class="h-full"
+        />
+        <WorkloadLogsTab
+          v-else-if="activeTab === 'logs' && ownedPods !== null"
+          :object="detail.object.value"
+          :owned-pods="ownedPods"
           class="h-full"
         />
         <PodMetricsTab

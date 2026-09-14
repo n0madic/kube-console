@@ -105,6 +105,17 @@ describe("PodLogsTab", () => {
     reconnecting.value = null
   })
 
+  // The workload Logs tab puts its Pod picker ahead of the Container one.
+  it("renders the leading slot ahead of the container picker", () => {
+    const wrapper = mount(PodLogsTab, {
+      props: { object: pod("u1", "pod-a", "app") },
+      slots: { leading: "<label>Pod</label>" },
+    })
+    const labels = wrapper.findAll("label").map((l) => l.text())
+    expect(labels[0]).toBe("Pod")
+    expect(labels[1]).toMatch(/^Container/)
+  })
+
   it("restarts the log stream for the new pod on an in-place pod change", async () => {
     const wrapper = mount(PodLogsTab, { props: { object: pod("u1", "pod-a", "app") } })
     expect(startSpy).toHaveBeenCalledTimes(1)

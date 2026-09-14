@@ -1,8 +1,10 @@
 import { mount } from "@vue/test-utils"
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { ref } from "vue"
+import { ref, shallowRef } from "vue"
 
+import type { OwnedPods } from "@/api/ownedPods"
 import type { K8sObject } from "@/api/types"
+import type { OwnedPodsState } from "@/composables/useOwnedPods"
 
 const POD: K8sObject = {
   kind: "Pod",
@@ -26,6 +28,17 @@ vi.mock("@/composables/useResourceObject", () => ({
     refresh,
   }),
 }))
+
+// Module-level like `object`: the real composable would walk the cluster.
+// The key is the real one — the page provides under it.
+const ownedState = shallowRef<OwnedPodsState>({ loading: false, error: null, result: null })
+vi.mock("@/composables/useOwnedPods", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/composables/useOwnedPods")>()
+  return {
+    ...actual,
+    useOwnedPods: () => ({ state: ownedState }),
+  }
+})
 
 import BaseTabs from "@/components/ui/BaseTabs.vue"
 import ResourceDetailPage from "@/pages/ResourceDetailPage.vue"
@@ -56,6 +69,7 @@ describe("ResourceDetailPage", () => {
   // calls it through onMounted.
   beforeEach(() => {
     object.value = POD
+    ownedState.value = { loading: false, error: null, result: null }
     refresh.mockClear()
   })
 
@@ -118,5 +132,91 @@ describe("ResourceDetailPage", () => {
     const wrapper = mountPage()
     await selectTab(wrapper, "metrics")
     expect(wrapper.findComponent({ name: "PodTerminalTab" }).exists()).toBe(false)
+  })
+})
+
+const DEPLOYMENT: K8sObject = {
+  apiVersion: "apps/v1",
+  kind: "Deployment",
+  metadata: { uid: "d1", name: "web", namespace: "default" },
+}
+
+function owned(...names: string[]): OwnedPods {
+  return {
+    pods: {
+      kind: "Table",
+      columnDefinitions: [{ name: "Name", type: "string" }],
+      rows: names.map((name) => ({ cells: [name], object: { metadata: { name, uid: `u-${name}` } } })),
+    },
+    truncated: false,
+  }
+}
+
+function tabIds(wrapper: ReturnType<typeof mountPage>): string[] {
+  return (wrapper.getComponent(BaseTabs).props("tabs") as Array<{ id: string }>).map((t) => t.id)
+}
+
+describe("ResourceDetailPage workload Logs tab", () => {
+  beforeEach(() => {
+    object.value = DEPLOYMENT
+    ownedState.value = { loading: false, error: null, result: owned("web-1", "web-2") }
+    refresh.mockClear()
+  })
+
+  it("offers a Logs tab backed by WorkloadLogsTab when the workload owns pods", async () => {
+    const wrapper = mountPage()
+    expect(tabIds(wrapper)).toEqual(["overview", "yaml", "logs"])
+
+    await selectTab(wrapper, "logs")
+    const tab = wrapper.getComponent({ name: "WorkloadLogsTab" })
+    expect(tab.props("object")).toEqual(DEPLOYMENT)
+    expect(tab.props("ownedPods")).toEqual(ownedState.value.result)
+    expect(wrapper.findComponent({ name: "PodLogsTab" }).exists()).toBe(false)
+  })
+
+  it("offers no Logs tab without pods, nor while nothing is resolved", async () => {
+    ownedState.value = { loading: false, error: null, result: owned() }
+    expect(tabIds(mountPage())).toEqual(["overview", "yaml"])
+
+    ownedState.value = { loading: true, error: null, result: null }
+    expect(tabIds(mountPage())).toEqual(["overview", "yaml"])
+  })
+
+  it("keeps the Pod kind on PodLogsTab", async () => {
+    object.value = POD
+    ownedState.value = { loading: false, error: null, result: null }
+    const wrapper = mountPage()
+    await selectTab(wrapper, "logs")
+    expect(wrapper.findComponent({ name: "PodLogsTab" }).exists()).toBe(true)
+    expect(wrapper.findComponent({ name: "WorkloadLogsTab" }).exists()).toBe(false)
+  })
+
+  // The composable keeps the previous result across a same-object refresh;
+  // this is why. A blank result mid-refresh would remove the tab and the tab
+  // watch would bounce the user to Overview on every Refresh click.
+  it("stays on Logs across a refresh that keeps the result", async () => {
+    const wrapper = mountPage()
+    await selectTab(wrapper, "logs")
+
+    const kept = ownedState.value.result
+    ownedState.value = { loading: true, error: null, result: kept }
+    object.value = { ...DEPLOYMENT }
+    await wrapper.vm.$nextTick()
+    expect(wrapper.getComponent(BaseTabs).props("modelValue")).toBe("logs")
+    expect(wrapper.findComponent({ name: "WorkloadLogsTab" }).exists()).toBe(true)
+
+    ownedState.value = { loading: false, error: null, result: owned("web-3") }
+    await wrapper.vm.$nextTick()
+    expect(wrapper.getComponent(BaseTabs).props("modelValue")).toBe("logs")
+  })
+
+  it("falls back to Overview when the pods go away", async () => {
+    const wrapper = mountPage()
+    await selectTab(wrapper, "logs")
+
+    ownedState.value = { loading: false, error: null, result: null }
+    await wrapper.vm.$nextTick()
+    expect(wrapper.getComponent(BaseTabs).props("modelValue")).toBe("overview")
+    expect(wrapper.findComponent({ name: "WorkloadLogsTab" }).exists()).toBe(false)
   })
 })

@@ -23,8 +23,8 @@ export interface ResourceAction {
   variant?: "primary" | "secondary" | "danger"
 }
 
-// kind key: "<apiVersion>/<Kind>" (same convention as CHILDREN_BY_OWNER in
-// RelatedResourcesCard). "suspend"/"cordon" are the toggle entries: which half
+// kind key: "<apiVersion>/<Kind>" (same convention as POD_OWNERS in
+// utils/ownedPods.ts and CHILDREN_BY_OWNER in RelatedResourcesCard). "suspend"/"cordon" are the toggle entries: which half
 // is offered depends on the object's current spec.
 const ACTIONS_BY_KIND: Record<string, ResourceActionId[]> = {
   "apps/v1/Deployment": ["scale", "restart"],

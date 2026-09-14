@@ -176,6 +176,9 @@ watch([container, tailLines, timestamps, previous, follow], () => {
 <template>
   <div class="flex h-full min-h-0 flex-col gap-2">
     <div class="flex flex-wrap items-center gap-2 text-sm">
+      <!-- A workload's Logs tab puts its Pod picker here, ahead of the
+           Container one it narrows. -->
+      <slot name="leading" />
       <ContainerSelect v-model="container" :object="object" />
       <label class="flex items-center gap-1.5">
         <span class="text-slate-500 dark:text-slate-400">Tail</span>
@@ -244,9 +247,8 @@ watch([container, tailLines, timestamps, previous, follow], () => {
            the field (flex-1 between its min and max widths), so a narrower
            row squeezes the field before it wraps the group; the basis is the
            width at which wrapping is preferable to a field too small to read.
-           The field paints its own focus border like the login page: the UA
-           focus ring of a `search` input is a double ring that reads as a
-           rendering glitch on the dark theme. -->
+           The focus border comes from the global rule in style.css, like every
+           form control's. -->
       <div class="ml-auto flex min-w-0 flex-1 basis-[17rem] items-center justify-end gap-1.5">
         <input
           ref="searchField"
@@ -254,7 +256,7 @@ watch([container, tailLines, timestamps, previous, follow], () => {
           type="search"
           aria-label="Search log"
           placeholder="Search…"
-          class="min-w-[5rem] max-w-36 flex-1 rounded-md border border-slate-300 bg-white px-2 py-1 text-sm focus:border-blue-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+          class="min-w-[5rem] max-w-36 flex-1 rounded-md border border-slate-300 bg-white px-2 py-1 text-sm dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
           @keydown="onSearchKeydown"
         />
         <!-- Always in the DOM (empty rather than absent): a live region only

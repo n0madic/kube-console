@@ -48,6 +48,9 @@ authorization model of its own.
   automatic syntax coloring of JSON-lines output), a CPU/memory chart, and a
   browser terminal for `exec` whose session lives as long as the pod page is
   open — switching to another tab only hides it.
+- **Workloads** (Deployments, ReplicaSets, StatefulSets, DaemonSets, Jobs,
+  Services): a Logs tab streaming any pod they own, picked from a list
+  resolved once per page load.
 - **Nodes**: CPU/memory charts and Cordon/Uncordon.
 - **Day-2 actions** on the object header, each sending the same targeted
   request `kubectl` would: Scale and Restart (Deployment/StatefulSet/
