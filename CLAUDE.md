@@ -1085,6 +1085,28 @@ memory only, and nothing warns about losing it on navigation (there is no
 `beforeunload` or route guard anywhere in the app); the hook if that changes is
 `dirty`, lifted out of the tab.
 
+A Secret's YAML tab has a **Decode base64** toggle (`isSecret` in
+`utils/secrets.ts`, keyed on the object's `apiVersion`/`kind`): the draft is
+then `toDecodedSecretYaml` — `data` values as plain text, anything not UTF-8
+as a `!!binary` base64 scalar — and Dry run/Apply send
+`encodeSecretYaml(draft)`, i.e. an ordinary apply of `data`, encoded **in the
+browser**. Not a projection onto `stringData`, which would let the apiserver
+encode: SSA would then record ownership of `stringData.<key>` while the object
+stores `data.<key>`, so deleting a key from the draft would never delete it
+from the Secret, and binary values would have no representation at all.
+`!!binary` is the standard YAML tag for bytes, so a binary value survives the
+edit marked as such instead of being read as text and encoded twice; the
+yaml library returns it as a `Uint8Array` that may belong to another realm
+(a Node `Buffer` under vitest), hence `ArrayBuffer.isView`, never
+`instanceof`. A value that did not parse as a string (`port: 5432`,
+`flag: true`, `key:`) is refused with the key named, never coerced — YAML has
+already changed what was typed (`0777`, `1e3`). The toggle only switches on a
+**clean** draft, since a dirty one is in the other encoding; the mode then
+drives every projection (`project()`: initial seed, the refresh watch,
+Cancel), so staleness keeps being measured on the text on screen. It is off by
+default and never persisted — switching it on is the explicit reveal — and dies
+with the tab, which is keyed per object.
+
 Header buttons come from a second registry, the pure `utils/resourceActions.ts`
 (`actionsFor` keyed `<apiVersion>/<Kind>`, same convention as
 `CHILDREN_BY_OWNER`; Suspend/Resume and Cordon/Uncordon resolve from the
@@ -1331,6 +1353,16 @@ failure for a *different* target clears it (`loadedKey` in `useResourceObject`),
 because the whole tab area hangs off `object !== null` and nulling it on a
 transient 500 would unmount the detail view — and with it a live exec session or
 log stream.
+
+The Metadata card truncates long annotations to a 140-char prefix, but on a
+Secret it hides `kubectl.kubernetes.io/last-applied-configuration`
+**whole**, whatever its length (`isMaskedAnnotation`, reusing
+`fieldFilter`'s `LAST_APPLIED_ANNOTATION`): `kubectl apply` stores the full
+manifest there — `data`, or `stringData` in plain text — so any prefix can
+already be secret material. It expands only on a click, and expansion is
+`useReveal` keyed on the object's uid, like `SecretDataPanel`'s eye button,
+because `OverviewTab` is not keyed per object and an expansion on one Secret
+would otherwise show the next one's value unasked.
 
 A **Details** card (right under Metadata) renders everything outside the
 `apiVersion`/`kind`/`metadata`/`spec`/`status` skeleton —

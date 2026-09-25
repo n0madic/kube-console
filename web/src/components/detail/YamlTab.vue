@@ -6,7 +6,8 @@ import { serverSideApply } from "@/api/k8s"
 import type { K8sObject, ResourceRef } from "@/api/types"
 import BaseButton from "@/components/ui/BaseButton.vue"
 import { useToastStore } from "@/stores/toasts"
-import { toEditableYaml, toYaml } from "@/utils/yamlView"
+import { isSecret } from "@/utils/secrets"
+import { encodeSecretYaml, toDecodedSecretYaml, toEditableYaml, toYaml } from "@/utils/yamlView"
 
 // Lazy: the CodeMirror chunk (~110 kB gz) loads only when the YAML tab renders,
 // not on every detail-page view.
@@ -17,9 +18,20 @@ const emit = defineEmits<{ applied: [] }>()
 
 const toasts = useToastStore()
 
+// Secrets can be edited with `data` decoded: values as plain text (binary ones
+// as `!!binary`), re-encoded to base64 by Dry run/Apply. Off by default and
+// never persisted — switching it on is the explicit reveal, as the eye button
+// is in SecretDataPanel — and it dies with the tab, which is keyed per object.
+const secret = computed(() => isSecret(props.object))
+const decoded = ref(false)
+
+function project(obj: K8sObject): string {
+  return decoded.value ? toDecodedSecretYaml(obj) : toEditableYaml(obj)
+}
+
 // What is edited is the apply-ready projection: what is on screen is exactly
-// what Apply sends.
-const draft = ref(toEditableYaml(props.object))
+// what Apply sends (in decoded mode, once re-encoded).
+const draft = ref(project(props.object))
 // The text `draft` was seeded from: Cancel returns here, and dirtiness is
 // measured against it rather than against `props.object` directly.
 const baseline = ref(draft.value)
@@ -42,10 +54,26 @@ const objectChanged = ref(false)
 // send a draft that is not on screen, and Cancel would destroy it out of sight.
 const actionsDisabled = computed(() => busy.value || !dirty.value || showFull.value)
 
+// Switching projection under an edit has no clean meaning (the draft is in the
+// other encoding), so the mode changes only on a clean draft, like reseeding.
+const decodeDisabled = computed(() => busy.value || dirty.value)
+const decodeTitle = computed(() =>
+  dirty.value
+    ? "Apply or cancel your edits first."
+    : "Edit data values as plain text; binary values stay base64, marked !!binary. " +
+      "Dry run and Apply encode everything back to base64. Decoded values stay in this tab only.",
+)
+
+function setDecoded(on: boolean): void {
+  decoded.value = on
+  draft.value = baseline.value = project(props.object)
+  objectChanged.value = false
+}
+
 watch(
   () => props.object,
   (obj) => {
-    const next = toEditableYaml(obj)
+    const next = project(obj)
     // Compare the *editable projection*, not object identity and not
     // resourceVersion: useResourceObject hands over a new object on every
     // refresh, and a status heartbeat moves resourceVersion without touching a
@@ -97,11 +125,21 @@ async function run(dryRun: boolean): Promise<void> {
   // ours to silently apply to some other object.
   const target = props.object.metadata
   if (target?.name === undefined) return
-  busy.value = true
   errorText.value = null
   conflictText.value = null
+  let body = draft.value
+  if (decoded.value) {
+    try {
+      body = encodeSecretYaml(body)
+    } catch (e) {
+      // A YAML syntax error or a non-string value: nothing was sent.
+      errorText.value = e instanceof Error ? e.message : String(e)
+      return
+    }
+  }
+  busy.value = true
   try {
-    await serverSideApply(props.resourceRef, target.namespace, target.name, draft.value, { dryRun })
+    await serverSideApply(props.resourceRef, target.namespace, target.name, body, { dryRun })
     if (dryRun) {
       toasts.push("success", "Dry run succeeded: the manifest is valid.")
     } else {
@@ -130,6 +168,19 @@ async function run(dryRun: boolean): Promise<void> {
       >
         <input v-model="showFull" type="checkbox" />
         Full object (read-only)
+      </label>
+      <label
+        v-if="secret"
+        class="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400"
+        :title="decodeTitle"
+      >
+        <input
+          type="checkbox"
+          :checked="decoded"
+          :disabled="decodeDisabled"
+          @change="setDecoded(($event.target as HTMLInputElement).checked)"
+        />
+        Decode base64
       </label>
       <span v-if="dirty" class="text-xs text-amber-600 dark:text-amber-400">Unsaved changes</span>
       <div class="flex-1"></div>

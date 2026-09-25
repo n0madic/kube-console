@@ -37,7 +37,8 @@ authorization model of its own.
   StorageClasses, RBAC rules, …), a YAML tab
   with view/edit through server-side apply (dry-run supported; applies with
   `--force-conflicts` semantics, so editing a field owned by another field
-  manager takes ownership of it), related
+  manager takes ownership of it; a Secret's `data` can be edited decoded, as
+  plain text, and is re-encoded to base64 on apply), related
   objects (owners, children, Service→Pods, Ingress→backends) and recent
   events.
 - **Pods**: environment variables resolved from `valueFrom`/`envFrom`

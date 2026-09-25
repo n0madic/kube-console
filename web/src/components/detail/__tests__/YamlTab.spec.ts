@@ -1,6 +1,7 @@
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils"
 import { createPinia, setActivePinia } from "pinia"
 import { beforeEach, describe, expect, it, vi } from "vitest"
+import { parse } from "yaml"
 
 // The real editor is a lazy CodeMirror chunk; the tab's own behaviour is which
 // text it hands over and what it does with edits, so stand in a component that
@@ -24,6 +25,7 @@ import { serverSideApply } from "@/api/k8s"
 import type { K8sObject, ResourceRef } from "@/api/types"
 import YamlTab from "@/components/detail/YamlTab.vue"
 import { useToastStore } from "@/stores/toasts"
+import { encodeBase64Utf8 } from "@/utils/base64"
 
 const mockedApply = vi.mocked(serverSideApply)
 
@@ -295,5 +297,139 @@ describe("YamlTab", () => {
     await setFullView(wrapper, false)
     expect(editorText(wrapper)).toBe("edited: yes\n")
     expect(allDisabled(wrapper)).toEqual([false, false, false])
+  })
+
+  describe("Secret decode mode", () => {
+    const secretRef: ResourceRef = { group: "", version: "v1", resource: "secrets" }
+    const BINARY = "//4AAQLI" // not UTF-8
+
+    function secret(password = "s3cret"): K8sObject {
+      return {
+        apiVersion: "v1",
+        kind: "Secret",
+        metadata: { name: "db", namespace: "prod", uid: "s1", resourceVersion: "7" },
+        data: { bin: BINARY, password: encodeBase64Utf8(password) },
+        type: "Opaque",
+      }
+    }
+
+    async function mountSecret(object: K8sObject = secret()) {
+      const wrapper = mount(YamlTab, { props: { object, resourceRef: secretRef } })
+      await flushPromises()
+      return wrapper
+    }
+
+    function decodeBox(wrapper: VueWrapper) {
+      const label = wrapper.findAll("label").find((l) => l.text() === "Decode base64")
+      if (label === undefined) throw new Error("no decode toggle")
+      return label.get("input")
+    }
+
+    async function setDecoded(wrapper: VueWrapper, on: boolean): Promise<void> {
+      await decodeBox(wrapper).setValue(on)
+      await flushPromises()
+    }
+
+    /** The data map a mocked apply call was sent. */
+    function sentData(call = 0): unknown {
+      return (parse(mockedApply.mock.calls[call]![3]) as K8sObject).data
+    }
+
+    it("is offered for Secrets only", async () => {
+      const podTab = await mountTab(pod())
+      expect(podTab.text()).not.toContain("Decode base64")
+      const secretTab = await mountSecret()
+      expect(secretTab.text()).toContain("Decode base64")
+    })
+
+    it("starts encoded and shows text plain and binary as !!binary once switched on", async () => {
+      const wrapper = await mountSecret()
+      expect(editorText(wrapper)).toContain(`password: ${encodeBase64Utf8("s3cret")}`)
+
+      await setDecoded(wrapper, true)
+      expect(editorText(wrapper)).toContain("password: s3cret")
+      expect(editorText(wrapper)).toMatch(/bin: !!binary/)
+      // A projection switch is not an edit.
+      expect(allDisabled(wrapper)).toEqual([true, true, true])
+
+      await setDecoded(wrapper, false)
+      expect(editorText(wrapper)).toContain(`password: ${encodeBase64Utf8("s3cret")}`)
+    })
+
+    it.each([
+      ["Apply", false],
+      ["Dry run", true],
+    ])("%s sends the edit re-encoded, binary values untouched", async (label, dryRun) => {
+      const wrapper = await mountSecret()
+      await setDecoded(wrapper, true)
+      await type(wrapper, editorText(wrapper).replace("password: s3cret", "password: n3w ✓"))
+
+      await button(wrapper, label).trigger("click")
+      await flushPromises()
+
+      expect(mockedApply).toHaveBeenCalledTimes(1)
+      expect(mockedApply.mock.calls[0]![4]).toEqual({ dryRun })
+      expect(sentData()).toEqual({ bin: BINARY, password: encodeBase64Utf8("n3w ✓") })
+    })
+
+    it("refuses a non-string value without sending anything", async () => {
+      const wrapper = await mountSecret()
+      await setDecoded(wrapper, true)
+      await type(wrapper, editorText(wrapper).replace("password: s3cret", "password: 12345"))
+
+      await button(wrapper, "Apply").trigger("click")
+      await flushPromises()
+
+      expect(mockedApply).not.toHaveBeenCalled()
+      expect(wrapper.text()).toContain("data.password must be a string")
+      expect(wrapper.emitted("applied")).toBeUndefined()
+    })
+
+    it("cannot switch under a dirty draft", async () => {
+      const wrapper = await mountSecret()
+      await setDecoded(wrapper, true)
+      await type(wrapper, editorText(wrapper).replace("s3cret", "edited"))
+
+      expect((decodeBox(wrapper).element as HTMLInputElement).disabled).toBe(true)
+    })
+
+    it("Cancel returns to the decoded text", async () => {
+      const wrapper = await mountSecret()
+      await setDecoded(wrapper, true)
+      const decodedText = editorText(wrapper)
+      await type(wrapper, decodedText.replace("s3cret", "edited"))
+
+      await button(wrapper, "Cancel").trigger("click")
+      expect(editorText(wrapper)).toBe(decodedText)
+    })
+
+    it("reseeds silently after Apply, still decoded", async () => {
+      const wrapper = await mountSecret()
+      await setDecoded(wrapper, true)
+      await type(wrapper, editorText(wrapper).replace("password: s3cret", "password: n3w"))
+      await button(wrapper, "Apply").trigger("click")
+      await flushPromises()
+
+      await wrapper.setProps({ object: secret("n3w") })
+
+      expect(editorText(wrapper)).toContain("password: n3w")
+      expect(wrapper.text()).not.toContain("changed on the server")
+      expect(allDisabled(wrapper)).toEqual([true, true, true])
+    })
+
+    it("keeps a dirty decoded draft across a refresh, still in decoded mode", async () => {
+      const wrapper = await mountSecret()
+      await setDecoded(wrapper, true)
+      const edited = editorText(wrapper).replace("password: s3cret", "password: mine")
+      await type(wrapper, edited)
+
+      await wrapper.setProps({ object: secret("theirs") })
+      expect(editorText(wrapper)).toBe(edited)
+      expect(wrapper.text()).toContain("changed on the server")
+
+      // Cancel reloads the new version in the same projection.
+      await button(wrapper, "Cancel").trigger("click")
+      expect(editorText(wrapper)).toContain("password: theirs")
+    })
   })
 })

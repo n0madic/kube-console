@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, ref } from "vue"
+import { computed } from "vue"
 
 import type { K8sObject } from "@/api/types"
 import { useDiscovery } from "@/composables/useDiscovery"
+import { useReveal } from "@/composables/useReveal"
 import { resourceDetailRoute } from "@/router"
+import { isMaskedAnnotation } from "@/utils/secrets"
 import { formatAge } from "@/utils/units"
 import type { RouteLocationRaw } from "vue-router"
 
@@ -17,17 +19,21 @@ const annotations = computed(() => Object.entries(meta.value.annotations ?? {}))
 
 // Long annotation values (e.g. last-applied-configuration) start collapsed.
 const LONG_ANNOTATION = 140
-const expandedAnnotations = ref<Set<string>>(new Set())
+// Reset on object change: OverviewTab is not keyed per object, and a masked
+// value expanded on one Secret must not show on the next without a click.
+const { isRevealed: isExpanded, toggle: toggleAnnotation } = useReveal<string>(
+  (key) => key,
+  () => props.object.metadata?.uid,
+)
 
 function isLong(value: string): boolean {
   return value.length > LONG_ANNOTATION
 }
 
-function toggleAnnotation(key: string): void {
-  const next = new Set(expandedAnnotations.value)
-  if (next.has(key)) next.delete(key)
-  else next.add(key)
-  expandedAnnotations.value = next
+// Hidden whole whatever its length: a truncated prefix of a Secret's
+// last-applied-configuration is already secret material.
+function isMasked(key: string): boolean {
+  return isMaskedAnnotation(props.object, key)
 }
 
 /** Owner reference → detail route when the kind is discoverable. */
@@ -102,21 +108,24 @@ const owners = computed(() =>
         <div v-for="[key, value] in annotations" :key="key" class="flex gap-2">
           <dt class="shrink-0 font-mono text-slate-500 dark:text-slate-400">{{ key }}:</dt>
           <dd class="min-w-0 flex-1 font-mono text-slate-700 dark:text-slate-300">
-            <template v-if="!isLong(value)">
+            <template v-if="!isMasked(key) && !isLong(value)">
               <span class="break-all">{{ value }}</span>
             </template>
             <template v-else>
               <pre
-                v-if="expandedAnnotations.has(key)"
+                v-if="isExpanded(key)"
                 class="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-slate-50 p-2 dark:bg-slate-800"
               >{{ value }}</pre>
+              <span v-else-if="isMasked(key)" class="text-slate-400">
+                •••••••• (hidden: contains Secret data)
+              </span>
               <span v-else class="break-all">{{ value.slice(0, LONG_ANNOTATION) }}…</span>
               <button
                 type="button"
                 class="ml-1 text-blue-600 hover:underline dark:text-blue-400"
                 @click="toggleAnnotation(key)"
               >
-                {{ expandedAnnotations.has(key) ? "collapse" : `expand (${value.length} chars)` }}
+                {{ isExpanded(key) ? "collapse" : `expand (${value.length} chars)` }}
               </button>
             </template>
           </dd>

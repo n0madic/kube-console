@@ -58,7 +58,7 @@ export function pruneEmpty(value: unknown): unknown {
 
 // --- Signal 1: last-applied-configuration -----------------------------------
 
-const LAST_APPLIED_ANNOTATION = "kubectl.kubernetes.io/last-applied-configuration"
+export const LAST_APPLIED_ANNOTATION = "kubectl.kubernetes.io/last-applied-configuration"
 
 function parseLastAppliedSpec(
   annotations: Record<string, string> | undefined,
