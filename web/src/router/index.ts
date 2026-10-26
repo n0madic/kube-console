@@ -79,11 +79,16 @@ export function createAppRouter(authModeReady: Promise<void> = Promise.resolve()
   return router
 }
 
-/** Route to a resource list page. */
-export function resourceListRoute(ref: ResourceRef): RouteLocationRaw {
+/** Route to a resource list page, optionally with its view query
+ * (`utils/listQuery.ts`). */
+export function resourceListRoute(
+  ref: ResourceRef,
+  query?: Record<string, string>,
+): RouteLocationRaw {
   return {
     name: "resource-list",
     params: { group: routeGroup(ref.group), version: ref.version, resource: ref.resource },
+    ...(query !== undefined ? { query } : {}),
   }
 }
 

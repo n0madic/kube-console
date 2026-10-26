@@ -8,6 +8,7 @@ import BaseSelect from "@/components/ui/BaseSelect.vue"
 import { useDiscovery } from "@/composables/useDiscovery"
 import { useAuthStore } from "@/stores/auth"
 import { useUiStore } from "@/stores/ui"
+import { isDNS1123Label } from "@/utils/k8sNames"
 
 const ui = useUiStore()
 const auth = useAuthStore()
@@ -70,6 +71,19 @@ const truncated = computed(() => (query.data.value?.metadata?.continue ?? "") !=
 // the value could not even be reselected.
 const selectedMissing = computed(() => ui.namespace !== "" && !names.value.includes(ui.namespace))
 
+// The free-text fallback commits on `change` (once per edit, not per keystroke:
+// this value is watched by the list page's full collection walk, the events
+// card's 1000-item fetch and the Overview's metrics loop) and only a value that
+// can name a namespace. Anything else would be listed with, persisted and
+// mirrored into list URLs that every reader then ignores — so the field snaps
+// back to the current selection instead.
+function commitFreeText(e: Event): void {
+  const input = e.target as HTMLInputElement
+  const value = input.value.trim()
+  if (value === "" || isDNS1123Label(value)) ui.namespace = value
+  input.value = ui.namespace
+}
+
 // Reconcile the selected namespace when a context's namespace list loads: keep
 // a same-named namespace across clusters, otherwise fall back to "all". Only
 // runs on a complete successful list — on a 403/error the free-text input is
@@ -110,16 +124,15 @@ watch(
            and DNS-1123 names cannot contain underscores. -->
       <option v-if="truncated" disabled value="__truncated__">… more namespaces not listed</option>
     </BaseSelect>
-    <!-- `.lazy`: a plain v-model commits on every keystroke, and this value is
-         watched by the list page (a full bounded collection walk), the events
-         card (a 1000-item fetch) and the Overview's metrics loop — so typing
-         "kube-system" fired eleven of each, one per prefix. The select branch
-         has no such problem: it emits once per pick. -->
+    <!-- Commits on change, see commitFreeText. -->
     <input
       v-else
       id="ns-select"
-      v-model.lazy="ui.namespace"
+      :value="ui.namespace"
       placeholder="namespace (empty = all)"
+      title="A namespace name (lowercase letters, digits and '-'); empty = all namespaces"
+      spellcheck="false"
+      @change="commitFreeText"
       class="w-32 min-w-0 rounded-md border border-slate-300 bg-white px-2 py-1 text-sm sm:w-48 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
     />
   </div>

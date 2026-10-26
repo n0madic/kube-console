@@ -17,6 +17,14 @@ describe("resource routes", () => {
     expect(loc.path).toBe("/r/core/v1/pods")
   })
 
+  it("carries a list's view query", () => {
+    const router = createAppRouter()
+    const loc = router.resolve(
+      resourceListRoute({ group: "", version: "v1", resource: "pods" }, { filter: "api" }),
+    )
+    expect(loc.fullPath).toBe("/r/core/v1/pods?filter=api")
+  })
+
   it("builds apps group list routes", () => {
     const router = createAppRouter()
     const loc = router.resolve(

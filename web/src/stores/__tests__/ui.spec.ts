@@ -50,6 +50,29 @@ describe("ui store namespace persistence", () => {
   it("defaults to all namespaces when nothing is stored", () => {
     expect(useUiStore().namespace).toBe("")
   })
+
+  // An older build's free-text field could store anything; restored, it would
+  // be listed with and mirrored into every list URL.
+  it("does not restore a stored value that cannot name a namespace", () => {
+    window.sessionStorage.setItem(NAMESPACE_STORAGE_KEY, "Team A")
+    expect(useUiStore().namespace).toBe("")
+  })
+})
+
+describe("ui store list queries", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it("remembers the last query per resource list", () => {
+    const ui = useUiStore()
+    expect(ui.listQueryFor("core/v1/pods")).toBeUndefined()
+    ui.rememberListQuery("core/v1/pods", { filter: "api" })
+    ui.rememberListQuery("apps/v1/deployments", { namespace: "team-a" })
+    ui.rememberListQuery("core/v1/pods", { filter: "web" })
+    expect(ui.listQueryFor("core/v1/pods")).toEqual({ filter: "web" })
+    expect(ui.listQueryFor("apps/v1/deployments")).toEqual({ namespace: "team-a" })
+  })
 })
 
 // Sidebar visibility is two pieces of state: the user's choice on a wide

@@ -1,6 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue"
-import { useRouter, type RouteLocationRaw } from "vue-router"
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
+import {
+  isNavigationFailure,
+  NavigationFailureType,
+  onBeforeRouteLeave,
+  onBeforeRouteUpdate,
+  useRoute,
+  useRouter,
+  type RouteLocationRaw,
+} from "vue-router"
 
 import type { K8sTableRow, ResourceRef } from "@/api/types"
 import CreateResourceDialog from "@/components/detail/CreateResourceDialog.vue"
@@ -13,6 +21,7 @@ import { resourceDetailRoute } from "@/router"
 import { usePreferencesStore } from "@/stores/preferences"
 import { useUiStore } from "@/stores/ui"
 import { parseEventObjectCell } from "@/utils/eventHelpers"
+import { listQuery, parseListQuery, sameQuery, type ListQueryState } from "@/utils/listQuery"
 import {
   shouldShowNamespaceColumn,
   withNamespaceCells,
@@ -22,6 +31,7 @@ import {
 const props = defineProps<{ group: string; version: string; resource: string }>()
 
 const router = useRouter()
+const route = useRoute()
 const ui = useUiStore()
 const prefsStore = usePreferencesStore()
 const discovery = useDiscovery()
@@ -39,32 +49,180 @@ const discoveryEntry = computed(() =>
 const namespaced = computed(() => discoveryEntry.value?.namespaced ?? true)
 
 const filter = ref("")
+/** The label-selector field: a draft, applied only on Enter/Refresh. */
 const labelSelector = ref("")
+/** The selector the list is loaded with — what every listing (namespace
+ * switch, relist, next page, name search) and the URL use, never the draft. */
+const appliedSelector = ref("")
 const createOpen = ref(false)
+
+const listKey = computed(() => `${props.group}/${props.version}/${props.resource}`)
+
+// A filter that arrives by URL may have been a name search (Enter) over a
+// collection past the load cap, and the URL cannot say so: on a capped listing
+// it is therefore run as one — banner included — rather than silently
+// filtering only the loaded window.
+let searchAfterLoad = false
+
+function runPendingSearch(): void {
+  if (!searchAfterLoad || list.loading.value) return
+  searchAfterLoad = false
+  if (filter.value.trim() !== "" && list.hasNextPage.value) void list.searchAllByName(filter.value)
+}
+
+// URL → view, at setup and on every navigation that lands a query the view
+// does not already hold (another resource, Back/Forward, a link to the same
+// list). The page's own replaces land a query equal to the view and are
+// skipped, so a write cannot roll typing back. A namespace the URL does not
+// name keeps the selected one: the selection is global and sidebar links carry
+// no query, while the filters belong to this view and start empty.
+function adoptQuery(state: ListQueryState): void {
+  filter.value = state.filter
+  labelSelector.value = state.labelSelector
+  appliedSelector.value = state.labelSelector
+  if (state.namespace !== "") ui.namespace = state.namespace
+  searchAfterLoad = state.filter !== ""
+}
+adoptQuery(parseListQuery(route.query))
 
 const list = useResourceList(
   () => apiRef.value,
   () => ({
     namespace: namespaced.value && ui.namespace !== "" ? ui.namespace : undefined,
-    labelSelector: labelSelector.value,
+    labelSelector: appliedSelector.value,
     pageSize: prefsStore.prefs.tablePageSize,
   }),
 )
 
+async function reload(): Promise<void> {
+  await list.refresh()
+  runPendingSearch()
+}
+
+/** Enter in the selector field and the Refresh button: apply the draft. */
+function applySelector(): void {
+  // A changed selector reloads through the watch below; an unchanged one is a
+  // plain refresh.
+  if (labelSelector.value !== appliedSelector.value) appliedSelector.value = labelSelector.value
+  else void reload()
+}
+
 onMounted(() => {
-  void list.refresh()
+  void reload()
 })
 
+// Both adopting watches are declared ahead of the reload watch, so a
+// navigation lists once with everything it brought (the reload job is already
+// queued when they write). The first resets the selector draft on a resource
+// change even when the two URLs happen to be equal.
 watch(
-  () => [props.group, props.version, props.resource, ui.namespace, namespaced.value],
-  () => {
-    filter.value = ""
-    // Reset the label selector too, so it does not silently carry over to an
-    // unrelated resource on sidebar navigation.
-    labelSelector.value = ""
-    void list.refresh()
+  () => [props.group, props.version, props.resource],
+  () => adoptQuery(parseListQuery(route.query)),
+)
+watch(
+  () => route.query,
+  (query) => {
+    if (route.name !== "resource-list" || sameQuery(urlQuery.value, query)) return
+    adoptQuery(parseListQuery(query))
+    // After the flush: if the adoption reloads, the list is loading by then
+    // and the reload runs the search when it finishes.
+    void nextTick(runPendingSearch)
   },
 )
+// A namespace switch keeps the filters, like `kubectl -l … -n …`.
+watch(
+  () => [
+    props.group,
+    props.version,
+    props.resource,
+    ui.namespace,
+    namespaced.value,
+    appliedSelector.value,
+  ],
+  () => void reload(),
+)
+
+// View → URL, as a replace: Back, a reload, a copied link and the detail
+// page's way back (`rememberListQuery`) all reproduce the view, and typing
+// does not stack history entries. Defaults are omitted, so an unfiltered list
+// keeps a bare URL.
+const urlQuery = computed(() =>
+  listQuery({
+    namespace: namespaced.value ? ui.namespace : "",
+    filter: filter.value,
+    labelSelector: appliedSelector.value,
+  }),
+)
+watch(
+  () => [listKey.value, urlQuery.value] as const,
+  ([key, query]) => ui.rememberListQuery(key, query),
+  { immediate: true },
+)
+
+// Filter keystrokes are debounced: every replace is a full navigation (guards,
+// RouterView render, every route-dependent computed), and browsers throttle
+// `history.replaceState` (WebKit throws past ~100 calls in a short window).
+const FILTER_URL_DELAY_MS = 300
+let urlTimer: ReturnType<typeof setTimeout> | undefined
+// Set from the moment a navigation away starts: a replace issued while it is
+// pending would become the newer navigation and cancel it — the click lost.
+let leaving = false
+
+function cancelUrlWrite(): void {
+  if (urlTimer === undefined) return
+  clearTimeout(urlTimer)
+  urlTimer = undefined
+}
+
+function writeUrl(): void {
+  cancelUrlWrite()
+  if (leaving || route.name !== "resource-list" || sameQuery(urlQuery.value, route.query)) return
+  void router.replace({ query: urlQuery.value })
+}
+
+watch(
+  urlQuery,
+  (query, prev) => {
+    const filterOnly =
+      prev !== undefined && query.namespace === prev.namespace && query.selector === prev.selector
+    if (!filterOnly) {
+      writeUrl()
+      return
+    }
+    cancelUrlWrite()
+    urlTimer = setTimeout(writeUrl, FILTER_URL_DELAY_MS)
+  },
+  { immediate: true },
+)
+
+/** A debounced write still pending when a navigation starts goes to the
+ * current history entry directly: a `router.replace` here would cancel the
+ * navigation, and dropping it would leave Back one keystroke behind. */
+function flushUrlWrite(): void {
+  if (urlTimer === undefined) return
+  cancelUrlWrite()
+  if (route.name !== "resource-list" || sameQuery(urlQuery.value, route.query)) return
+  router.options.history.replace(router.resolve({ query: urlQuery.value }).fullPath)
+}
+
+onBeforeRouteLeave(() => {
+  flushUrlWrite()
+  leaving = true
+})
+onBeforeRouteUpdate(() => {
+  flushUrlWrite()
+  // Whatever superseded a pending leave keeps this page.
+  leaving = false
+})
+// An aborted leave keeps the page too. A cancelled one does not reset the flag:
+// the navigation that cancelled it either leaves as well or is an update above.
+const removeAfterEach = router.afterEach((_to, _from, failure) => {
+  if (isNavigationFailure(failure, NavigationFailureType.aborted)) leaving = false
+})
+onBeforeUnmount(() => {
+  cancelUrlWrite()
+  removeAfterEach()
+})
 
 function openDetail(row: K8sTableRow): void {
   const meta = row.object?.metadata
@@ -169,7 +327,7 @@ const eventObjectLink = computed(() => {
       :loading="list.loading.value"
       :watch-degraded="list.watchDegraded.value"
       :deep-search="list.hasNextPage.value || list.paged.value"
-      @refresh="list.refresh()"
+      @refresh="applySelector()"
       @search="list.searchAllByName(filter)"
       @create="createOpen = true"
     />

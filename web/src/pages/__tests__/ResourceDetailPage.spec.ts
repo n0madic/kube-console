@@ -1,4 +1,5 @@
 import { mount } from "@vue/test-utils"
+import { createPinia, setActivePinia } from "pinia"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { ref, shallowRef } from "vue"
 
@@ -12,11 +13,17 @@ const POD: K8sObject = {
   spec: { containers: [{ name: "app" }] },
 }
 
+const routerPush = vi.hoisted(() => vi.fn())
 vi.mock("vue-router", () => ({
-  useRouter: () => ({ push: vi.fn() }),
+  useRouter: () => ({ push: routerPush }),
   RouterLink: { template: "<a><slot /></a>" },
 }))
-vi.mock("@/router", () => ({ resourceListRoute: () => "/r/core/v1/pods" }))
+vi.mock("@/router", () => ({
+  resourceListRoute: (_ref: unknown, query?: Record<string, string>) => ({
+    path: "/r/core/v1/pods",
+    query,
+  }),
+}))
 
 const object = ref<K8sObject | null>(POD)
 const refresh = vi.hoisted(() => vi.fn(async () => {}))
@@ -40,8 +47,10 @@ vi.mock("@/composables/useOwnedPods", async (importOriginal) => {
   }
 })
 
+import DeleteConfirmDialog from "@/components/detail/DeleteConfirmDialog.vue"
 import BaseTabs from "@/components/ui/BaseTabs.vue"
 import ResourceDetailPage from "@/pages/ResourceDetailPage.vue"
+import { useUiStore } from "@/stores/ui"
 
 function mountPage() {
   return mount(ResourceDetailPage, {
@@ -68,6 +77,8 @@ describe("ResourceDetailPage", () => {
   // The refresh spy is module-level for the same reason, and mounting already
   // calls it through onMounted.
   beforeEach(() => {
+    setActivePinia(createPinia())
+    routerPush.mockReset()
     object.value = POD
     ownedState.value = { loading: false, error: null, result: null }
     refresh.mockClear()
@@ -125,6 +136,18 @@ describe("ResourceDetailPage", () => {
     yaml.vm.$emit("applied")
     await wrapper.vm.$nextTick()
     expect(refresh).toHaveBeenCalled()
+  })
+
+  // Regression: the way back to the list after Delete (and the header link)
+  // was a bare list route, dropping the filters the user came from.
+  it("returns to the list as it was last shown after Delete", async () => {
+    useUiStore().rememberListQuery("core/v1/pods", { namespace: "default", filter: "pod" })
+    const wrapper = mountPage()
+    wrapper.getComponent(DeleteConfirmDialog).vm.$emit("deleted")
+    expect(routerPush).toHaveBeenCalledWith({
+      path: "/r/core/v1/pods",
+      query: { namespace: "default", filter: "pod" },
+    })
   })
 
   it("does not mount a terminal for non-pod kinds", async () => {

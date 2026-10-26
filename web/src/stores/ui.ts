@@ -11,6 +11,8 @@
 import { defineStore } from "pinia"
 import { computed, readonly, ref, watch } from "vue"
 
+import { isDNS1123Label } from "@/utils/k8sNames"
+
 import { usePreferencesStore } from "./preferences"
 
 export const NAMESPACE_STORAGE_KEY = "kube-console.namespace.v1"
@@ -25,7 +27,11 @@ export const SIDEBAR_NARROW_QUERY = "not all and (min-width: 64rem)"
 
 function readStoredNamespace(): string {
   try {
-    return window.sessionStorage.getItem(NAMESPACE_STORAGE_KEY) ?? ""
+    // A value that cannot name a namespace (written by an older build's
+    // unvalidated free-text field) would be listed with and mirrored into
+    // every list URL, so it is dropped rather than restored.
+    const stored = window.sessionStorage.getItem(NAMESPACE_STORAGE_KEY) ?? ""
+    return isDNS1123Label(stored) ? stored : ""
   } catch {
     return ""
   }
@@ -46,6 +52,20 @@ export const useUiStore = defineStore("ui", () => {
   /** Selected namespace; "" means all namespaces. Persisted per tab. */
   const namespace = ref(readStoredNamespace())
   const sidebarSearch = ref("")
+
+  /** The URL query each resource list was last shown with, keyed
+   * `<group>/<version>/<resource>`, so the detail page's way back to its list
+   * (header link, after Delete) lands on the same filtered view, as the
+   * browser's Back does. Memory only: a filter is view state, not a setting. */
+  const listQueries = new Map<string, Record<string, string>>()
+
+  function rememberListQuery(key: string, query: Record<string, string>): void {
+    listQueries.set(key, query)
+  }
+
+  function listQueryFor(key: string): Record<string, string> | undefined {
+    return listQueries.get(key)
+  }
 
   watch(namespace, writeStoredNamespace)
 
@@ -121,6 +141,8 @@ export const useUiStore = defineStore("ui", () => {
   return {
     namespace,
     sidebarSearch,
+    rememberListQuery,
+    listQueryFor,
     // Derived from matchMedia: writable only by the listener above, or a
     // consumer could desync it from the viewport for the rest of the session.
     narrowViewport: readonly(narrowViewport),

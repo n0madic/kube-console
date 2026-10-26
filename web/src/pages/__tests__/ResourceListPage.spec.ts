@@ -1,7 +1,7 @@
 import { flushPromises, mount } from "@vue/test-utils"
 import { createPinia, setActivePinia } from "pinia"
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
-import { computed } from "vue"
+import { computed, reactive } from "vue"
 
 import type { DiscoveryResource, K8sTable, K8sTableRow, WatchEvent } from "@/api/types"
 
@@ -39,8 +39,32 @@ vi.mock("@/composables/useDiscovery", () => ({
   }),
 }))
 const routerPush = vi.hoisted(() => vi.fn())
-vi.mock("vue-router", () => ({
-  useRouter: () => ({ push: routerPush }),
+const routerReplace = vi.hoisted(() => vi.fn())
+const historyReplace = vi.hoisted(() => vi.fn())
+// The page's route guards, captured so a test can start a navigation.
+const guards = vi.hoisted(() => ({
+  leave: undefined as (() => void) | undefined,
+  update: undefined as (() => void) | undefined,
+}))
+vi.mock("vue-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("vue-router")>()),
+  useRouter: () => ({
+    push: routerPush,
+    replace: routerReplace,
+    resolve: (to: { query: Record<string, string> }) => ({
+      fullPath: `/r/apps/v1/deployments?${new URLSearchParams(to.query).toString()}`,
+    }),
+    afterEach: () => () => {},
+    options: { history: { replace: historyReplace } },
+  }),
+  // Read lazily: the factory is hoisted above `routeState`'s declaration.
+  useRoute: () => routeState,
+  onBeforeRouteLeave: (guard: () => void) => {
+    guards.leave = guard
+  },
+  onBeforeRouteUpdate: (guard: () => void) => {
+    guards.update = guard
+  },
   RouterLink: { props: ["to"], template: "<a><slot /></a>" },
 }))
 
@@ -51,6 +75,18 @@ import { useAuthStore } from "@/stores/auth"
 import { useUiStore } from "@/stores/ui"
 
 const mockedWalk = vi.mocked(walkTable)
+
+// The current route as the page sees it. `routerReplace` writes the query back,
+// as the real router would, so a sync loop would show up as repeated calls.
+const routeState = reactive({ name: "resource-list", query: {} as Record<string, string> })
+function resetRoute(query: Record<string, string> = {}): void {
+  routeState.query = query
+  routerReplace.mockReset()
+  routerReplace.mockImplementation((to: { query: Record<string, string> }) => {
+    routeState.query = to.query
+    return Promise.resolve()
+  })
+}
 
 // Give the virtualizer a viewport: jsdom has no layout, so without both the
 // rect and offsetWidth/offsetHeight it renders zero rows and every row
@@ -155,6 +191,7 @@ describe("ResourceListPage in all-namespaces mode", () => {
     setActivePinia(createPinia())
     mockedWalk.mockReset()
     routerPush.mockReset()
+    resetRoute()
     watchFake.onEvent = undefined
     useAuthStore().setSession("alpha", "tok-alpha", null, false)
   })
@@ -245,5 +282,287 @@ describe("ResourceListPage in all-namespaces mode", () => {
     const wrapper = await mountPage()
 
     expect(renderedRows(wrapper)).toEqual([["api", "1/1"]])
+  })
+})
+
+describe("ResourceListPage URL query", () => {
+  beforeEach(() => {
+    window.sessionStorage.clear()
+    setActivePinia(createPinia())
+    mockedWalk.mockReset()
+    mockedWalk.mockImplementation(walkOf([deployment("team-a", "api", "1/1")]))
+    routerPush.mockReset()
+    historyReplace.mockReset()
+    guards.leave = undefined
+    guards.update = undefined
+    resetRoute()
+    watchFake.onEvent = undefined
+    useAuthStore().setSession("alpha", "tok-alpha", null, false)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    for (const wrapper of mounted.splice(0)) wrapper.unmount()
+  })
+
+  type WalkOptions = { namespace?: string; labelSelector?: string; keepRow?: unknown }
+
+  function lastWalkOptions(): WalkOptions {
+    const calls = mockedWalk.mock.calls
+    return calls[calls.length - 1]![1] as WalkOptions
+  }
+
+  function lastReplacedQuery(): Record<string, string> | undefined {
+    const calls = routerReplace.mock.calls
+    return (calls[calls.length - 1]?.[0] as { query: Record<string, string> } | undefined)?.query
+  }
+
+  /** A walk that stops at the load cap: a continue token is left over. */
+  function cappedWalk() {
+    return async () => ({ ...(await walkOf([deployment("team-a", "api", "1/1")])()), continueToken: "more" })
+  }
+
+  const filterInput = (w: ReturnType<typeof mount>) => w.find('input[type="search"]')
+  const selectorInput = (w: ReturnType<typeof mount>) => w.find('input[type="text"]')
+
+  it("lists with the namespace, selector and filter the URL names", async () => {
+    resetRoute({ namespace: "team-a", filter: "api", selector: "app=web" })
+    const wrapper = await mountPage()
+
+    expect(useUiStore().namespace).toBe("team-a")
+    expect(lastWalkOptions()).toMatchObject({ namespace: "team-a", labelSelector: "app=web" })
+    expect(wrapper.getComponent(ResourceTable).props("globalFilter")).toBe("api")
+    expect((filterInput(wrapper).element as HTMLInputElement).value).toBe("api")
+    // Already in sync: nothing to write back.
+    expect(routerReplace).not.toHaveBeenCalled()
+  })
+
+  // Defaults never reach the URL: an unfiltered list in all namespaces keeps
+  // the bare one it was opened with.
+  it("leaves the URL bare for an unfiltered list in all namespaces", async () => {
+    await mountPage()
+    expect(routerReplace).not.toHaveBeenCalled()
+  })
+
+  it("writes a selected namespace into a bare URL", async () => {
+    useUiStore().namespace = "team-b"
+    await mountPage()
+    expect(lastReplacedQuery()).toEqual({ namespace: "team-b" })
+  })
+
+  it("drops the namespace again on switching to all namespaces", async () => {
+    resetRoute({ namespace: "team-a" })
+    await mountPage()
+    useUiStore().namespace = ""
+    await flushPromises()
+    expect(lastReplacedQuery()).toEqual({})
+  })
+
+  it("ignores a namespace that cannot name one and rewrites the URL", async () => {
+    useUiStore().namespace = "team-a"
+    resetRoute({ namespace: "../kube-system" })
+    await mountPage()
+
+    expect(useUiStore().namespace).toBe("team-a")
+    expect(lastWalkOptions().namespace).toBe("team-a")
+    expect(lastReplacedQuery()).toEqual({ namespace: "team-a" })
+  })
+
+  // Regression: every keystroke was a full router navigation and a
+  // history.replaceState call, which browsers throttle.
+  it("debounces filter keystrokes into one write", async () => {
+    const wrapper = await mountPage()
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+
+    await filterInput(wrapper).setValue("w")
+    await filterInput(wrapper).setValue("we")
+    expect(routerReplace).not.toHaveBeenCalled()
+
+    vi.advanceTimersByTime(300)
+    expect(routerReplace).toHaveBeenCalledTimes(1)
+    expect(lastReplacedQuery()).toEqual({ filter: "we" })
+  })
+
+  // The selector field is a draft until Enter/Refresh lists with it: a URL
+  // carrying a half-typed selector would describe rows nobody listed.
+  it("writes the label selector only once it is applied", async () => {
+    const wrapper = await mountPage()
+    await selectorInput(wrapper).setValue("app=web")
+    expect(routerReplace).not.toHaveBeenCalled()
+
+    await selectorInput(wrapper).trigger("keydown", { key: "Enter" })
+    await flushPromises()
+    expect(lastWalkOptions().labelSelector).toBe("app=web")
+    expect(lastReplacedQuery()).toEqual({ selector: "app=web" })
+  })
+
+  it("refreshes on Enter when the selector did not change", async () => {
+    resetRoute({ selector: "app=web" })
+    const wrapper = await mountPage()
+    expect(mockedWalk).toHaveBeenCalledTimes(1)
+
+    await selectorInput(wrapper).trigger("keydown", { key: "Enter" })
+    await flushPromises()
+    expect(mockedWalk).toHaveBeenCalledTimes(2)
+    expect(lastWalkOptions().labelSelector).toBe("app=web")
+  })
+
+  // Regression: with the reset gone, a namespace switch listed with whatever
+  // half-typed text sat in the selector field — and wrote it into the URL.
+  it("lists a namespace switch with the applied selector, not the draft", async () => {
+    resetRoute({ selector: "app=web" })
+    const wrapper = await mountPage()
+    await selectorInput(wrapper).setValue("app=")
+
+    useUiStore().namespace = "team-b"
+    await flushPromises()
+
+    expect(lastWalkOptions()).toMatchObject({ namespace: "team-b", labelSelector: "app=web" })
+    expect(lastReplacedQuery()).toEqual({ namespace: "team-b", selector: "app=web" })
+  })
+
+  // Regression: the name search read the draft selector too, so the scan and
+  // the URL described different collections.
+  it("runs the name search with the applied selector, not the draft", async () => {
+    mockedWalk.mockImplementation(cappedWalk())
+    resetRoute({ selector: "app=web" })
+    const wrapper = await mountPage()
+    await selectorInput(wrapper).setValue("app=db")
+    await filterInput(wrapper).setValue("api")
+
+    await filterInput(wrapper).trigger("keydown", { key: "Enter" })
+    await flushPromises()
+
+    expect(lastWalkOptions().keepRow).toBeDefined()
+    expect(lastWalkOptions().labelSelector).toBe("app=web")
+  })
+
+  // Regression: a filter restored from the URL on a capped collection filtered
+  // the loaded window only, with nothing saying the result was partial.
+  it("runs a URL filter as a name search when the listing is capped", async () => {
+    mockedWalk.mockImplementation(cappedWalk())
+    resetRoute({ filter: "api" })
+    const wrapper = await mountPage()
+
+    expect(mockedWalk).toHaveBeenCalledTimes(2)
+    expect(lastWalkOptions().keepRow).toBeDefined()
+    expect(wrapper.text()).toContain("Name search “api”")
+  })
+
+  it("does not search when the whole collection is loaded", async () => {
+    resetRoute({ filter: "api" })
+    await mountPage()
+    expect(mockedWalk).toHaveBeenCalledTimes(1)
+  })
+
+  // Regression: only a resource change adopted the URL, so a sidebar click on
+  // the list already open (a bare URL, same path) left the filters on screen
+  // under a URL without them — and Back between two such entries changed the
+  // URL alone.
+  it("adopts a query landing on the same list", async () => {
+    resetRoute({ filter: "api", selector: "app=web" })
+    const wrapper = await mountPage()
+
+    routeState.query = {}
+    await flushPromises()
+    expect(wrapper.getComponent(ResourceTable).props("globalFilter")).toBe("")
+    expect(lastWalkOptions().labelSelector).toBe("")
+    expect(routerReplace).not.toHaveBeenCalled()
+
+    routeState.query = { filter: "web" }
+    await flushPromises()
+    expect(wrapper.getComponent(ResourceTable).props("globalFilter")).toBe("web")
+  })
+
+  it("takes the next resource's filters from its own URL", async () => {
+    resetRoute({ namespace: "team-a", filter: "api", selector: "app=web" })
+    const wrapper = await mountPage()
+
+    // A sidebar link: a bare list route for another resource.
+    routeState.query = {}
+    await wrapper.setProps({ resource: "statefulsets" })
+    await flushPromises()
+
+    expect(wrapper.getComponent(ResourceTable).props("globalFilter")).toBe("")
+    expect(lastWalkOptions()).toMatchObject({ namespace: "team-a", labelSelector: "" })
+    // The namespace is global: absent from the URL means "keep it".
+    expect(useUiStore().namespace).toBe("team-a")
+    expect(lastReplacedQuery()).toEqual({ namespace: "team-a" })
+  })
+
+  it("lists once for a navigation that also brings a namespace", async () => {
+    const wrapper = await mountPage()
+    expect(mockedWalk).toHaveBeenCalledTimes(1)
+
+    routeState.query = { namespace: "team-c", selector: "app=db" }
+    await wrapper.setProps({ resource: "statefulsets" })
+    await flushPromises()
+
+    expect(mockedWalk).toHaveBeenCalledTimes(2)
+    expect(lastWalkOptions()).toMatchObject({ namespace: "team-c", labelSelector: "app=db" })
+  })
+
+  it("keeps the filters across a namespace switch", async () => {
+    resetRoute({ namespace: "team-a", filter: "api", selector: "app=web" })
+    const wrapper = await mountPage()
+
+    useUiStore().namespace = "team-b"
+    await flushPromises()
+
+    expect(lastWalkOptions()).toMatchObject({ namespace: "team-b", labelSelector: "app=web" })
+    expect(wrapper.getComponent(ResourceTable).props("globalFilter")).toBe("api")
+    expect(lastReplacedQuery()).toEqual({ namespace: "team-b", filter: "api", selector: "app=web" })
+  })
+
+  it("leaves another route's URL alone", async () => {
+    routeState.name = "resource-detail"
+    try {
+      useUiStore().namespace = "team-a"
+      await mountPage()
+      expect(routerReplace).not.toHaveBeenCalled()
+    } finally {
+      routeState.name = "resource-list"
+    }
+  })
+
+  // Regression: a replace issued while a navigation away was pending became
+  // the newer navigation and cancelled it — the row click was lost.
+  it("writes nothing once a navigation away has started", async () => {
+    await mountPage()
+    guards.leave!()
+
+    useUiStore().namespace = "team-c"
+    await flushPromises()
+    expect(routerReplace).not.toHaveBeenCalled()
+
+    // Superseded by a navigation that keeps this page: writing resumes.
+    guards.update!()
+    useUiStore().namespace = "team-d"
+    await flushPromises()
+    expect(lastReplacedQuery()).toEqual({ namespace: "team-d" })
+  })
+
+  it("flushes a pending filter write into the entry being left", async () => {
+    const wrapper = await mountPage()
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+    await filterInput(wrapper).setValue("we")
+
+    guards.leave!()
+    // Straight into the history entry: a router.replace would cancel the leave.
+    expect(historyReplace).toHaveBeenCalledWith("/r/apps/v1/deployments?filter=we")
+    vi.advanceTimersByTime(300)
+    expect(routerReplace).not.toHaveBeenCalled()
+  })
+
+  it("remembers the shown query for the detail page's way back", async () => {
+    resetRoute({ namespace: "team-a", filter: "api" })
+    const wrapper = await mountPage()
+    expect(useUiStore().listQueryFor("apps/v1/deployments")).toEqual({
+      namespace: "team-a",
+      filter: "api",
+    })
+
+    await filterInput(wrapper).setValue("")
+    expect(useUiStore().listQueryFor("apps/v1/deployments")).toEqual({ namespace: "team-a" })
   })
 })

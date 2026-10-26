@@ -6,6 +6,13 @@
  */
 export const CLUSTER_SCOPE_SENTINEL = "_"
 
+const DNS1123_LABEL_RE = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/
+
+/** True for a DNS-1123 label — the shape of every namespace name. */
+export function isDNS1123Label(value: string): boolean {
+  return DNS1123_LABEL_RE.test(value)
+}
+
 const VERSION_RE = /^v(\d+)(?:(alpha|beta)(\d+))?$/
 
 /**

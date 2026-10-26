@@ -30,7 +30,11 @@ authorization model of its own.
   where it opens over the content instead.
 - **Live-updating lists** backed by the Kubernetes Table API and a watch
   stream, with client-side sort/filter over the whole collection. On the
-  events list the Object column links straight to the involved object.
+  events list the Object column links straight to the involved object. The
+  namespace, filter and applied label selector live in the URL
+  (`?namespace=…&filter=…&selector=…`, defaults omitted), so Back, a reload or
+  a shared link reopens the same filtered view. A link without `namespace`
+  opens in the recipient's selected namespace.
 - **Object detail view**: an Overview tab that renders `spec`/`status` as a
   readable field tree (with a toggle to hide server-added noise) plus a
   Details card for kinds that keep their content outside `spec` (Events,

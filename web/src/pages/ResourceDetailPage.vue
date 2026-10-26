@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, provide, ref, watch } from "vue"
-import { useRouter } from "vue-router"
+import { useRouter, type RouteLocationRaw } from "vue-router"
 
 import type { ResourceRef } from "@/api/types"
 import DeleteConfirmDialog from "@/components/detail/DeleteConfirmDialog.vue"
@@ -18,6 +18,7 @@ import BaseTabs from "@/components/ui/BaseTabs.vue"
 import { OWNED_PODS_KEY, useOwnedPods } from "@/composables/useOwnedPods"
 import { useResourceObject } from "@/composables/useResourceObject"
 import { resourceListRoute } from "@/router"
+import { useUiStore } from "@/stores/ui"
 import { CLUSTER_SCOPE_SENTINEL } from "@/utils/k8sNames"
 
 const props = defineProps<{
@@ -29,6 +30,7 @@ const props = defineProps<{
 }>()
 
 const router = useRouter()
+const ui = useUiStore()
 
 const apiRef = computed<ResourceRef>(() => ({
   group: props.group === "core" ? "" : props.group,
@@ -118,8 +120,17 @@ watch(activeTab, (tab) => {
 
 const deleteOpen = ref(false)
 
+// Back to the list as it was last shown (filters, selector, namespace), the
+// way the browser's Back would — not a bare, unfiltered list.
+function listRoute(): RouteLocationRaw {
+  return resourceListRoute(
+    apiRef.value,
+    ui.listQueryFor(`${props.group}/${props.version}/${props.resource}`),
+  )
+}
+
 function onDeleted(): void {
-  void router.push(resourceListRoute(apiRef.value))
+  void router.push(listRoute())
 }
 </script>
 
@@ -128,7 +139,7 @@ function onDeleted(): void {
     <div class="mb-3 flex flex-wrap items-center gap-3">
       <h1 class="text-xl font-semibold">
         <RouterLink
-          :to="resourceListRoute(apiRef)"
+          :to="listRoute()"
           class="text-slate-400 hover:text-blue-600 hover:underline dark:hover:text-blue-400"
           title="Back to the resource list"
         >{{ kind || resource }}</RouterLink>

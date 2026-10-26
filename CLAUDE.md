@@ -483,7 +483,10 @@ fill in.
 
 The only other stored UI state is the selected namespace
 (`kube-console.namespace.v1`, `stores/ui.ts`, tab-scoped, non-sensitive, never
-localStorage).
+localStorage). The list page's
+filter, applied selector and a non-default namespace also live in its **URL**
+(see "Resource layer"), and therefore in browser history beyond the tab — view
+state, not credentials; nothing derived from a token goes there.
 
 **Kubernetes data is always rendered as escaped text** (no `v-html`).
 
@@ -807,6 +810,61 @@ sibling watches in `useClusterSummary` and `ProblemPodsCard`: `refresh()` is wha
 would otherwise have stopped it, so a switch to a context with no session left
 the previous cluster's stream upserting rows into a list now labelled as the new
 one.
+
+The list page's view state is mirrored into its **URL query**
+(`utils/listQuery.ts`: `namespace`, `filter`, `selector`), so Back from a detail
+page, a reload, the login `redirect` and a shared link all reopen the same
+view. **Defaults are never written** (owner decision): all namespaces, an empty
+filter and no selector are simply absent, so an unfiltered list keeps a bare
+URL. The price is that an absent `namespace` cannot mean "all": it means "keep
+the selected one", since the selection is global and sidebar links are bare —
+so an all-namespaces link opens in whatever namespace the recipient has
+picked, and Back to such an entry keeps the current namespace. An inbound
+`namespace` that is not a DNS-1123 label (`isDNS1123Label`, `utils/k8sNames.ts`)
+reads as absent — it comes from a link anyone can write and lands in the
+persisted selection; for the same reason the 403 free-text fallback in
+`NamespaceSelector` commits only a valid label (or empty) and `stores/ui.ts`
+drops an invalid stored one, so nothing is written that a reader would ignore.
+
+The rules that keep URL and view in step, each with a regression test:
+
+- **The selector in force is `appliedSelector`**, set on Enter/Refresh
+  (`applySelector`) and by adoption — never the draft field. Every listing
+  reads it (`getOptions`): a namespace switch, a 410 relist, the next page and
+  the name search used to take whatever half-typed text sat in the field, and
+  the URL would then describe rows nobody asked for. A changed selector reloads
+  through the reload watch; an unchanged one is a plain refresh.
+- **Adoption** runs at setup, on a resource change, and on **any query that
+  lands differing from the view** (`watch(route.query)`): a sidebar click on the
+  list already open is a push to the bare path with unchanged props, and Back
+  between two entries of one list changes only the query — keyed on the props
+  alone, both left the URL and the table describing different things. The
+  page's own replaces land a query equal to the view and are skipped, so a
+  write cannot roll typing back. Both adopting watches are declared ahead of the
+  reload watch so a navigation lists once.
+- **Writes are `router.replace`**, only on `resource-list`, and **filter
+  keystrokes are debounced** (300ms; namespace/selector changes write at once):
+  every replace is a full navigation, and browsers throttle `replaceState`. A
+  write still pending when a navigation starts is **flushed** by the
+  `onBeforeRouteLeave`/`onBeforeRouteUpdate` guards straight into the history
+  entry (`router.options.history.replace`) — a `router.replace` there would
+  cancel the navigation, and dropping it would leave Back a keystroke behind.
+- **No write while leaving**: from `onBeforeRouteLeave` on, a replace would
+  become the newer navigation and cancel the pending one (a row click lost). An
+  update guard (a navigation that keeps the page) or an *aborted* failure in
+  `afterEach` clears the flag; a *cancelled* one does not, since whatever
+  cancelled it either leaves too or runs the update guard.
+- A filter arriving by URL on a **capped** listing (continue token left) is run
+  as the Enter-triggered **name search** (`runPendingSearch`), banner included:
+  the URL cannot say whether Enter was pressed, and filtering only the loaded
+  window would silently show a partial result.
+- The detail page's way back — the header link and the redirect after Delete —
+  uses `ui.listQueryFor(<group>/<version>/<resource>)`, the query the list was
+  last shown with (`rememberListQuery`, memory only), as the browser's Back
+  would; `resourceListRoute` takes it as an optional second argument.
+
+A namespace switch keeps the filters (it used to reset them as a side effect of
+sharing the navigation watch). Sort order is not in the URL.
 
 Because a whole collection sits behind a live watch, everything on the per-event
 path is sized against the 5000-row cap, not against the one row an event usually
@@ -1483,11 +1541,14 @@ select. Do not reintroduce a bare `<select>`, and do not put `.number` on its
 coerce a string form that never occurs.
 
 `NamespaceSelector`'s 403 fallback — a free-text input, for a token that cannot
-list namespaces — binds `v-model.lazy`, and that modifier is load-bearing rather
-than cosmetic: `ui.namespace` is watched by the list page (a bounded full
-collection walk), the recent-events card (a 1000-item fetch) and the Overview's
-metrics loop, so a plain `v-model` fired all three per keystroke and requested
-`k`, `ku`, `kub`, … against the apiserver. The `BaseSelect` branch never had the
+list namespaces — commits on **`change`** (`commitFreeText`), never per
+keystroke, and that is load-bearing rather than cosmetic: `ui.namespace` is
+watched by the list page (a bounded full collection walk), the recent-events
+card (a 1000-item fetch) and the Overview's metrics loop, so a plain `v-model`
+fired all three per keystroke and requested `k`, `ku`, `kub`, … against the
+apiserver. It also commits only a trimmed DNS-1123 label or empty, snapping the
+field back otherwise — the value is listed with, persisted and written into
+list URLs, whose reader would ignore it. The `BaseSelect` branch never had the
 problem: a `<select>` emits once per pick.
 
 Its namespace query carries a **60s `refetchInterval`**, and that is the only

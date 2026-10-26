@@ -105,6 +105,28 @@ describe("NamespaceSelector", () => {
     expect(ui.namespace).toBe("")
   })
 
+  // Regression: the free-text fallback committed anything, which was then
+  // listed with and written into list URLs that every reader ignores.
+  it("commits only a namespace-shaped value from the free-text fallback", async () => {
+    mockRoute = { name: "overview", params: {} }
+    mockDiscovery(undefined)
+    const ui = useUiStore()
+    ui.namespace = "prod"
+    setNamespaces(undefined, true)
+    const wrapper = mount(NamespaceSelector)
+    const input = wrapper.find("input")
+
+    await input.setValue("Team A")
+    expect(ui.namespace).toBe("prod")
+    expect((input.element as HTMLInputElement).value).toBe("prod")
+
+    await input.setValue(" team-a ")
+    expect(ui.namespace).toBe("team-a")
+
+    await input.setValue("")
+    expect(ui.namespace).toBe("")
+  })
+
   it("leaves the namespace untouched when the list errors (free-text fallback)", () => {
     mockRoute = { name: "overview", params: {} }
     mockDiscovery(undefined)
