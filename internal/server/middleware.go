@@ -67,6 +67,32 @@ func RequireLoopbackHost(next http.Handler) http.Handler {
 	})
 }
 
+// RequireSameOriginWrites rejects cross-origin state-changing requests
+// (http.CrossOriginProtection: Sec-Fetch-Site, falling back to Origin vs Host).
+// It is the credential carve-out's third fence, mounted beside
+// RequireLoopbackHost and only in that mode.
+//
+// The Host fence stops DNS rebinding but not a plain cross-site request: a page
+// on evil.example POSTing to http://127.0.0.1:8080/k8s/... arrives with a
+// loopback Host. With an untyped body (no Content-Type) that POST is
+// CORS-simple, so the browser sends it without a preflight, and the apiserver
+// decodes an empty Content-Type as JSON — so it created objects (a
+// cluster-admin binding, a privileged pod) as the kubeconfig's owner. CORS only
+// hides the response; the write had already happened.
+//
+// Safe methods pass, and so does a request with neither header (curl, an MCP
+// agent): only a browser can be ridden, and a browser always says where it
+// comes from. The token mode does not need it: a forged request carries no
+// bearer.
+func RequireSameOriginWrites(next http.Handler) http.Handler {
+	cop := http.NewCrossOriginProtection()
+	cop.SetDenyHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		httpx.WriteError(w, http.StatusForbidden, "Forbidden",
+			"cross-origin requests are not allowed in this mode")
+	}))
+	return cop.Handler(next)
+}
+
 // isLoopbackHost reports whether a Host header value names the loopback
 // interface: "localhost" exactly (never a suffix like "localhost.evil.example")
 // or a loopback IP literal, with or without a port.

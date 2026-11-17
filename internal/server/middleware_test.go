@@ -14,6 +14,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -781,6 +782,94 @@ func TestRebindingRejectionCarriesSecurityHeaders(t *testing.T) {
 	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors 'none'") {
 		t.Errorf("CSP on the 403 = %q, want frame-ancestors 'none'", csp)
 	}
+}
+
+// Regression: in credential mode the Host fence was the only browser defence,
+// and it stops DNS rebinding, not a cross-site request to the real loopback
+// name. A page on evil.example POSTing to http://127.0.0.1:8080/k8s/... with an
+// untyped body (no Content-Type, so no CORS preflight — and the apiserver reads
+// an empty Content-Type as JSON) created objects as the kubeconfig's owner:
+// CORS hides the response, not the write.
+func TestCrossOriginWritesRejectedInCredentialMode(t *testing.T) {
+	var reached atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached.Add(1)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer upstream.Close()
+
+	newHandler := func(useCreds bool) http.Handler {
+		return NewHandler(Deps{
+			Cfg: &config.Config{MaxBodyBytes: 4 << 20, MaxExecSessions: 1, UseKubeconfigCredentials: useCreds},
+			Registry: kube.NewRegistryFromUpstreams("default", map[string]*kube.Upstream{
+				"default": {
+					BaseURL:              mustParseURL(t, upstream.URL),
+					Transport:            http.DefaultTransport,
+					UseConfigCredentials: useCreds,
+				},
+			}),
+			Logger:  slog.New(slog.DiscardHandler),
+			Version: "test",
+			DistFS:  testDist,
+		})
+	}
+
+	const path = "/k8s/apis/rbac.authorization.k8s.io/v1/clusterrolebindings"
+	post := func(h http.Handler, headers map[string]string) int {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
+		req.Host = "127.0.0.1:8080"
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	creds := newHandler(true)
+	blocked := map[string]map[string]string{
+		"Sec-Fetch-Site cross-site":   {"Sec-Fetch-Site": "cross-site"},
+		"Sec-Fetch-Site same-site":    {"Sec-Fetch-Site": "same-site"},
+		"foreign Origin, old browser": {"Origin": "https://evil.example"},
+		"other loopback port":         {"Origin": "http://127.0.0.1:9999"},
+	}
+	for name, headers := range blocked {
+		t.Run("blocked/"+name, func(t *testing.T) {
+			before := reached.Load()
+			if code := post(creds, headers); code != http.StatusForbidden {
+				t.Errorf("status = %d, want 403", code)
+			}
+			if reached.Load() != before {
+				t.Error("cross-origin write reached the apiserver")
+			}
+		})
+	}
+
+	allowed := map[string]map[string]string{
+		"SPA same-origin":    {"Sec-Fetch-Site": "same-origin", "Origin": "http://127.0.0.1:8080"},
+		"Origin matches":     {"Origin": "http://127.0.0.1:8080"},
+		"non-browser (curl)": {},
+	}
+	for name, headers := range allowed {
+		t.Run("allowed/"+name, func(t *testing.T) {
+			before := reached.Load()
+			if code := post(creds, headers); code != http.StatusCreated {
+				t.Errorf("status = %d, want 201", code)
+			}
+			if reached.Load() != before+1 {
+				t.Error("same-origin write did not reach the apiserver")
+			}
+		})
+	}
+
+	// Token mode is untouched: a forged request carries no bearer and gets the
+	// gateway's own 401, never the fence's 403.
+	t.Run("token mode", func(t *testing.T) {
+		code := post(newHandler(false), map[string]string{"Sec-Fetch-Site": "cross-site"})
+		if code == http.StatusForbidden {
+			t.Errorf("token mode answered 403; the fence must be credential-mode only")
+		}
+	})
 }
 
 func mustParseURL(t *testing.T, raw string) *url.URL {

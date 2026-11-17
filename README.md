@@ -325,6 +325,12 @@ in and the fences are startup errors, not warnings:
   same-origin, so CORS never applies and the WebSocket origin check passes.
   This is `kubectl proxy`'s `--accept-hosts`, and it is what makes the mode
   safe to leave running.
+- **same-origin writes only.** A non-GET request that a browser marks as
+  cross-origin (`Sec-Fetch-Site`, else `Origin` vs `Host`) is refused with 403.
+  The `Host` check cannot stop a page on another site from POSTing to the real
+  `127.0.0.1` name, and an untyped POST is a CORS-simple request — no preflight
+  — that the apiserver decodes as JSON: CORS would hide the response, not stop
+  the write. Requests carrying neither header (curl, MCP agents) are unaffected.
 - A loud `WARN` is logged at startup whenever it is on.
 - The Helm chart does not expose it at all.
 

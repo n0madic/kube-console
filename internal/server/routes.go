@@ -80,8 +80,14 @@ func NewHandler(d Deps) http.Handler {
 	// mounting it there would fence off a deployment that is allowed to be
 	// remote. server.Run rejects a disagreement between the two at startup, so
 	// this cannot quietly become half a mode.
+	//
+	// The Host fence alone does not stop a cross-site page from *writing* to
+	// the real loopback name (a CORS-simple POST needs no preflight), hence
+	// RequireSameOriginWrites beside it. Both behind SecurityHeaders for the
+	// same reason.
 	if d.Registry.UsesConfigCredentials() {
 		r.Use(RequireLoopbackHost)
+		r.Use(RequireSameOriginWrites)
 	}
 	// A client that stops reading must not be able to hold a handler, its
 	// in-flight slot and its upstream connection open forever. Per-write, not

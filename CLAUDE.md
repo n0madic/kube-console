@@ -134,6 +134,17 @@ handles them. The fences are `config.validate` **startup errors**, not warnings:
   mounted the other way round the one response written specifically for a
   rebound attacker page was the one with no CSP, no nosniff and no
   `frame-ancestors`;
+- `RequireSameOriginWrites` (same file, stdlib `http.CrossOriginProtection`:
+  `Sec-Fetch-Site`, falling back to Origin vs Host), mounted right after the
+  Host fence and likewise only in this mode. The Host fence stops rebinding,
+  not a cross-site page writing to the **real** loopback name: an untyped POST
+  (no Content-Type) is CORS-simple, so it goes without a preflight, and the
+  apiserver decodes an empty Content-Type as JSON — `/k8s/*` creates (a
+  cluster-admin binding, a privileged pod) ran as the kubeconfig's owner with
+  CORS hiding only the response. Exec and `/mcp` were already covered (the
+  WebSocket Origin check; MCP 403s any Origin). Requests with neither header
+  pass, so curl and MCP agents are unaffected; the Vite dev proxy forwards the
+  browser's `Sec-Fetch-Site: same-origin`;
 - a startup `WARN` in `server.Run`, and the Helm chart never exposes the flag.
 
 Mechanically: `Upstream.UseConfigCredentials` + `Upstream.RoundTripper(token)`
