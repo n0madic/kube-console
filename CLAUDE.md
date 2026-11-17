@@ -524,7 +524,11 @@ client's token upstream is what the MCP security guidance forbids; deliberate
   it is trimmed to a whole line and the notice says so. `get_pod_logs` sends
   `Accept: */*`: `text/plain` is a 406 from a real apiserver.
 - **Limits/logging/audit**: the **same** `rateLimit`/`inFlight` instances as
-  `/k8s` and `/api` (unary pool), no `AbortOnShutdown`. One `mcp tool` line per
+  `/k8s` and `/api` (unary pool), no `AbortOnShutdown` — which holds only
+  because nothing streams: `tools` is advertised **without** `listChanged` (the
+  SDK default made Claude Code open `subscriptions/listen`, parked for the whole
+  agent session — measured 181s) and `guard` 400s that method by `Mcp-Method`
+  (the SDK matches it to the body). One `mcp tool` line per
   call, never arguments or error text; SDK logs go through `demoteInfo`
   (below-Warn → Debug). `User-Agent: kube-console-mcp/<version>` via a
   **copy** of the upstream transport (`withUserAgent`), writes with

@@ -127,8 +127,9 @@ func NewHandler(d Deps) http.Handler {
 
 	// The MCP endpoint spends the same two limiter instances as /k8s and /api,
 	// so alternating between the three prefixes cannot spend a budget twice.
-	// Every MCP call is unary (the 2026-07-28 transport has no stream), hence
-	// no long-lived predicate and no AbortOnShutdown. Mounted only for an
+	// Every MCP call is unary — the handler refuses subscriptions/listen, the
+	// transport's one long-lived method — hence no long-lived predicate and no
+	// AbortOnShutdown. Mounted only for an
 	// explicit read/write mode: an unset mode (a hand-built Config) is off,
 	// and the path then falls through to the SPA handler's JSON 404.
 	if d.Cfg.MCPMode == config.MCPRead || d.Cfg.MCPMode == config.MCPWrite {

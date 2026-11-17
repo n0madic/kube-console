@@ -43,6 +43,9 @@ const ProtocolVersion = "2026-07-28"
 // protocolVersionHeader carries the revision on every 2026-07-28 POST.
 const protocolVersionHeader = "MCP-Protocol-Version"
 
+// methodHeader names the JSON-RPC method of the request body.
+const methodHeader = "Mcp-Method"
+
 // instructions is sent to clients as ServerOptions.Instructions: the few
 // conventions a model needs before its first call.
 const instructions = `kube-console exposes one Kubernetes cluster, fixed by this connection; ` +
@@ -88,7 +91,14 @@ func NewHandler(o Options) http.Handler {
 	srv := sdk.NewServer(&sdk.Implementation{Name: "kube-console", Version: o.Version}, &sdk.ServerOptions{
 		Instructions:              instructions,
 		SupportedProtocolVersions: []string{ProtocolVersion},
-		Logger:                    sdkLogger,
+		// Tools without listChanged: the tool set is fixed for the life of the
+		// process, and advertising list changes (the SDK's default) makes a
+		// client that handles them open subscriptions/listen — a stream that
+		// parks until the client leaves, in a unary in-flight slot. Setting
+		// Capabilities also drops the default logging capability, which no
+		// tool uses.
+		Capabilities: &sdk.ServerCapabilities{Tools: &sdk.ToolCapabilities{}},
+		Logger:       sdkLogger,
 	})
 	s.registerTools(srv)
 	h := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return srv }, &sdk.StreamableHTTPOptions{
@@ -129,6 +139,16 @@ func (s *server) guard(next http.Handler) http.Handler {
 		if r.Header.Get(protocolVersionHeader) != ProtocolVersion {
 			httpx.WriteError(w, http.StatusBadRequest, "BadRequest",
 				"unsupported or missing "+protocolVersionHeader+": this endpoint serves MCP "+ProtocolVersion+" only")
+			return
+		}
+		// The one long-lived method, refused even from a client that opens it
+		// unasked: tokens are not validated before upstream and the rate limit
+		// is off by default, so parked listens would fill the in-flight pool
+		// shared with /k8s and /api. The SDK checks this header against the
+		// body (and rejects batches at this version), so it cannot be bypassed.
+		if r.Header.Get(methodHeader) == "subscriptions/listen" {
+			httpx.WriteError(w, http.StatusBadRequest, "BadRequest",
+				"subscriptions/listen is not supported: the tool list never changes")
 			return
 		}
 		if !s.reg.UsesConfigCredentials() && kube.ExtractBearer(r) == "" {

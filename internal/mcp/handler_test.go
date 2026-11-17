@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -285,6 +286,88 @@ func TestProtocolRevisionEnforced(t *testing.T) {
 				t.Errorf("upstream contacted for a rejected request: %s", body)
 			}
 		})
+	}
+}
+
+// methodRecorder records the Mcp-Method header of every client request.
+type methodRecorder struct {
+	mu      sync.Mutex
+	methods []string
+	base    http.RoundTripper
+}
+
+func (m *methodRecorder) RoundTrip(r *http.Request) (*http.Response, error) {
+	m.mu.Lock()
+	m.methods = append(m.methods, r.Header.Get("Mcp-Method"))
+	m.mu.Unlock()
+	return m.base.RoundTrip(r)
+}
+
+// The tool set is fixed for the life of the process, so the server must not
+// advertise tools.listChanged: a client that handles list changes (Claude Code
+// does) then opens subscriptions/listen, a stream that parks until the client
+// disconnects — measured holding a slot of the unary in-flight pool, shared
+// with /k8s and /api, for the whole agent session.
+func TestNoListChangedSoNoListenStream(t *testing.T) {
+	f := newFixture(t, singleRegistry(fakeAPIServer(t, &seen{}, 0)))
+	rec := &methodRecorder{base: headerTransport{
+		hdr:  map[string]string{"Authorization": "Bearer " + sentinelToken},
+		base: http.DefaultTransport,
+	}}
+	client := sdk.NewClient(&sdk.Implementation{Name: "test", Version: "0"}, &sdk.ClientOptions{
+		ToolListChangedHandler: func(context.Context, *sdk.ToolListChangedRequest) {},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cs, err := client.Connect(ctx, &sdk.StreamableClientTransport{Endpoint: f.url, HTTPClient: &http.Client{Transport: rec}}, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer func() { _ = cs.Close() }()
+	if caps := cs.InitializeResult().Capabilities; caps == nil || caps.Tools == nil || caps.Tools.ListChanged {
+		t.Errorf("capabilities = %+v, want tools without listChanged", caps)
+	}
+	if _, err := cs.ListTools(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if slices.Contains(rec.methods, "subscriptions/listen") {
+		t.Errorf("client opened a listen stream: %v", rec.methods)
+	}
+}
+
+// A client that opens one anyway is refused before the SDK parks it: with
+// tokens unvalidated and the rate limit off by default, "Bearer junk" times
+// the in-flight cap would otherwise starve the UI.
+func TestListenRefused(t *testing.T) {
+	rec := &seen{}
+	f := newFixture(t, singleRegistry(fakeAPIServer(t, rec, 0)))
+	const listen = `{"jsonrpc":"2.0","id":1,"method":"subscriptions/listen","params":{"notifications":{"toolsListChanged":true},` +
+		`"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}`
+	req, err := http.NewRequest(http.MethodPost, f.url, strings.NewReader(listen))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("MCP-Protocol-Version", ProtocolVersion)
+	req.Header.Set("Mcp-Method", "subscriptions/listen")
+	req.Header.Set("Authorization", "Bearer "+sentinelToken)
+	// Before the fix the SDK parked this request until the client left; the
+	// timeout turns that hang into a fast failure.
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("subscriptions/listen was not refused: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.hits != 0 {
+		t.Errorf("upstream hits = %d, want 0", rec.hits)
 	}
 }
 
