@@ -6,7 +6,6 @@ package exec
 import (
 	"errors"
 	"fmt"
-	"regexp"
 
 	"github.com/n0madic/kube-console/internal/kube"
 )
@@ -24,12 +23,6 @@ const (
 	maxArgBytes    = 4 << 10
 	maxTokenBytes  = 48 << 10
 )
-
-// dns1123Label: namespaces and containers. Pod names are the subdomain shape,
-// checked with the shared kube.IsDNS1123Subdomain — it guards a value spliced
-// into the upstream exec URL, exactly like the metrics adapter's path
-// parameters, so the two must not carry separate copies of that pattern.
-var dns1123Label = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
 
 // AuthFrame is the mandatory first text frame from the browser.
 type AuthFrame struct {
@@ -87,13 +80,13 @@ func (a *AuthFrame) validate(requireToken bool) error {
 	if a.Context != "" && !kube.ValidContextName(a.Context) {
 		return fmt.Errorf("%w: invalid context", errInvalidAuth)
 	}
-	if !dns1123Label.MatchString(a.Namespace) {
+	if !kube.IsDNS1123Label(a.Namespace) {
 		return fmt.Errorf("%w: invalid namespace", errInvalidAuth)
 	}
 	if !kube.IsDNS1123Subdomain(a.Pod) {
 		return fmt.Errorf("%w: invalid pod name", errInvalidAuth)
 	}
-	if a.Container != "" && !dns1123Label.MatchString(a.Container) {
+	if a.Container != "" && !kube.IsDNS1123Label(a.Container) {
 		return fmt.Errorf("%w: invalid container name", errInvalidAuth)
 	}
 	if len(a.Command) == 0 {

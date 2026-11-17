@@ -542,3 +542,57 @@ func TestLoadUseKubeconfigCredentials(t *testing.T) {
 		}
 	})
 }
+
+func TestLoadMCPModeDefaultsOff(t *testing.T) {
+	t.Setenv("KUBE_API_SERVER", "https://kubernetes.default.svc")
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Off unless asked for: the endpoint widens what the deployment exposes to
+	// non-browser clients, which an operator has to choose.
+	if cfg.MCPMode != MCPOff {
+		t.Errorf("MCPMode = %q, want %q", cfg.MCPMode, MCPOff)
+	}
+}
+
+func TestLoadMCPMode(t *testing.T) {
+	t.Setenv("KUBE_API_SERVER", "https://kubernetes.default.svc")
+	t.Setenv("KUBE_CONSOLE_MCP", "read")
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MCPMode != MCPRead {
+		t.Errorf("MCPMode = %q, want %q from env", cfg.MCPMode, MCPRead)
+	}
+	cfg, err = Load([]string{"--mcp=write"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MCPMode != MCPWrite {
+		t.Errorf("MCPMode = %q, flag must override env", cfg.MCPMode)
+	}
+	cfg, err = Load([]string{"--mcp", "off"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MCPMode != MCPOff {
+		t.Errorf("MCPMode = %q, an explicit off flag must override env", cfg.MCPMode)
+	}
+}
+
+func TestLoadRejectsBadMCPMode(t *testing.T) {
+	t.Setenv("KUBE_API_SERVER", "https://kubernetes.default.svc")
+	// Anything outside the three modes is a startup error, never a silent off
+	// or — worse — a silent write: "rw", "true" and a case variant included.
+	for _, v := range []string{"rw", "true", "READ", "on", " read"} {
+		if _, err := Load([]string{"--mcp=" + v}); err == nil {
+			t.Errorf("--mcp=%q: expected an error", v)
+		}
+	}
+	t.Setenv("KUBE_CONSOLE_MCP", "yes")
+	if _, err := Load(nil); err == nil {
+		t.Error("KUBE_CONSOLE_MCP=yes: expected an error")
+	}
+}

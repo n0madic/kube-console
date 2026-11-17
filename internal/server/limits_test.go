@@ -256,3 +256,83 @@ func TestInFlightLimitDisabledIsPassthrough(t *testing.T) {
 	}
 }
 
+// postMCP issues a bare POST /mcp from a given client address. It carries no
+// protocol headers, so the MCP guard rejects it before any upstream contact.
+func postMCP(h http.Handler, remoteAddr string) int {
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	req.RemoteAddr = remoteAddr
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Code
+}
+
+// The MCP endpoint spends the same per-client budget as /k8s and /api.
+func TestRateLimitSharedWithMCP(t *testing.T) {
+	h := newLimitedHandler(t, func(c *config.Config) {
+		c.RateLimit = 2
+		c.MCPMode = config.MCPRead
+	})
+	if code := get(h, "/k8s/api/v1/pods", "203.0.113.11:5000", ""); code != http.StatusUnauthorized {
+		t.Fatalf("gateway request status = %d, want 401", code)
+	}
+	if code := postMCP(h, "203.0.113.11:5000"); code != http.StatusBadRequest {
+		t.Fatalf("mcp request status = %d, want 400 (no protocol version)", code)
+	}
+	if code := postMCP(h, "203.0.113.11:5000"); code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429: /mcp must share the budget", code)
+	}
+}
+
+// ...and the same unary in-flight pool: a request held on /k8s leaves /mcp
+// nothing when the cap is one.
+func TestInFlightLimitSharedWithMCP(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	var once sync.Once
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(entered) })
+		<-release
+	}))
+	defer upstream.Close()
+	defer close(release)
+	base, _ := url.Parse(upstream.URL)
+	cfg := &config.Config{MaxBodyBytes: 4 << 20, MaxExecSessions: 1, MaxInFlight: 1, MCPMode: config.MCPRead}
+	h := NewHandler(Deps{
+		Cfg: cfg,
+		Registry: kube.NewRegistryFromUpstreams("default", map[string]*kube.Upstream{
+			"default": {BaseURL: base, Transport: http.DefaultTransport},
+		}),
+		Logger:  slog.New(slog.DiscardHandler),
+		Version: "test",
+		DistFS:  testDist,
+	})
+
+	go func() {
+		req := httptest.NewRequest(http.MethodGet, "/k8s/api/v1/pods", nil)
+		req.Header.Set("Authorization", "Bearer tok")
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	<-entered
+
+	if code := postMCP(h, "203.0.113.12:5000"); code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429 while the only unary slot is held by /k8s", code)
+	}
+}
+
+// Off is the default, and a Config built without a mode is off too: the path
+// then reaches the SPA handler, which never answers it with HTML.
+func TestMCPNotMountedUnlessEnabled(t *testing.T) {
+	for _, mode := range []string{"", config.MCPOff} {
+		h := newLimitedHandler(t, func(c *config.Config) { c.MCPMode = mode })
+		if code := postMCP(h, "203.0.113.13:5000"); code != http.StatusMethodNotAllowed {
+			t.Errorf("mode %q: POST /mcp = %d, want the SPA handler's JSON 405", mode, code)
+		}
+		if code := get(h, "/mcp", "203.0.113.13:5000", ""); code != http.StatusNotFound {
+			t.Errorf("mode %q: GET /mcp = %d, want JSON 404", mode, code)
+		}
+	}
+	h := newLimitedHandler(t, func(c *config.Config) { c.MCPMode = config.MCPRead })
+	if code := get(h, "/mcp", "203.0.113.13:5000", ""); code != http.StatusMethodNotAllowed {
+		t.Errorf("mode read: GET /mcp = %d, want the MCP guard's 405", code)
+	}
+}

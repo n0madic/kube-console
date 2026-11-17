@@ -60,6 +60,9 @@ spec:
             - name: KUBE_CONSOLE_ALLOWED_ORIGINS
               value: {{ join "," .Values.features.allowedOrigins | quote }}
             {{- end }}
+            {{- /* A bare `off` in a values file is YAML 1.1 for false. */}}
+            - name: KUBE_CONSOLE_MCP
+              value: {{ if eq (toString .Values.mcp.mode) "false" }}"off"{{ else }}{{ .Values.mcp.mode | quote }}{{ end }}
             - name: KUBE_CONSOLE_RATE_LIMIT
               value: {{ .Values.limits.rateLimit | quote }}
             - name: KUBE_CONSOLE_MAX_IN_FLIGHT

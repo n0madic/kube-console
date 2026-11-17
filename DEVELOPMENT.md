@@ -163,10 +163,13 @@ kubectl --context <your-context> create token <serviceaccount> -n <namespace> --
 ## Architecture
 
 ```text
-Browser SPA (Vue 3, in-memory bearer token per cluster context)
+Browser SPA (Vue 3, bearer token per cluster context in sessionStorage, 8h TTL)
   ├─ /k8s/*            → constrained Kubernetes API gateway (raw passthrough)
   ├─ /api/ui/*         → small adapters: contexts, auth verify, discovery, metrics
   └─ /api/ui/exec/ws   → WebSocket bridge for pod exec (client-go remotecommand)
+
+AI agent (MCP client, protocol 2026-07-28, bearer + X-Kube-Context headers)
+  └─ POST /mcp         → MCP tools, off unless --mcp=read|write (internal/mcp)
 
 Go backend
   ├─ static SPA via go:embed
@@ -174,7 +177,8 @@ Go backend
   │  (selected per-request by the X-Kube-Context header; default when absent)
   ├─ httputil.ReverseProxy per context with path allowlist + header sanitization
   ├─ discovery adapter (aggregated discovery with legacy fallback)
-  ├─ Metrics Server adapter (CPU/memory only, no history)
+  ├─ Metrics Server adapter (CPU/memory only, no history; shared with MCP `top`)
+  ├─ MCP server (stateless; read tools, dry-run-by-default write tools)
   └─ exec bridge (WebSocket executor, SPDY fallback)
 ```
 

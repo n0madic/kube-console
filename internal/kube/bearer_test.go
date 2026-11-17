@@ -67,5 +67,12 @@ func TestExtractBearer(t *testing.T) {
 		if got := ExtractBearer(r); got != tc.want {
 			t.Errorf("ExtractBearer(%q) = %q, want %q", tc.auth, got, tc.want)
 		}
+		// The header-only form is the same parser, not a second copy of it.
+		if got := BearerFromHeader(r.Header); got != tc.want {
+			t.Errorf("BearerFromHeader(%q) = %q, want %q", tc.auth, got, tc.want)
+		}
+	}
+	if got := BearerFromHeader(nil); got != "" {
+		t.Errorf("BearerFromHeader(nil) = %q, want empty", got)
 	}
 }

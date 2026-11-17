@@ -5,7 +5,6 @@ package httpx
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 )
 
@@ -26,23 +25,6 @@ func WriteJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
-}
-
-// CopyUpstreamError forwards an upstream error response (status + body)
-// transparently, preserving Kubernetes Status JSON when present. It consumes
-// and closes resp.Body: callers must not use the response afterwards.
-func CopyUpstreamError(w http.ResponseWriter, resp *http.Response) {
-	// Drain (boundedly) and close so the upstream connection can be reused;
-	// without this the body leaks on every non-2xx upstream response.
-	defer DrainAndClose(resp)
-	ct := resp.Header.Get("Content-Type")
-	if ct == "" {
-		ct = "application/json"
-	}
-	w.Header().Set("Content-Type", ct)
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, io.LimitReader(resp.Body, 256<<10))
 }
 
 // WriteError writes a Kubernetes-Status-shaped JSON error. message must never

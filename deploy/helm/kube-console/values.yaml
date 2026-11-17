@@ -36,6 +36,17 @@ features:
   # always allowed), e.g. a dev origin. Usually empty in production.
   allowedOrigins: []
 
+# Model Context Protocol endpoint at /mcp, for AI agents (protocol revision
+# 2026-07-28 only). off | read | write. Agents authenticate exactly like the UI:
+# each request carries its own bearer token, and RBAC decides what succeeds.
+# write adds apply/delete/scale/restart tools, which are server-side dry runs
+# unless the agent passes commit=true. Use a dedicated ServiceAccount token with
+# the least RBAC the agent needs (the built-in `view` ClusterRole for read).
+# An authenticating proxy in front of kube-console must let /mcp through with
+# the Authorization header intact; browser requests (any Origin) are refused.
+mcp:
+  mode: "off"
+
 # Abuse limits. kube-console forwards any request carrying a bearer token to
 # the apiserver and lets the apiserver judge it, so whoever can reach this
 # service can reach the apiserver — these bound how hard.

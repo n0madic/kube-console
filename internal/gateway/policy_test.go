@@ -83,10 +83,10 @@ func TestCheckPathMalformed(t *testing.T) {
 		"/api/v1/foo%zz",
 		// Double-encoded payloads: one unescape leaves a residual %-escape, which
 		// must be rejected rather than forwarded for a second decode upstream.
-		"/api/v1/foo%252fbar",       // %25 2f → %2f (encoded slash)
-		"/api/%252e%252e/version",   // %252e%252e → %2e%2e (encoded dot-dot)
-		"/api/v1/foo%2565xec",       // %2565xec → %65xec (double-encoded "exec")
-		"/api/v1/foo%25bar",         // lone encoded percent
+		"/api/v1/foo%252fbar",     // %25 2f → %2f (encoded slash)
+		"/api/%252e%252e/version", // %252e%252e → %2e%2e (encoded dot-dot)
+		"/api/v1/foo%2565xec",     // %2565xec → %65xec (double-encoded "exec")
+		"/api/v1/foo%25bar",       // lone encoded percent
 	}
 	for _, p := range malformed {
 		if err := CheckPath(p); !errors.Is(err, ErrBadPath) {

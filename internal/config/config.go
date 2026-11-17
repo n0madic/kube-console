@@ -37,6 +37,17 @@ const (
 	envTrustedProxies     = "KUBE_CONSOLE_TRUSTED_PROXIES"
 	envLogLevel           = "KUBE_CONSOLE_LOG_LEVEL"
 	envLogFormat          = "KUBE_CONSOLE_LOG_FORMAT"
+	envMCP                = "KUBE_CONSOLE_MCP"
+)
+
+// MCP endpoint modes (Config.MCPMode). Off is the default: the endpoint opens
+// the cluster to non-browser clients, so it is something an operator turns on.
+// Read exposes only read-only tools; write adds the mutating ones (which still
+// dry-run unless a call explicitly commits).
+const (
+	MCPOff   = "off"
+	MCPRead  = "read"
+	MCPWrite = "write"
 )
 
 // Standard in-cluster discovery inputs. When running inside a pod, kubelet
@@ -189,6 +200,11 @@ type Config struct {
 	// ExecIdleTimeout closes exec sessions with no traffic in either direction.
 	ExecIdleTimeout time.Duration
 
+	// MCPMode enables the Model Context Protocol endpoint at /mcp: MCPOff
+	// (default), MCPRead or MCPWrite. Like every other path it forwards the
+	// caller's bearer per request and holds no credentials of its own.
+	MCPMode string
+
 	LogLevel  string // debug|info|warn|error
 	LogFormat string // text|json
 }
@@ -264,6 +280,7 @@ func Load(args []string) (*Config, error) {
 		ExecIdleTimeout:          15 * time.Minute,
 		LogLevel:                 envOr(envLogLevel, "info"),
 		LogFormat:                envOr(envLogFormat, "text"),
+		MCPMode:                  envOr(envMCP, MCPOff),
 	}
 
 	fs := flag.NewFlagSet("kube-console", flag.ContinueOnError)
@@ -285,6 +302,7 @@ func Load(args []string) (*Config, error) {
 	proxies := fs.String("trusted-proxies", strings.Join(cfg.TrustedProxies, ","), "comma-separated CIDRs of reverse proxies whose X-Forwarded-For may be trusted for the client IP")
 	fs.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: debug|info|warn|error")
 	fs.StringVar(&cfg.LogFormat, "log-format", cfg.LogFormat, "log format: text|json")
+	fs.StringVar(&cfg.MCPMode, "mcp", cfg.MCPMode, "MCP endpoint at /mcp: off|read|write (write adds mutating tools, which dry-run unless committed)")
 	showVersion := fs.Bool("version", false, "print the build version and exit")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -357,6 +375,13 @@ func (c *Config) validate() error {
 	}
 	if c.MaxInFlight > maxConcurrencyLimit {
 		return fmt.Errorf("max in-flight must be <= %d, got %d", maxConcurrencyLimit, c.MaxInFlight)
+	}
+	// Anything outside the three modes is an error, never a silent off or a
+	// silent write.
+	switch c.MCPMode {
+	case MCPOff, MCPRead, MCPWrite:
+	default:
+		return fmt.Errorf("invalid MCP mode %q: must be %s, %s or %s", c.MCPMode, MCPOff, MCPRead, MCPWrite)
 	}
 	// The cluster name is rendered into document.title. The SPA assigns it as
 	// text (no markup path), so this is not an escaping guard — it keeps a

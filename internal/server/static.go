@@ -12,7 +12,12 @@ import (
 // apiPrefixes are path roots that must never fall back to index.html: they
 // answer with JSON errors so that, e.g., a blocked gateway path can never look
 // like a successful HTML 200.
-var apiPrefixes = []string{"/k8s", "/api", "/healthz", "/readyz"}
+//
+// mcpPath is here even when the endpoint is off, so a client probing it gets a
+// 404 rather than an HTML 200. So is /.well-known: an MCP client that receives
+// a 401 probes /.well-known/oauth-protected-resource for an authorization
+// server, and an HTML 200 there is a malformed answer rather than "none".
+var apiPrefixes = []string{"/k8s", "/api", "/healthz", "/readyz", mcpPath, "/.well-known"}
 
 // spaHandler serves the embedded SPA: hashed assets with immutable caching,
 // index.html (no-store) as the fallback for client-side routes.

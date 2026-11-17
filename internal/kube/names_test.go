@@ -51,3 +51,47 @@ func TestIsDNS1123Subdomain(t *testing.T) {
 		})
 	}
 }
+
+// IsDNS1123Label gates namespaces and container names (exec) and namespaces and
+// resource names (MCP); like the subdomain gate above, every caller splices the
+// value into an upstream path.
+func TestIsDNS1123Label(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"", false},
+		{"a", true},
+		{"kube-system", true},
+		{"pods", true},
+		{"metrics.k8s.io", false},
+		{"-a", false},
+		{"a-", false},
+		{"A", false},
+		{"a_b", false},
+		{"a/b", false},
+		{"..", false},
+		{"%2f", false},
+		{strings.Repeat("a", 63), true},
+		{strings.Repeat("a", 64), false},
+	}
+	for _, tc := range cases {
+		if got := IsDNS1123Label(tc.in); got != tc.want {
+			t.Errorf("IsDNS1123Label(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// IsAPIVersion gates the version segment of an upstream path (metrics, MCP).
+func TestIsAPIVersion(t *testing.T) {
+	for _, ok := range []string{"v1", "v2", "v1beta1", "v2alpha3", "v10"} {
+		if !IsAPIVersion(ok) {
+			t.Errorf("IsAPIVersion(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{"", "1", "V1", "v", "v1beta", "v1gamma1", "v1/", "v1 ", "..", "v1%2f", "apps/v1"} {
+		if IsAPIVersion(bad) {
+			t.Errorf("IsAPIVersion(%q) = true, want false", bad)
+		}
+	}
+}

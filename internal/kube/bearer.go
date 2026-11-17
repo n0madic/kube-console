@@ -27,8 +27,14 @@ func (b *bearerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 
 // ExtractBearer returns the bearer token from an inbound request's
 // Authorization header, or "" if it is absent or not a Bearer credential.
-func ExtractBearer(r *http.Request) string {
-	auth := r.Header.Get("Authorization")
+func ExtractBearer(r *http.Request) string { return BearerFromHeader(r.Header) }
+
+// BearerFromHeader is ExtractBearer over a bare header set. It exists for the
+// MCP tool handlers, which see the inbound request's headers but not the
+// request itself; one parser keeps the two from disagreeing about what counts
+// as a bearer token.
+func BearerFromHeader(h http.Header) string {
+	auth := h.Get("Authorization")
 	if auth == "" {
 		return ""
 	}

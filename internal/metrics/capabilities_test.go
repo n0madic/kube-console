@@ -212,6 +212,13 @@ func TestPodMetricsForbiddenPassthrough(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil || status["reason"] != "Forbidden" {
 		t.Fatalf("expected Status passthrough, got %q", rec.Body.String())
 	}
+	// Forwarded verbatim, but never cacheable: it describes one token's access.
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want the upstream's", got)
+	}
 }
 
 func TestPodMetricsEmptyListSerializesAsArray(t *testing.T) {

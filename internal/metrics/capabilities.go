@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"regexp"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -19,11 +18,10 @@ import (
 const metricsGroup = "metrics.k8s.io"
 const metricsGroupPath = "/apis/" + metricsGroup
 
-// versionRe matches an API version name ("v1", "v1beta1", "v2alpha1"). It is
-// the only shape allowed into the upstream path built in Handler.fetch.
-var versionRe = regexp.MustCompile(`^v[0-9]+((alpha|beta)[0-9]+)?$`)
-
-func validVersion(v string) bool { return versionRe.MatchString(v) }
+// validVersion is the only shape allowed into the upstream path built in
+// Handler.fetch: an API version name (kube.IsAPIVersion), since the version
+// comes from discovery, i.e. from the upstream.
+func validVersion(v string) bool { return kube.IsAPIVersion(v) }
 
 // Capability states distinguished by the UI.
 const (

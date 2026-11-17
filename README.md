@@ -69,6 +69,10 @@ authorization model of its own.
   already failed for good (Evicted, finished Jobs) drop off after a few hours
   so the table cannot turn into permanent noise.
 - **Multi-cluster switcher** with a per-cluster session and dark/light theme.
+- **AI agent access over MCP** (opt-in): a [Model Context Protocol](#ai-agents-mcp)
+  endpoint with read tools (resources, YAML, logs, events, `top`) and, if you
+  enable them, write tools that are dry runs until the agent commits — under the
+  same bearer-token and RBAC model as the UI.
 
 ## Security model
 
@@ -238,12 +242,13 @@ Flags take precedence over environment variables.
 | `--cluster-name` | `KUBE_CONSOLE_CLUSTER_NAME` | — | display name of the cluster, shown in the browser page title and at the top of the sidebar; applies to every context (see below) |
 | `--listen` | `KUBE_CONSOLE_LISTEN_ADDR` | `:8080` | listen address |
 | `--metrics-disable` | `KUBE_CONSOLE_METRICS_DISABLE` | `false` | disable the Metrics Server adapter |
+| `--mcp` | `KUBE_CONSOLE_MCP` | `off` | MCP endpoint at `/mcp` for AI agents: `off\|read\|write` (see [AI agents (MCP)](#ai-agents-mcp)) |
 | `--exec-disable` | `KUBE_CONSOLE_EXEC_DISABLE` | `false` | disable the exec WebSocket bridge |
 | `--max-exec-sessions` | `KUBE_CONSOLE_MAX_EXEC_SESSIONS` | `10` | concurrent exec session limit (counted after a connection authenticates) |
 | `--max-exec-handshakes-per-ip` | `KUBE_CONSOLE_MAX_EXEC_HANDSHAKES_PER_IP` | `0` (off) | unauthenticated exec WebSocket connections per client IP; only meaningful when clients have distinct addresses |
 | `--allowed-origins` | `KUBE_CONSOLE_ALLOWED_ORIGINS` | — | extra origins for the exec WebSocket (dev) |
-| `--max-body-bytes` | `KUBE_CONSOLE_MAX_BODY_BYTES` | `4194304` | request body cap for `/k8s/*` |
-| `--rate-limit` | `KUBE_CONSOLE_RATE_LIMIT` | `0` (off) | per-client requests per minute across `/k8s/*` and `/api/ui/*`; only meaningful when clients have distinct addresses |
+| `--max-body-bytes` | `KUBE_CONSOLE_MAX_BODY_BYTES` | `4194304` | request body cap for `/k8s/*` and `/mcp` |
+| `--rate-limit` | `KUBE_CONSOLE_RATE_LIMIT` | `0` (off) | per-client requests per minute across `/k8s/*`, `/api/ui/*` and `/mcp`; only meaningful when clients have distinct addresses |
 | `--max-in-flight` | `KUBE_CONSOLE_MAX_IN_FLIGHT` | `128` | concurrent non-streaming upstream requests, all clients; watches/log follows/exec get a separate pool 8x this size; `0` disables both |
 | `--trusted-proxies` | `KUBE_CONSOLE_TRUSTED_PROXIES` | — | CIDRs of reverse proxies whose `X-Forwarded-For` may set the client IP (honored only for connections arriving from them) |
 | `--log-level` | `KUBE_CONSOLE_LOG_LEVEL` | `info` | `debug\|info\|warn\|error` |
@@ -355,6 +360,126 @@ came from — it's still marked "signed in" and needs no token.
 A single context (including `--api-server` and in-cluster mode, which
 synthesize one `default` context) hides the switcher entirely.
 
+## AI agents (MCP)
+
+kube-console can serve the same cluster to an AI agent over the
+[Model Context Protocol](https://modelcontextprotocol.io), at `POST /mcp`. It is
+**off by default**; enable it with `--mcp=read` or `--mcp=write` (env
+`KUBE_CONSOLE_MCP`, Helm `mcp.mode`).
+
+Only protocol revision **2026-07-28** is served, which is stateless: no
+`initialize` handshake, no session, no server-sent event stream — every call is
+one self-contained POST, so any replica can answer it. A client still speaking
+an earlier revision gets `400`.
+
+### Authentication and cluster selection
+
+Exactly like the UI: each request carries its own `Authorization: Bearer`
+token, kube-console forwards it to the apiserver and RBAC decides what
+succeeds. The cluster is chosen by the `X-Kube-Context` header (omitted: the
+default context). Neither is a tool argument, so one client entry is one
+cluster and one identity, and a model cannot switch either.
+
+Give the agent a **dedicated, short-lived token with the least RBAC it
+needs** — for read-only use, the built-in `view` ClusterRole (which, among
+other things, cannot read Secrets):
+
+```bash
+kubectl create serviceaccount ai-agent -n kube-console
+kubectl create clusterrolebinding ai-agent-view --clusterrole=view \
+  --serviceaccount=kube-console:ai-agent
+kubectl create token ai-agent -n kube-console --duration=8h
+```
+
+Then register the endpoint with your MCP client as a Streamable HTTP server
+with those two headers, for example in a `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "kube-prod": {
+      "type": "http",
+      "url": "https://kube-console.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${KUBE_PROD_TOKEN}",
+        "X-Kube-Context": "prod"
+      }
+    }
+  }
+}
+```
+
+Under [`--use-kubeconfig-credentials`](#local-development-without-a-token---use-kubeconfig-credentials)
+no token is needed: the agent acts as the kubeconfig owner, like the UI does in
+that mode, and `--mcp=write` adds a startup `WARN` saying so.
+
+If kube-console sits behind an authenticating proxy, that proxy must let `/mcp`
+through with the `Authorization` header intact — a proxy that authenticates
+with its own `Authorization` (or a browser cookie) leaves the agent no way to
+present a Kubernetes token.
+
+### Tools
+
+| Tool | Mode | What it does |
+|---|---|---|
+| `whoami` | read | the identity the token maps to, and the context in use |
+| `list_api_resources` | read | resource types with the `apiVersion` + plural `resource` every other tool takes |
+| `list_resources` | read | `kubectl get`-style columns, paged (`limit` ≤ 500, `continue`), label/field selectors |
+| `get_resource` | read | one object as YAML |
+| `get_pod_logs` | read | recent log lines (≤ 2000 lines, ≤ 256 KiB), `previous` for the last crashed instance; never follows |
+| `list_events` | read | newest events, optionally for one involved object |
+| `top` | read | CPU/memory of pods or nodes from Metrics Server; absent with `--metrics-disable` |
+| `apply_manifest` | write | server-side apply of one object; `force` only on request |
+| `delete_resource` | write | delete one object (dependents in the background) |
+| `scale` | write | set replicas through the `scale` subresource |
+| `rollout_restart` | write | restart a Deployment/StatefulSet/DaemonSet like `kubectl rollout restart` |
+
+Write tools are registered only in `write` mode, so a `read` endpoint does not
+even list them.
+
+### What the endpoint does and does not do
+
+- **Token passthrough is deliberate.** The MCP security guidance tells servers
+  not to forward the client's token upstream; kube-console does exactly that,
+  because the apiserver being the only authority — and the backend holding no
+  credentials — is the whole design. OAuth for MCP is not implemented. The
+  consequence is that the agent holds a real Kubernetes token: scope and
+  expire it as above.
+- **Browser requests are refused.** Any request carrying an `Origin` header
+  gets `403` (agents send none), which also closes DNS rebinding against a
+  local instance.
+- **Same path policy as the gateway.** Every path a tool builds goes through
+  the `/k8s/*` policy, so `exec`, `attach`, `portforward` and `proxy` stay
+  unreachable, and there is no exec, watch or port-forward tool.
+- **Secrets stay masked.** `get_resource` replaces Secret `data`/`stringData`
+  values with their sizes and blanks the `last-applied-configuration`
+  annotation on Secrets (it holds the whole manifest, data included);
+  `managedFields` are always omitted. There is no tool
+  that reveals a Secret value, and write tools never echo the object back.
+- **Writes are dry runs until committed.** Every write tool runs with
+  `dryRun=All` unless the agent passes `commit: true`, so forgetting the
+  argument cannot change anything. Each tool's description tells the model to
+  show the dry-run result and ask before committing.
+- **Field ownership conflicts are not forced by default.** `apply_manifest`
+  applies with `fieldManager=kube-console-mcp` and no `force`, unlike the
+  YAML tab. On an object created by client-side `kubectl apply`, changing any
+  field it set returns `409` naming the owner; the agent may retry with
+  `force: true`, which takes ownership as `kubectl apply --force-conflicts`
+  does (and a GitOps controller will revert it on its next sync), and is told
+  to do so only after the user confirms.
+- **Auditable.** Upstream requests carry `User-Agent: kube-console-mcp/<version>`,
+  so the apiserver audit log tells agent actions apart from UI ones; writes are
+  owned by `kube-console-mcp` in `managedFields`. kube-console logs one line
+  per call — tool, context, outcome, duration — and never the arguments (a
+  manifest may hold Secret data) or the error text.
+- **Bounded.** `/mcp` spends the same `--rate-limit` and `--max-in-flight`
+  budgets as `/k8s/*` and `/api/ui/*`, request bodies are capped by
+  `--max-body-bytes`, and every tool bounds what it reads and returns.
+- **Tool results are untrusted text.** Logs, events, annotations and object
+  fields are written by workloads and other users and can carry instructions
+  aimed at the model; the tool descriptions say so. That cannot be filtered
+  out — the mitigation is a `read` endpoint, a `view` token and dry runs.
+
 ## Known limitations
 
 - Objects or resources literally named `exec`, `attach`, `portforward` or
@@ -369,6 +494,8 @@ synthesize one `default` context) hides the switcher entirely.
   objects) so client-side sorting covers everything, like
   `kubectl --sort-by`; beyond the cap, pagination is forward-only and "back"
   restarts from the start.
+- The MCP endpoint speaks protocol revision 2026-07-28 only and has no OAuth;
+  `list_events` picks the newest events from one page of 500.
 - Requires Kubernetes ≥ 1.28 (SelfSubjectReview v1). Aggregated discovery
   uses v2 with automatic fallback to legacy discovery for older clusters.
 

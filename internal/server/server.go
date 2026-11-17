@@ -68,6 +68,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, version s
 		// even if an upstream URL ever reaches it another way.
 		"upstream", registry.Default().BaseURL.Redacted(),
 		"version", version,
+		"mcp", cfg.MCPMode,
 	)
 	if cfg.UseKubeconfigCredentials {
 		// The zero-credential invariant is off. Say so loudly and in full: from
@@ -79,6 +80,13 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, version s
 			"addr", cfg.ListenAddr,
 			"contexts", len(registry.Names()),
 			"warning", "every request to this loopback address acts as the kubeconfig owner")
+	}
+	if cfg.MCPMode == config.MCPWrite && registry.UsesConfigCredentials() {
+		// Write tools dry-run unless a call commits, but a committing call here
+		// mutates the cluster as the kubeconfig owner, driven by whatever text
+		// the agent's model has read — log lines and annotations included.
+		logger.Warn("MCP write tools run with kubeconfig credentials",
+			"warning", "an agent on this machine can mutate every context as the kubeconfig owner")
 	}
 	// The IP-keyed limits are opt-in, so state what is actually in force
 	// instead of leaving an operator to infer it from the absence of 429s.

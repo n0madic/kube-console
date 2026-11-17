@@ -56,6 +56,9 @@ func TestSPANeverFallsBackForAPIPaths(t *testing.T) {
 	for _, p := range []string{
 		"/k8s/api/v1/pods", "/api/ui/discovery", "/k8s", "/api",
 		"//api/ui/discovery", "//k8s/api/v1/pods", "/k8s/../k8s/api", "/api/ui/./contexts",
+		// The MCP endpoint when it is off, and the OAuth discovery an MCP
+		// client tries after a 401: an HTML 200 is a malformed answer there.
+		"/mcp", "/.well-known/oauth-protected-resource", "/.well-known/oauth-authorization-server",
 	} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))

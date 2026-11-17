@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -154,11 +155,70 @@ func (h *Handler) Node(w http.ResponseWriter, r *http.Request) {
 	h.serveSingle(w, r, "/nodes/"+url.PathEscape(name), false)
 }
 
+// Error is a metrics request that did not produce data. Code and Reason are
+// the HTTP status to answer with; Body, when set, is the upstream's own error
+// body (a Kubernetes Status), forwarded verbatim by the HTTP handlers so the
+// SPA sees the apiserver's answer, while Message is kube-console's own text
+// for failures it decided itself (disabled, not installed, unreachable).
+type Error struct {
+	Code        int
+	Reason      string
+	Message     string
+	Body        []byte
+	ContentType string
+}
+
+func (e *Error) Error() string { return e.Text() }
+
+// Text is the human-readable message: kube-console's own, or the Status
+// message out of the upstream body.
+func (e *Error) Text() string {
+	if e.Body != nil {
+		var status struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(e.Body, &status) == nil && status.Message != "" {
+			return status.Message
+		}
+		return http.StatusText(e.Code)
+	}
+	return e.Message
+}
+
+// maxErrorBodyBytes bounds a forwarded upstream error body, as
+// httpx.CopyUpstreamError did when the handlers forwarded it themselves.
+const maxErrorBodyBytes = 256 << 10
+
+var errDisabled = &Error{Code: http.StatusNotFound, Reason: "NotFound", Message: "metrics adapter is disabled"}
+
+func errUnexpected() *Error {
+	return &Error{Code: http.StatusBadGateway, Reason: "ServiceUnavailable", Message: "unexpected metrics response"}
+}
+
+// writeError answers an HTTP request with err, an *Error from List or Get.
+func writeError(w http.ResponseWriter, err error) {
+	var e *Error
+	if !errors.As(err, &e) {
+		e = errUnexpected()
+	}
+	if e.Body == nil {
+		httpx.WriteError(w, e.Code, e.Reason, e.Message)
+		return
+	}
+	ct := e.ContentType
+	if ct == "" {
+		ct = "application/json"
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(e.Code)
+	_, _ = w.Write(e.Body)
+}
+
 // fetch resolves the metrics API version via discovery (per request, on
-// behalf of the user), then performs the metrics request. It returns the
-// upstream response or writes an error/capability status itself (ok=false).
-// ctx bounds the upstream calls; the caller keeps it alive until the response
-// body is fully consumed.
+// behalf of the user), then performs the metrics request and returns the 200
+// response, or an *Error. ctx bounds the upstream calls; the caller keeps it
+// alive until the response body is fully consumed.
 //
 // collection says whether subPath addresses a collection. It decides whether a
 // 404 may retire the cached group version: metrics-server always answers a
@@ -167,45 +227,32 @@ func (h *Handler) Node(w http.ResponseWriter, r *http.Request) {
 // and treating it as a version failure would evict a cluster-global, per-context
 // cache every 15s for the first minute of every new pod, for every user of that
 // context.
-func (h *Handler) fetch(ctx context.Context, w http.ResponseWriter, r *http.Request, subPath string, collection bool) (*http.Response, bool) {
+func (h *Handler) fetch(ctx context.Context, up *kube.Upstream, contextName, token, subPath string, collection bool) (*http.Response, error) {
 	if !h.enabled {
-		httpx.WriteError(w, http.StatusNotFound, "NotFound", "metrics adapter is disabled")
-		return nil, false
-	}
-	token, ok := h.registry.RequireToken(w, r)
-	if !ok {
-		return nil, false
-	}
-	up, contextName, ok := h.registry.ResolveRequest(w, r)
-	if !ok {
-		return nil, false
+		return nil, errDisabled
 	}
 
 	// Resolve the metrics API version. A short-lived per-context cache of the
 	// cluster-global version avoids a capability probe on every data request; on
 	// a cache miss we probe once (which also surfaces not-installed/forbidden
 	// cleanly). On a cache hit an actual not-installed/forbidden state is still
-	// reflected by the data request's own status, forwarded via CopyUpstreamError.
+	// reflected by the data request's own status, forwarded verbatim.
 	version := h.cachedGroupVersion(contextName)
 	if version == "" {
 		caps, errCode := probeCapabilities(ctx, up, token)
 		if errCode == http.StatusUnauthorized {
-			httpx.WriteError(w, http.StatusUnauthorized, "Unauthorized", "invalid or expired token")
-			return nil, false
+			return nil, &Error{Code: http.StatusUnauthorized, Reason: "Unauthorized", Message: "invalid or expired token"}
 		}
 		switch caps.State {
 		case StateAvailable:
 			version = caps.Version
 			h.cacheGroupVersion(contextName, version)
 		case StateNotInstalled:
-			httpx.WriteError(w, http.StatusNotFound, "NotFound", "metrics.k8s.io is not installed")
-			return nil, false
+			return nil, &Error{Code: http.StatusNotFound, Reason: "NotFound", Message: "metrics.k8s.io is not installed"}
 		case StateForbidden:
-			httpx.WriteError(w, http.StatusForbidden, "Forbidden", "access to metrics.k8s.io is forbidden")
-			return nil, false
+			return nil, &Error{Code: http.StatusForbidden, Reason: "Forbidden", Message: "access to metrics.k8s.io is forbidden"}
 		default:
-			httpx.WriteError(w, http.StatusServiceUnavailable, "ServiceUnavailable", "metrics.k8s.io is unavailable")
-			return nil, false
+			return nil, &Error{Code: http.StatusServiceUnavailable, Reason: "ServiceUnavailable", Message: "metrics.k8s.io is unavailable"}
 		}
 	}
 
@@ -214,8 +261,7 @@ func (h *Handler) fetch(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	resp, err := kube.Do(ctx, up, token, http.MethodGet,
 		metricsGroupPath+"/"+version+subPath, header, nil)
 	if err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "ServiceUnavailable", "metrics.k8s.io is unreachable")
-		return nil, false
+		return nil, &Error{Code: http.StatusServiceUnavailable, Reason: "ServiceUnavailable", Message: "metrics.k8s.io is unreachable"}
 	}
 	if resp.StatusCode != http.StatusOK {
 		// Pass 403/404/503 (and anything else) through with the upstream body.
@@ -226,23 +272,28 @@ func (h *Handler) fetch(ctx context.Context, w http.ResponseWriter, r *http.Requ
 			(collection && resp.StatusCode == http.StatusNotFound) {
 			h.dropGroupVersion(contextName)
 		}
-		httpx.CopyUpstreamError(w, resp)
-		return nil, false
+		defer httpx.DrainAndClose(resp)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+		if body == nil {
+			body = []byte{}
+		}
+		return nil, &Error{Code: resp.StatusCode, Reason: http.StatusText(resp.StatusCode), Body: body, ContentType: resp.Header.Get("Content-Type")}
 	}
-	return resp, true
+	return resp, nil
 }
 
-func (h *Handler) serveList(w http.ResponseWriter, r *http.Request, subPath string, pods bool) {
-	ctx, cancel := context.WithTimeout(r.Context(), upstreamTimeout)
-	defer cancel() // body decode below is bounded by the same deadline
-	resp, ok := h.fetch(ctx, w, r, subPath, true)
-	if !ok {
-		return
+// List returns usage for a collection — every pod (optionally in one
+// namespace) or every node — on behalf of token. subPath is relative to the
+// metrics group version and must already be validated. Errors are *Error.
+func (h *Handler) List(ctx context.Context, up *kube.Upstream, contextName, token, subPath string, pods bool) (Response, error) {
+	resp, err := h.fetch(ctx, up, contextName, token, subPath, true)
+	if err != nil {
+		return Response{}, err
 	}
 	defer httpx.DrainAndClose(resp)
 
 	// Items is initialized non-nil so an empty result serializes as "items": []
-	// (matching serveSingle), never "items": null.
+	// (matching Get), never "items": null.
 	out := Response{Items: []Item{}}
 	var timestamps, windows []string
 	if pods {
@@ -250,8 +301,7 @@ func (h *Handler) serveList(w http.ResponseWriter, r *http.Request, subPath stri
 			Items []podMetricsItem `json:"items"`
 		}
 		if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(&list); err != nil {
-			httpx.WriteError(w, http.StatusBadGateway, "ServiceUnavailable", "unexpected metrics response")
-			return
+			return Response{}, errUnexpected()
 		}
 		for _, item := range list.Items {
 			out.Items = append(out.Items, normalizePod(item))
@@ -263,8 +313,7 @@ func (h *Handler) serveList(w http.ResponseWriter, r *http.Request, subPath stri
 			Items []nodeMetricsItem `json:"items"`
 		}
 		if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(&list); err != nil {
-			httpx.WriteError(w, http.StatusBadGateway, "ServiceUnavailable", "unexpected metrics response")
-			return
+			return Response{}, errUnexpected()
 		}
 		for _, item := range list.Items {
 			out.Items = append(out.Items, normalizeNode(item))
@@ -274,15 +323,14 @@ func (h *Handler) serveList(w http.ResponseWriter, r *http.Request, subPath stri
 	}
 	out.ObservedAt = latestTimestamp(timestamps)
 	out.WindowSeconds = maxWindowSeconds(windows)
-	httpx.WriteJSON(w, http.StatusOK, out)
+	return out, nil
 }
 
-func (h *Handler) serveSingle(w http.ResponseWriter, r *http.Request, subPath string, pod bool) {
-	ctx, cancel := context.WithTimeout(r.Context(), upstreamTimeout)
-	defer cancel() // body decode below is bounded by the same deadline
-	resp, ok := h.fetch(ctx, w, r, subPath, false)
-	if !ok {
-		return
+// Get returns usage for one pod or node; subPath as for List.
+func (h *Handler) Get(ctx context.Context, up *kube.Upstream, contextName, token, subPath string, pod bool) (Response, error) {
+	resp, err := h.fetch(ctx, up, contextName, token, subPath, false)
+	if err != nil {
+		return Response{}, err
 	}
 	defer httpx.DrainAndClose(resp)
 
@@ -290,8 +338,7 @@ func (h *Handler) serveSingle(w http.ResponseWriter, r *http.Request, subPath st
 	if pod {
 		var item podMetricsItem
 		if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&item); err != nil {
-			httpx.WriteError(w, http.StatusBadGateway, "ServiceUnavailable", "unexpected metrics response")
-			return
+			return Response{}, errUnexpected()
 		}
 		out.Items = []Item{normalizePod(item)}
 		out.ObservedAt = item.Timestamp
@@ -299,12 +346,48 @@ func (h *Handler) serveSingle(w http.ResponseWriter, r *http.Request, subPath st
 	} else {
 		var item nodeMetricsItem
 		if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&item); err != nil {
-			httpx.WriteError(w, http.StatusBadGateway, "ServiceUnavailable", "unexpected metrics response")
-			return
+			return Response{}, errUnexpected()
 		}
 		out.Items = []Item{normalizeNode(item)}
 		out.ObservedAt = item.Timestamp
 		out.WindowSeconds = parseWindowSeconds(item.Window)
 	}
+	return out, nil
+}
+
+// serve is the HTTP wrapper around List and Get: the disabled check first (no
+// token needed to learn the adapter is off), then the caller, then the core.
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, query func(ctx context.Context, up *kube.Upstream, contextName, token string) (Response, error)) {
+	if !h.enabled {
+		writeError(w, errDisabled)
+		return
+	}
+	token, ok := h.registry.RequireToken(w, r)
+	if !ok {
+		return
+	}
+	up, contextName, ok := h.registry.ResolveRequest(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), upstreamTimeout)
+	defer cancel()
+	out, err := query(ctx, up, contextName, token)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+func (h *Handler) serveList(w http.ResponseWriter, r *http.Request, subPath string, pods bool) {
+	h.serve(w, r, func(ctx context.Context, up *kube.Upstream, contextName, token string) (Response, error) {
+		return h.List(ctx, up, contextName, token, subPath, pods)
+	})
+}
+
+func (h *Handler) serveSingle(w http.ResponseWriter, r *http.Request, subPath string, pod bool) {
+	h.serve(w, r, func(ctx context.Context, up *kube.Upstream, contextName, token string) (Response, error) {
+		return h.Get(ctx, up, contextName, token, subPath, pod)
+	})
 }

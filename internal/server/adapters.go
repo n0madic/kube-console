@@ -24,14 +24,15 @@ const (
 
 // registerUI mounts the /api/ui/* adapter endpoints (contexts, auth verify,
 // discovery, metrics, exec). Every adapter resolves the target cluster from the
-// X-Kube-Context header per request via the shared registry.
-func registerUI(ui chi.Router, d Deps) {
+// X-Kube-Context header per request via the shared registry. m is the metrics
+// adapter, built by the caller because the MCP endpoint shares it: one
+// per-context metrics.k8s.io version cache, not two drifting apart.
+func registerUI(ui chi.Router, d Deps, m *metrics.Handler) {
 	ui.Method("GET", "/contexts", handleContexts(d.Registry, d.Cfg.ClusterName, d.Version, d.Logger))
 	ui.Method("GET", "/auth/mode", handleAuthMode(d.Registry))
 	ui.Method("POST", "/auth/verify", auth.NewHandler(d.Registry, d.Logger))
 	ui.Method("GET", "/discovery", discovery.NewHandler(d.Registry, d.Logger))
 
-	m := metrics.NewHandler(d.Registry, d.Cfg.MetricsEnabled)
 	ui.Get("/metrics/capabilities", m.Capabilities)
 	ui.Get("/metrics/pods", m.Pods)
 	ui.Get("/metrics/pods/{namespace}/{name}", m.Pod)

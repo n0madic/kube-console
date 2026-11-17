@@ -324,8 +324,9 @@ hop is theirs). Hence the abuse limits:
   failure, a probe that only wants the status — must drain before `Close` or
   net/http cannot pool the connection, and that drain is **bounded** in exactly
   one place: `httpx.DrainAndClose` (64 KiB, `internal/httpx/drain.go`), used by
-  `CopyUpstreamError`, `auth.VerifyToken`, discovery's `getJSON`, both metrics
-  paths and the readiness probe. Unbounded, the size of that courtesy was the
+  `auth.VerifyToken`, discovery's `getJSON`, both metrics paths (the metrics
+  core's error path included, which keeps the upstream error body for the HTTP
+  handlers to forward), the MCP tools' `statusError` and the readiness probe. Unbounded, the size of that courtesy was the
   upstream's choice and was paid while holding an in-flight slot. The bound is far
   above any `Status` or `APIGroup` body, so ordinary responses are still drained
   whole and still pool; a bigger one loses its connection instead of our time,
@@ -490,17 +491,79 @@ state, not credentials; nothing derived from a token goes there.
 
 **Kubernetes data is always rendered as escaped text** (no `v-html`).
 
+**MCP endpoint** (`internal/mcp`, `POST /mcp`, `--mcp`/`KUBE_CONSOLE_MCP`
+`off|read|write`, default `off`, Helm `mcp.mode`). Same model as everything
+else: the caller's bearer per request, no backend credentials. Forwarding the
+client's token upstream is what the MCP security guidance forbids; deliberate
+(no OAuth yet, the alternative is backend credentials) and stated in README.
+
+- **Protocol 2026-07-28 only** (go-sdk, `Stateless`, `JSONResponse`). `guard`
+  answers ahead of the SDK, in order: any `Origin` → 403 (agents send none;
+  closes DNS rebinding); non-POST → 405; `MCP-Protocol-Version` not exactly
+  `2026-07-28` → 400 — not redundant with `SupportedProtocolVersions`, since
+  the SDK serves a header-less request as 2025-03-26, batches included; no
+  bearer → 401 + `WWW-Authenticate`; unknown context → 400.
+- **Cluster and token come from headers only**, never tool arguments, so a
+  model cannot switch either; tools re-resolve them from `req.Extra.Header`
+  (`callerFrom`).
+- **Every path goes through `target.path()`/`checkedPath`** (`paths.go`):
+  `kube.IsAPIVersion`, `IsDNS1123Subdomain`/`IsDNS1123Label`, `validName` (not
+  DNS-1123 — RBAC names carry `:` — but no `/ \ %`, control chars, `.`/`..`;
+  then `PathEscape`), then **`gateway.CheckPath`**. Queries via `url.Values`.
+- **Nothing upstream reaches the model unfiltered**: `statusError` keeps the
+  Status message (an agent acts on a 403/409) and `scrub`s the token from
+  reason and message alike; transport errors become `errUnreachable`/
+  `errTimeout` (their text names the apiserver URL). `get_resource` drops
+  `managedFields`; on a v1 Secret it masks `data`/`stringData` to sizes and the
+  last-applied annotation whole (`redact.go`); no reveal tool. Write tools
+  return addressing fields only.
+- **Bounded**: reads 4 MiB object / 16 MiB list page, `limit` ≤ 500, logs ≤
+  2000 lines / 256 KiB via upstream `limitBytes`. Output ≤ 1 MiB is enforced
+  once in `addTool`/`addTextTool` — a read bound does not bound a projection
+  (CRD printer cells). A log cut at `limitBytes` loses the **newest** lines, so
+  it is trimmed to a whole line and the notice says so. `get_pod_logs` sends
+  `Accept: */*`: `text/plain` is a 406 from a real apiserver.
+- **Limits/logging/audit**: the **same** `rateLimit`/`inFlight` instances as
+  `/k8s` and `/api` (unary pool), no `AbortOnShutdown`. One `mcp tool` line per
+  call, never arguments or error text; SDK logs go through `demoteInfo`
+  (below-Warn → Debug). `User-Agent: kube-console-mcp/<version>` via a
+  **copy** of the upstream transport (`withUserAgent`), writes with
+  `fieldManager=kube-console-mcp`.
+- **Shared, not copied**: `discovery.Fetch` serves `list_api_resources`;
+  `apply_manifest`'s `resolveKind` deliberately GETs only the manifest's group
+  version (`groupVersionPath`) — a whole catalog per apply was a fan-out inside
+  the PATCH's budget. `top` uses the **one** `metrics.Handler` built in
+  `routes.go` (HTTP-free core `List`/`Get` → `*metrics.Error`, whose `Body` the
+  HTTP wrappers forward), so one version cache; registered only when enabled.
+- **Write tools** exist only in `write` mode and are dry runs (`dryRun=All`)
+  unless `commit: true` — the zero value is the safe one; `scale`'s `replicas`
+  is a pointer for the same reason (its test sends explicit `null`).
+  `apply_manifest`: exactly one document (`singleDocument` over `YAMLReader` —
+  plain unmarshal drops the second), sent as `YAMLToJSON` bytes (int64 past
+  2^53); **`force` is opt-in here while the YAML tab forces by default**
+  (owner decision: for an agent a 409 is the signal that must reach the user).
+  `delete_resource` refuses an empty name (collection DELETE) and sends
+  `propagationPolicy=Background`. `server.Run` warns for `write` +
+  `--use-kubeconfig-credentials`.
+- Tests drive a real SDK client against a recording fake apiserver
+  (`startCluster`), with sentinel token/Secret values absent from results and
+  logs.
+
 ## Architecture
 
 ### Request paths
 
 `/k8s/*` → raw constrained proxy (all CRUD/watch/Table/SSA semantics are native
 Kubernetes; no per-resource backend code) · `/api/ui/*` → small adapters
-(contexts, auth verify, discovery, metrics, exec WS) · everything else →
+(contexts, auth verify, discovery, metrics, exec WS) · `/mcp` → the MCP
+endpoint, mounted only when `--mcp` is `read`/`write` (see "MCP endpoint") ·
+everything else →
 embedded SPA (`web/embed.go`, package `web` at the repo root because go:embed
 cannot reference `../` — deliberate deviation from all-code-in-internal). The
-SPA fallback never serves HTML for `/k8s/*` or `/api/*` (JSON errors only), so
-blocked paths cannot look like 200s. The check runs on a `path.Clean`ed path
+SPA fallback never serves HTML for `/k8s/*`, `/api/*`, `/mcp` or
+`/.well-known/*` (JSON errors only — `apiPrefixes` in `static.go`), so blocked
+paths cannot look like 200s (an MCP client probes
+`/.well-known/oauth-protected-resource` after a 401). The check runs on a `path.Clean`ed path
 (`static.go`, rooted first — `Clean` only resolves `..` against a leading `/`):
 chi does not normalize, so `//api/ui/discovery` and `/api/../api/ui/discovery`
 reached the fallback as non-API paths and answered `index.html` with a 200. The
@@ -1771,9 +1834,12 @@ The backend adapter normalizes Quantities (nanocores/bytes) and passes
 capability states (`available|not-installed|forbidden|unavailable|disabled`).
 The `metrics.k8s.io` version always comes from discovery, never hardcoded, and
 it is the one upstream-supplied string that ends up **in a path**
-(`/apis/metrics.k8s.io/<version>/…`), so `versionRe` (`^v[0-9]+((alpha|beta)[0-9]+)?$`,
-`capabilities.go`) is what may enter it — the same reason namespace/name are
-checked with `kube.IsDNS1123Subdomain` in `handler.go`. That validator lives in
+(`/apis/metrics.k8s.io/<version>/…`), so `kube.IsAPIVersion`
+(`^v[0-9]+((alpha|beta)[0-9]+)?$`, `internal/kube/names.go`, called through
+`validVersion` in `capabilities.go`) is what may enter it — the same reason
+namespace/name are checked with `kube.IsDNS1123Subdomain` in `handler.go`; MCP
+and exec use these and `kube.IsDNS1123Label` too — one copy each, not a private
+regex per package. That validator lives in
 `internal/kube/names.go` because the exec auth frame's pod name
 (`exec/protocol.go`) is the same kind of gate in front of the same kind of
 interpolation, and the two used to be byte-identical copies: relaxing one breaks

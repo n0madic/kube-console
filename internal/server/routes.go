@@ -13,6 +13,8 @@ import (
 	"github.com/n0madic/kube-console/internal/gateway"
 	"github.com/n0madic/kube-console/internal/httpx"
 	"github.com/n0madic/kube-console/internal/kube"
+	"github.com/n0madic/kube-console/internal/mcp"
+	"github.com/n0madic/kube-console/internal/metrics"
 )
 
 // Deps carries everything the router needs.
@@ -33,6 +35,10 @@ type Deps struct {
 // beside their routes so the set RequestLogger demotes to Debug cannot name a
 // path this router does not serve.
 var probePaths = map[string]bool{"/healthz": true, "/readyz": true}
+
+// mcpPath is the MCP endpoint, shared with the SPA handler's apiPrefixes so a
+// disabled endpoint answers a JSON 404 rather than index.html.
+const mcpPath = "/mcp"
 
 // NewHandler builds the full HTTP handler tree.
 func NewHandler(d Deps) http.Handler {
@@ -115,6 +121,35 @@ func NewHandler(d Deps) http.Handler {
 	r.Handle("/k8s", gw)
 	r.Handle("/k8s/*", gw)
 
+	// One metrics adapter for /api/ui/metrics and the MCP top tool alike: one
+	// per-context metrics.k8s.io version cache, not two drifting apart.
+	metricsHandler := metrics.NewHandler(d.Registry, d.Cfg.MetricsEnabled)
+
+	// The MCP endpoint spends the same two limiter instances as /k8s and /api,
+	// so alternating between the three prefixes cannot spend a budget twice.
+	// Every MCP call is unary (the 2026-07-28 transport has no stream), hence
+	// no long-lived predicate and no AbortOnShutdown. Mounted only for an
+	// explicit read/write mode: an unset mode (a hand-built Config) is off,
+	// and the path then falls through to the SPA handler's JSON 404.
+	if d.Cfg.MCPMode == config.MCPRead || d.Cfg.MCPMode == config.MCPWrite {
+		opts := mcp.Options{
+			Registry:     d.Registry,
+			Mode:         d.Cfg.MCPMode,
+			Version:      d.Version,
+			MaxBodyBytes: d.Cfg.MaxBodyBytes,
+			Logger:       d.Logger,
+		}
+		// The top tool exists only while the metrics adapter does: a disabled
+		// adapter would answer every call with the same "disabled" error.
+		if d.Cfg.MetricsEnabled {
+			opts.Metrics = metricsHandler
+		}
+		mh := mcp.NewHandler(opts)
+		mh = inFlight.middleware(nil)(mh)
+		mh = rateLimit(limiter)(mh)
+		r.Handle(mcpPath, mh)
+	}
+
 	r.Route("/api", func(api chi.Router) {
 		api.Use(rateLimit(limiter))
 		api.Use(inFlight.middleware(isExecWS))
@@ -122,7 +157,7 @@ func NewHandler(d Deps) http.Handler {
 			httpx.WriteError(w, http.StatusNotFound, "NotFound", "not found")
 		})
 		api.Route("/ui", func(ui chi.Router) {
-			registerUI(ui, d)
+			registerUI(ui, d, metricsHandler)
 		})
 	})
 
